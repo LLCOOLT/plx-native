@@ -81,8 +81,15 @@ pub struct CurlVersionInfo {
 // It is LAST deliberately — a television never reaches it, so this costs the device nothing but
 // one extra failed `dlopen` in the already-fatal no-curl case, and the candidate list stays
 // ordered by "what the fleet actually answers to" first.
+//
+// The two Windows names follow it for the same reason: `libcurl-x64.dll` / `libcurl.dll` is what
+// curl's own Windows builds and vcpkg ship, `libcurl-4.dll` what MSYS2/MinGW ships (ABI major 4,
+// the same ABI as `libcurl.so.4`). A television never reaches them either.
 plx_base::dynlib! {
-    pub curl: ["libcurl.so.4", "libcurl.so.5", "libcurl.4.dylib"] {
+    pub curl: [
+        "libcurl.so.4", "libcurl.so.5", "libcurl.4.dylib",
+        "libcurl-4.dll", "libcurl-x64.dll", "libcurl.dll",
+    ] {
     fn curl_global_init(flags: c_long) -> c_int;
     fn curl_version() -> *const c_char;
     fn curl_version_info(age: c_int) -> *const CurlVersionInfo;
@@ -225,14 +232,21 @@ static CURL_FALLBACK_SERIAL: Mutex<()> = Mutex::new(());
 // optional instead of joining curl's all-or-nothing table: modern and non-OpenSSL backends do not
 // export them. The lock array is process-lifetime storage because the callback is process-global
 // and neither libcurl nor its dependency is closed.
-struct LegacyMutex(UnsafeCell<MaybeUninit<libc::pthread_mutex_t>>);
+//
+// `pthread` is `libc` on unix; on Windows the same calls over SRWLOCK (`plx_base::task::pthread`).
+#[cfg(unix)]
+use libc as pthread;
+#[cfg(windows)]
+use plx_base::task::pthread;
+
+struct LegacyMutex(UnsafeCell<MaybeUninit<pthread::pthread_mutex_t>>);
 
 impl LegacyMutex {
     fn uninit() -> Self {
         Self(UnsafeCell::new(MaybeUninit::uninit()))
     }
 
-    fn as_mut_ptr(&self) -> *mut libc::pthread_mutex_t {
+    fn as_mut_ptr(&self) -> *mut pthread::pthread_mutex_t {
         unsafe { (*self.0.get()).as_mut_ptr() }
     }
 }
@@ -256,14 +270,14 @@ enum LegacyCrypto {
     Missing,
 }
 
-unsafe fn apply_legacy_crypto_lock(lock: *mut libc::pthread_mutex_t, mode: c_int) {
+unsafe fn apply_legacy_crypto_lock(lock: *mut pthread::pthread_mutex_t, mode: c_int) {
     if lock.is_null() {
         return;
     }
     if mode & 1 != 0 {
-        libc::pthread_mutex_lock(lock);
+        pthread::pthread_mutex_lock(lock);
     } else {
-        libc::pthread_mutex_unlock(lock);
+        pthread::pthread_mutex_unlock(lock);
     }
 }
 
@@ -351,10 +365,10 @@ fn setup_legacy_crypto_locks(soname: &'static str) -> LegacyCrypto {
             .into_boxed_slice();
         let mut initialised = 0usize;
         for lock in &locks {
-            let rc = unsafe { libc::pthread_mutex_init(lock.as_mut_ptr(), ptr::null()) };
+            let rc = unsafe { pthread::pthread_mutex_init(lock.as_mut_ptr(), ptr::null()) };
             if rc != 0 {
                 for old in &locks[..initialised] {
-                    unsafe { libc::pthread_mutex_destroy(old.as_mut_ptr()) };
+                    unsafe { pthread::pthread_mutex_destroy(old.as_mut_ptr()) };
                 }
                 return LegacyCrypto::Missing;
             }
@@ -365,13 +379,13 @@ fn setup_legacy_crypto_locks(soname: &'static str) -> LegacyCrypto {
         // no competing initializer, but coexistence costs nothing to check here.
         if unsafe { get() }.is_some() {
             for lock in &locks {
-                unsafe { libc::pthread_mutex_destroy(lock.as_mut_ptr()) };
+                unsafe { pthread::pthread_mutex_destroy(lock.as_mut_ptr()) };
             }
             return LegacyCrypto::Existing;
         }
         if let Err(locks) = LEGACY_CRYPTO_LOCKS.set(locks) {
             for lock in &locks {
-                unsafe { libc::pthread_mutex_destroy(lock.as_mut_ptr()) };
+                unsafe { pthread::pthread_mutex_destroy(lock.as_mut_ptr()) };
             }
             return LegacyCrypto::Missing;
         }
