@@ -423,8 +423,8 @@ mod tests {
         entered.wait();
         let mutex = unsafe { ptr::addr_of_mut!((*(q_addr as *mut AuQueue)).m) };
         assert_eq!(
-            unsafe { libc::pthread_mutex_trylock(mutex) },
-            libc::EBUSY,
+            unsafe { pt::pthread_mutex_trylock(mutex) },
+            pt::EBUSY,
             "the publication closure must own the abort mutex",
         );
         release.wait();

@@ -11,26 +11,24 @@ It is **not a new build of the app**. It is `--features hostsim` — the desktop
 (`docs/…`/`rust-modules/src/bin/sim.rs`, and the `ui-sim` skill) — with the dev features off and a
 bundle around it. Every UI change, every Plex data-layer change, is the same code the ipk ships.
 
-## What it can do, and the one thing it cannot
+## What it can do
 
 **Can:** sign in with the real plex.tv QR flow, discover the account's servers, browse Home, the
 libraries, Search, detail pages, seasons, episodes, cast, the who's-watching picker, watched state
 — against a real Plex Media Server that advertises a usable HTTPS origin. It persists the session
 and comes back signed in.
 
-**Cannot: play video.** The decode path is LG's in-process `StarfishMediaAPIs` bound to the
-hardware video plane via ACB — 29 symbols that exist on a television and nowhere else.
-`player/ffi_host.rs` reports the same failure a firmware with no usable video path reports, so
-**Play lands on the app's real full-screen failure read-out** rather than hanging. That was already
-the simulator's contract; the bundle inherits it. A Mac playback backend would be a new media
-engine, not a packaging change.
+**Plays video and sound, since 2026-10-10.** `player::desk` decodes with the bundle's own FFmpeg
+(VideoToolbox for the picture), composites the picture under the UI and clocks off the sound card.
+Until then this section said the bundle could not, because the television's decode path is LG's
+`StarfishMediaAPIs` and nothing on a Mac answered the sink's verbs; `player::desk` is that answer.
+It says nothing about LG's decoder.
 
 Browsing is not LAN-only: the same `http.rs` control façade runs here through `net.rs`/libcurl for
 HTTPS PMS control. The plaintext transport remains in the shared core; the distributable host build has developer
 triggers disabled, so authenticated requests use it only under the same consented home-network
 grant as the television (`plex::grant`). The HTTPS
-media path is also present structurally (`curlio.rs`), but playback still ends at the host FFI seam
-described above because macOS has no Starfish/ACB decoder backend.
+media path (`curlio.rs`) feeds the same demuxer, and the desktop decoder plays what it demuxes.
 
 ## What had to change for it to work at all
 
@@ -69,11 +67,10 @@ Four things, and three of them were bugs that had been sitting in the tree unrea
    recipe are untouched.
 
 The window changed too, though that is taste rather than a bug: it opens at an exact integer
-divisor of the 1920x1080 canvas (`app.rs`'s `desktop_window_size`) with ALLOW_HIGHDPI, and is not
-resizable. On a Retina display that means a 960x540-point window with a **1920x1080 drawable** —
+divisor of the 1920x1080 canvas (`app.rs`'s `desktop_window_size`) with ALLOW_HIGHDPI, and can be resized. On a Retina display that means a 960x540-point window with a **1920x1080 drawable** —
 `surface::scale() == 1.0`, the same 1:1 texel contract the television renders under, which is what
 keeps the text as crisp as it is on the panel. A non-Retina 1080p display gets 960x540 at scale
-0.5 instead; a 1:1 surface there would need real fullscreen, which no key currently toggles.
+0.5 instead; Ctrl+Cmd+F (F11 elsewhere) toggles desktop fullscreen, which gives it a 1:1 surface.
 
 ## Bundling: the three traps
 
@@ -98,7 +95,7 @@ recipient does **right-click → Open** once, or clears the quarantine attribute
 `docs/macos-app-readme.md` is the note that ships beside the zip and says so in their words. Real
 notarisation needs a paid Developer ID; nothing else about the bundle would change.
 
-**Apple Silicon only.** The binary is built for the host architecture and the bundled libraries
-come from that Homebrew prefix, so an Intel Mac needs the whole thing rebuilt on (or cross-built
-for) x86-64, with an x86-64 Homebrew to take the dylibs from. `lipo` cannot fix this after the
-fact — there is no second set of libraries to fatten with.
+**One build per architecture.** The binary is built for the host architecture and the bundled
+libraries come from that Homebrew prefix, so CI (`.github/workflows/desktop.yml`) builds `arm64`
+and `x86_64` on native runners, each from its own Homebrew. `lipo` still cannot merge them after
+the fact into one download without fattening every bundled library too.

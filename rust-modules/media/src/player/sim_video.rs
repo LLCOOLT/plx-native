@@ -5,7 +5,8 @@
 //! hardware video plane and our transparent UI plane.
 //!
 //! **Why it exists.** The documentation's player figure has to show a real picture under the real
-//! HUD, and the simulator otherwise shows the HUD over black (`ffi_host.rs`: nothing decodes). It
+//! HUD, and under the clock sink the simulator otherwise shows the HUD over black (the clock sink
+//! decodes nothing; without it, `player::desk` draws the real picture). It
 //! is a screenshot facility, nothing more: every number the clock sink's module doc disowns stays
 //! disowned, and nothing here says anything about LG's decoder.
 //!

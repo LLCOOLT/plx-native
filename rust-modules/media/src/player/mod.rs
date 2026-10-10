@@ -82,9 +82,9 @@ fn sink() -> &'static dyn plx_platform::tv::sink::VideoSink {
 /// It exists for the same reason `/tmp/plxnative-personbio` does, and the shape of the problem is
 /// identical: the data comes from a source no automated or host run can reach, so without a seed
 /// every headless look at the screen shows the degenerate state. Here the source is the DEMUXER —
-/// `ff::track_names` publishes these when it opens a part — and the desktop simulator has no
-/// demuxer at all (the bundled FFmpeg is ARM, and `player::ffi_host` has no video path), so
-/// the picker there can only ever draw what PMS sent. Which, for the MP4 this exists to fix, is a
+/// `ff::track_names` publishes these when it opens a part — and a desktop
+/// simulator without the host FFmpeg has no demuxer at all, so the picker there can only ever
+/// draw what PMS sent. Which, for the MP4 this exists to fix, is a
 /// column of identical language names.
 ///
 /// Pipe-separated within a list, `;` between the two lists, audio first:

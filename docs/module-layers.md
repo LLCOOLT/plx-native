@@ -329,8 +329,9 @@ still webOS's. Three things were left; the second has landed:
    module. It logs `desktop:` and `desktop-caps:` where the webOS port logs `webos:`, `devjail:`
    and `webos-caps:`. The SDL/GL framebuffer report both ports print is
    `plx_gfx::gfx::log_framebuffer_bits`, and the `dvcaps0`/`dvcaps1` override both honour is
-   `devcaps::dv::forced`. What remains of this item is the neutral shapes: `tv::secure::Backend`
-   names the two webOS key managers and is part of the on-disk envelope, `tv::device`'s identity
+   `devcaps::dv::forced`. `tv::secure::Backend` is part of the on-disk envelope and names each platform's store: the two
+   webOS key managers, `MacKeychain` and `WinDpapi`. What remains of this item is the neutral
+   shapes: `tv::device`'s identity
    is a television's (firmware release, codename, model, board), and `tv::sandbox`'s verdict and
    repair describe webOS's own device jail.
 3. **The webOS facts the gate cannot see.** The gate sees names, not literals, and not modules
