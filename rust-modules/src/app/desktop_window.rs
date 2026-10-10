@@ -10,6 +10,7 @@ extern "C" {
     fn SDL_SetWindowFullscreen(win: *mut c_void, flags: u32) -> c_int;
     fn SDL_SetWindowMinimumSize(win: *mut c_void, w: c_int, h: c_int);
     fn SDL_EnableScreenSaver();
+    fn SDL_DisableScreenSaver();
 }
 
 /// `SDL_WINDOWEVENT`: resized, moved to another display, entered or left fullscreen.
@@ -41,6 +42,22 @@ const MIN_H: c_int = 270;
 pub(crate) unsafe fn configure(win: *mut c_void) {
     SDL_SetWindowMinimumSize(win, MIN_W, MIN_H);
     SDL_EnableScreenSaver();
+}
+
+/// Hold the display awake while a video plays, and let it sleep again once it stops or pauses.
+/// Called every frame; the SDL call happens only when the answer changes.
+pub(crate) fn keep_display_awake(playing: bool) {
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    static AWAKE: AtomicBool = AtomicBool::new(false);
+    if AWAKE.swap(playing, Relaxed) != playing {
+        unsafe {
+            if playing {
+                SDL_DisableScreenSaver();
+            } else {
+                SDL_EnableScreenSaver();
+            }
+        }
+    }
 }
 
 /// Is this press the platform's fullscreen shortcut? F11 (Windows, Linux), Ctrl+Cmd+F (macOS) and

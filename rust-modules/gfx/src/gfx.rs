@@ -134,6 +134,10 @@ macro_rules! glsl_vs_dithered {
 }
 
 const VS_SRC: &CStr = glsl!("shaders/vs_src.vert");
+/// The desktop's decoded picture, composited under the UI (`video.rs`). Declared here, below the
+/// `glsl!` macros its shader is embedded with.
+#[cfg(feature = "hostsim")]
+pub mod video;
 const FS_SRC: &CStr = glsl!("shaders/fs_src.frag");
 const FS_AMBIENT: &CStr = glsl_dithered!("shaders/fs_ambient.frag");
 const FS_AMBIENT_PLAIN: &CStr = glsl_undithered!("shaders/fs_ambient.frag");

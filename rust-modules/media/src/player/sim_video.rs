@@ -9,12 +9,12 @@
 //! is a screenshot facility, nothing more: every number the clock sink's module doc disowns stays
 //! disowned, and nothing here says anything about LG's decoder.
 //!
-//! **Why a child process, and why only in the simulator.** The host FFmpeg this crate links
-//! (`ci/build-ffmpeg.sh`) is built from the television's ONE component list, which has no video
-//! decoders — the TV decodes in hardware — and growing that list for a Mac would make the two
-//! builds diverge. A system `ffmpeg` binary (`PLXNATIVE_SIM_FFMPEG`, else `ffmpeg` on `PATH`) keeps
-//! the decode entirely outside this process and this crate's link line. `hostsim`-only: the
-//! television build does not contain this file.
+//! **Why a child process, and why only in the simulator.** It predates the desktop decoder
+//! (`player::desk`), which now decodes in-process when the host FFmpeg carries its decoders, and
+//! it stays for the screenshot pipeline: it rides the clock sink, whose every frame time is the
+//! sink's own and therefore repeatable, while the desktop decoder's clock is a sound card's. A
+//! system `ffmpeg` binary (`PLXNATIVE_SIM_FFMPEG`, else `ffmpeg` on `PATH`) keeps that decode
+//! entirely outside this process. `hostsim`-only: the television build does not contain this file.
 //!
 //! **What it costs, and the bound.** One 1920x1080 RGBA frame (8 MiB) crosses a pipe per decoded
 //! picture and is uploaded once when it becomes current — about what a poster upload costs, once

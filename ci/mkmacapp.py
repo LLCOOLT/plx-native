@@ -5,8 +5,9 @@ This is the `hostsim` build (`rust-modules/src/bin/sim.rs`): the same UI, the sa
 and the same event loop the television runs, wrapped in a bundle that carries its own SDL, its own
 fonts and its own copy of every non-system library it links, so it starts on a Mac that has none of
 this repo's build environment installed. What it is NOT is a television — there is no video
-pipeline off-device (`player/ffi_host.rs`), so Play lands on the app's real failure read-out.
-`docs/macos-app.md` is the full account of what is and is not in it.
+pipeline off-device, so the bundle carries the desktop's own: the host FFmpeg with its decoders
+(`player/desk`, VideoToolbox where the Mac has it). `docs/macos-app.md` is the full account of what
+is and is not in it.
 
 Three things here are load-bearing, and each is a way this ships broken while working perfectly on
 the machine that built it:
@@ -46,6 +47,8 @@ SYSTEM_PREFIXES = ("/usr/lib/", "/System/")
 # Paths that are already bundle-relative — either we rewrote them, or the library was built that
 # way. Nothing to do, but they must not be mistaken for a leak in the verification pass.
 RELATIVE_PREFIXES = ("@rpath/", "@loader_path/", "@executable_path/")
+# The host FFmpeg `make` stages into pkg/ (the Makefile's FFMPEG_HOST_NAMES), in load order.
+FFMPEG_LIBS = ("libavutil-plx.61", "libswresample-plx.7", "libavcodec-plx.63", "libavformat-plx.63", "libswscale-plx.10")
 
 
 def run(*cmd, **kw):
@@ -278,6 +281,15 @@ def main():
     # loaded native subtitle renderer must be placed there.
     for f in ("appfont.ttf", "appfont-bold.ttf", "appfont-cjk.ttf", "OFL.txt", "le-roots.pem", "libass-plx.0.dylib"):
         shutil.copy2(REPO / "pkg" / f, res / f)
+    # The bundled FFmpeg, staged by `make` with loader-relative names (ci/stage-host-ffmpeg.sh) and
+    # dlopened from here by absolute path. swscale is the dev capture stream's alone, so optional.
+    for name in FFMPEG_LIBS:
+        src = REPO / "pkg" / f"{name}.dylib"
+        if not src.exists():
+            if name.startswith("libswscale"):
+                continue
+            sys.exit(f"mkmacapp: {src} is not staged — run `make macapp`, which stages it first")
+        shutil.copy2(src, res / src.name)
     shutil.copy2(REPO / "LICENSE", res / "LICENSE.txt")
     shutil.copy2(REPO / "LICENSING.md", res / "LICENSING.md")
     shutil.copytree(REPO / "licenses", res / "licenses")

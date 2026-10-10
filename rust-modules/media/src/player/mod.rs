@@ -43,6 +43,8 @@ mod shared;
 pub mod sidecar;
 pub mod subside; // the side subtitle reader's thread and state (dev trigger `plxnative-subside`)
 #[cfg(feature = "hostsim")]
+pub mod desk; // the desktop's own decoder behind the simulator's sink (see its doc)
+#[cfg(feature = "hostsim")]
 pub mod sim_video; // the simulator's decoded picture, for screenshots (see its doc)
 pub mod threads;
 pub mod video_geometry;

@@ -560,12 +560,16 @@ unsafe fn present_and_swap(
             crate::capture::tick(fr.now);
         }
         app.instr.mark(plx_base::diag::heartbeat::Phase::Capture); // capture
-        // `plxnative-simvideo`: the decoded picture goes UNDER the finished UI, as the television's
-        // compositor puts its video plane under ours — before the capture, so shots include it.
+        // The decoded picture (the desktop decoder's, or `plxnative-simvideo`'s) goes UNDER the
+        // finished UI, as the television's compositor puts its video plane under ours — before
+        // the capture, so shots include it.
         #[cfg(feature = "hostsim")]
         if fr.player {
             plx_media::player::sim_video::composite_under();
+            plx_media::player::desk::video::composite_under();
         }
+        #[cfg(feature = "hostsim")]
+        super::desktop_window::keep_display_awake(fr.player && !plx_media::player::lifecycle::paused());
         // Before the swap, never after: the back buffer is undefined once presented.
         // A dump decides here whether this frame is written (`dev::framedump`); otherwise the
         // ordinary screenshot seam.

@@ -6,12 +6,15 @@
 //! not compiled into this build. Each entry answers what the simulator answered when it ran the
 //! webOS table, minus the lines that only made sense on a television (`webos: /etc/... unreadable`,
 //! `devjail: soc=`), plus the answers a desktop has of its own: the OS language and regional format.
-//! The rest a desktop app needs (a key store, its own window behaviour) belongs here as it is written.
+//! The sound output the desktop decoder plays through is here too (`audio`), installed beside the
+//! port table. The rest a desktop app needs (a key store) belongs here as it is written.
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::Once;
 
 use plx_base::eventlog::log;
 use plx_platform::tv::{self, sandbox, secure, toast};
+
+mod audio;
 
 static PORT: tv::Port = tv::Port {
     probe_device,
@@ -43,6 +46,7 @@ static PORT: tv::Port = tv::Port {
 /// `app::run_application`, the same body the webOS port's `plex_run` hands over to.
 pub extern "C" fn plex_run(pms_host: *const c_char, pms_port: c_int) -> c_int {
     let _ = tv::install(&PORT);
+    plx_media::player::desk::audio::install(&audio::OUTPUT);
     crate::app::run_application(pms_host, pms_port)
 }
 
