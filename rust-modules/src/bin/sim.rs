@@ -43,6 +43,7 @@ fn main() {
         .unwrap_or_default();
     if host == "--write-synthetic-initial" {
         use std::io::Write;
+        #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
         let result = (|| -> Result<(), &'static str> {
             let path = args.next().ok_or("missing output path")?;
@@ -57,8 +58,12 @@ fn main() {
             };
             if args.next().is_some() { return Err("unexpected argument"); }
             let encoded = plxnative_modules::synthetic_home_initial(seed,port,settings)?;
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
-                .open(path).map_err(|_| "cannot create initial input file")?;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            // Windows has no mode bits; the file inherits the ACL of the directory it is made in.
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(path).map_err(|_| "cannot create initial input file")?;
             file.write_all(encoded.as_bytes()).map_err(|_| "cannot write initial input file")
         })();
         if let Err(reason) = result { eprintln!("synthetic initial input: {reason}"); std::process::exit(2); }
@@ -143,6 +148,7 @@ fn exit_without_atexit_teardown(rc: c_int) -> ! {
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
     // SAFETY: `_exit` is async-signal-safe and takes no pointers; it ends every thread at once,
-    // which is exactly the point.
+    // which is exactly the point. (The Windows CRT's `_exit` skips `atexit` too and ends in
+    // `ExitProcess`, which terminates the other threads before any DLL detach handler runs.)
     unsafe { libc::_exit(rc) }
 }

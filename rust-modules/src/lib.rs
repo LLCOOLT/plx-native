@@ -10,7 +10,11 @@
 //! `acb_on_event`, `plx_media`'s player/mod.rs). Everything else is Rust-internal (the per-module `repr(C)`
 //! shapes are migration legacy, not ABI).
 mod app; // run_application — the Rust app core / event loop (the entry inverted from main.c; port.rs's `plex_run` hands over to it)
+#[cfg(unix)]
 mod capture; // dev live UI capture stream: own-GLES-frame grab → MPEG1/TS or JPEG → TCP (UI plane only)
+#[cfg(windows)]
+#[path = "capture_windows.rs"]
+mod capture; // the same entry points, doing nothing: the desktop window is the view
 mod coldstart; // retires old last-page bookmarks; authenticated cold boots now stay on Home
 mod dev; // the /tmp/plxnative-* trigger surface, behind one `devtriggers` feature — read it before adding a trigger
 mod focusprobe; // dev: one diffable line naming everything app.rs's key ladder can move, logged when it changes
