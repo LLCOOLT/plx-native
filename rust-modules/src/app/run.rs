@@ -3705,6 +3705,7 @@ mod lifecycle_regression_tests {
         clock::set_replay(100);
         let mut fr=Frame::begin(&app.player.session, app.bridge.metadata_view());
         for et in [SDL_MOUSEBUTTONDOWN,SDL_MOUSEMOTION,SDL_MOUSEBUTTONUP] {
+            app.ev[16]=1; // SDL_BUTTON_LEFT: the desktop ignores every other button's click
             app.ev[20..24].copy_from_slice(&400i32.to_ne_bytes());
             app.ev[24..28].copy_from_slice(&300i32.to_ne_bytes());
             event(&mut app,&mut fr,et);
@@ -4299,7 +4300,7 @@ mod lifecycle_regression_tests {
         super::super::bridge::show_page(&mut app.pages, AppArg::Home);
         app.bridge.seed_hub_grid_for_test(3, 4);
         if declined {
-            // The first card is a collection: the menu has nothing to offer it.
+            // The first card is another server's collection: the menu has nothing to offer it.
             app.bridge.retag_hub_item_as_collection_for_test("1");
         }
         settle(&mut app, &mut t);
@@ -4462,7 +4463,7 @@ mod lifecycle_regression_tests {
         assert!(!app.pages.input.press.is_active(), "the spring came to rest");
     }
 
-    /// A hold the app DECLINES (nothing to offer a collection) is not taken: the dispatcher
+    /// A hold the app DECLINES (nothing to offer another server's collection) is not taken: the dispatcher
     /// abandons the press and it springs back, then comes to rest.
     #[test]
     fn a_real_card_hold_the_app_declines_springs_back() {
@@ -4470,7 +4471,7 @@ mod lifecycle_regression_tests {
         let (active, scale, mut app, mut t) = hold_a_home_card(true);
         assert!(active && scale < 0.99, "the declined hold springs back: active={active} scale={scale}");
         for _ in 0..4 { step(&mut app, &mut t, vec![]); }
-        assert!(!super::super::bridge::item_menu_up(&app.pages), "a collection has no item menu");
+        assert!(!super::super::bridge::item_menu_up(&app.pages), "another server's collection has no item menu");
         for _ in 0..40 { step(&mut app, &mut t, vec![]); }
         assert!(!app.pages.input.press.is_active(), "…and the spring comes to rest");
     }
