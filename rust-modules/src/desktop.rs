@@ -7,22 +7,22 @@
 //! webOS table, minus the lines that only made sense on a television (`webos: /etc/... unreadable`,
 //! `devjail: soc=`), plus the answers a desktop has of its own: the OS language and regional format.
 //! The sound output the desktop decoder plays through is here too (`audio`), installed beside the
-//! port table. The rest a desktop app needs (a key store) belongs here as it is written.
+//! port table. The session's key store is here too (`keystore`: the Keychain on macOS, DPAPI on Windows).
 use std::os::raw::{c_char, c_int, c_void};
-use std::sync::Once;
 
 use plx_base::eventlog::log;
-use plx_platform::tv::{self, sandbox, secure, toast};
+use plx_platform::tv::{self, sandbox, toast};
 
 mod audio;
+mod keystore;
 
 static PORT: tv::Port = tv::Port {
     probe_device,
     start_capability_probe,
     repair_sandbox,
-    seal,
-    open: |_| None,
-    remove: |_, _| {},
+    seal: keystore::seal,
+    open: keystore::open,
+    remove: keystore::remove,
     system_locale,
     system_utc_offset_s: || None,
     go_home,
@@ -95,14 +95,6 @@ fn start_capability_probe() {
 /// There is no jail to repair. Never offered in practice: the verdict above never blocks.
 fn repair_sandbox() -> Result<(), sandbox::Failure> {
     Err(sandbox::Failure::Unsupported)
-}
-
-/// No desktop key store yet, so the session falls back to the mode-0600 file, as it did when the
-/// simulator ran the webOS key manager with no bus to reach it. Said once per process.
-fn seal(_plain: &[u8]) -> Option<secure::Sealed> {
-    static SAID: Once = Once::new();
-    SAID.call_once(|| log("session protection: no desktop key store; using the 0600 file fallback"));
-    None
 }
 
 /// The OS's own language and regional-format choices, which i18n normalizes and prefers over

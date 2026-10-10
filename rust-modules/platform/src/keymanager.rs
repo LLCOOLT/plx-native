@@ -57,6 +57,8 @@ pub fn open(sealed: &Sealed) -> Option<Vec<u8>> {
         // Kept only so an interim/pre-release envelope deserializes as locked instead of being
         // mistaken for plaintext. AES-CFB does not authenticate the file, so never open it.
         Backend::PalmKeymanager => None,
+        // A desktop's envelope: never this television's to open.
+        Backend::MacKeychain | Backend::WinDpapi => None,
     }
     .and_then(|s| b64::decode(&s.data))
 }
@@ -74,6 +76,7 @@ pub fn remove(backend: &Backend, key: &str) {
             "luna://com.palm.keymanager/remove",
             &json!({"keyname": key}),
         ),
+        Backend::MacKeychain | Backend::WinDpapi => return,
     };
     // `clear()` deletes the key and the file in one sign-out. A later sign-in in the same process
     // must run key creation again rather than trusting the now-stale backend cache.
