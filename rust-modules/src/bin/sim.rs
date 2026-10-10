@@ -9,13 +9,18 @@
 //! has its own trigger namespace, its own remote FIFO and its own event log — which is what lets
 //! independent UI and data-layer work proceed in parallel.
 //!
-//! **What it is NOT.** There is no video. The 29-symbol media seam does not exist off-device, and
-//! `player::ffi_host`'s `HostSink` reports the same "no video path" failure a television with no
-//! usable ACB binding reports, so Play lands on the app's real failure read-out. Nor is it a substitute
-//! for the device on anything the GPU decides: the `--fps` gates are calibrated to the SM9000's
-//! Mali, and text rasterization here goes through a different FreeType. A green run on this binary
-//! is evidence about a Mac. Layout, focus, navigation, and every byte of the Plex data layer are
-//! the parts that do transfer — and they are most of the UI work.
+//! **What it is NOT.** It is not a television. There is no Starfish pipeline off-device: when the
+//! bundled FFmpeg carries the desktop decoders, `player::desk` decodes behind `player::ffi_host`'s
+//! sink with the OS's decoder and the sound card's clock, and without them Play lands on the app's
+//! real failure read-out. Either way nothing it shows says what LG's decoder will do, nor is it a
+//! substitute for the device on anything the GPU decides: the `--fps` gates are calibrated to the
+//! SM9000's Mali, and text rasterization here goes through a different FreeType. A green run on
+//! this binary is evidence about a desktop. Layout, focus, navigation, and every byte of the Plex
+//! data layer are the parts that do transfer — and they are most of the UI work.
+//!
+//! It is also the desktop APP: the same binary, built `--release --no-default-features`, is what
+//! `ci/mkmacapp.py` bundles and `ci/mkwinapp.py` zips. A release build on Windows is a GUI
+//! program, so no console window opens beside it.
 //!
 //! Usage:
 //!   plxnative-sim [pms-host] [pms-port]
@@ -23,6 +28,8 @@
 //!   PLXNATIVE_PMS_HOST / PLXNATIVE_PMS_PORT   server to talk to (argv wins)
 //!   PLXNATIVE_RUNTIME_DIR                     this instance's trigger/FIFO/log root
 //!   PLXNATIVE_APP_DIR                         where appfont*.ttf and the icons live (repo `pkg/`)
+
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use plxnative_modules::desktop::plex_run;
 use std::ffi::CString;
@@ -41,6 +48,12 @@ fn main() {
         .next()
         .or_else(|| std::env::var("PLXNATIVE_PMS_HOST").ok())
         .unwrap_or_default();
+    // The packaging jobs' smoke test (`.github/workflows/desktop.yml`): reaching this line means
+    // the loader resolved every library the binary imports, from the bundle alone.
+    if host == "--version" {
+        println!("PlxNative {}", env!("PLX_VERSION"));
+        return;
+    }
     if host == "--write-synthetic-initial" {
         use std::io::Write;
         #[cfg(unix)]

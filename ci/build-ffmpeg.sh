@@ -68,6 +68,11 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 NDK=${WEBOS_SDK:-$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot}
 SYSROOT="$NDK/arm-webos-linux-gnueabi/sysroot"
 HOST=${HOST:-}
+# `shasum` is Perl's, on every Mac and Linux runner but not in MSYS2's MinGW shell, where the Windows
+# host build runs (`.github/workflows/desktop.yml`); coreutils' `sha256sum` prints the same line.
+if ! command -v shasum >/dev/null 2>&1; then
+  shasum() { [ "$1" = -a ] && shift 2; sha256sum "$@"; }
+fi
 # WHERE EACH HALF LIVES, and why they are no longer in the same place.
 #
 # The PREFIX — the 3.8 MB of installed libraries and headers — stays inside the checkout, exactly

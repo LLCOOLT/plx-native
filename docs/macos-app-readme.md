@@ -40,20 +40,19 @@ It is a TV interface, so it is driven like one — with arrow keys, not the mous
 
 Clicking works too, on most screens.
 
-## What is not here: video
+## Watching
 
-**Playback does not work in this build, and pressing Play will tell you so** with a full-screen
-message. That is honest rather than broken: the decoding is done by the television's own hardware
-video pipeline (LG's StarfishMediaAPIs, bound to the TV's video plane), which does not exist on a
-Mac. Everything else is the real thing — the same interface, the same code, talking to your real
-server: browsing, libraries, search, seasons and episodes, cast, artwork, watched state, who's
-watching.
+Press Play and it plays: the app decodes with its own bundled FFmpeg, on the Mac's hardware video
+decoder (VideoToolbox), and plays the sound through the Mac's current output. H.264 and HEVC
+(including 10-bit and HDR10, tone-mapped for an ordinary display), with AAC, AC-3, E-AC-3 and DTS
+sound. Seeking, pause and resume work as they do on the television.
 
-So: this is the app to *look at* and click around. It is not a way to watch anything.
+Styled (ASS) subtitles, text subtitles and Blu-ray/DVD image subtitles are drawn by the app.
 
 ## Small print
 
-Apple Silicon Macs only (M1 and later), macOS 11 or newer.
+macOS 11 or newer. There are two downloads: `arm64` for Apple Silicon (M1 and later) and
+`x86_64` for Intel Macs.
 
 Unofficial, and not affiliated with, endorsed by, or sponsored by Plex GmbH or LG Electronics. MIT
 licensed; the licence and the third-party notices are inside the app bundle, under
