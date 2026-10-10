@@ -21,8 +21,12 @@ fn tv_page(fixture: &Fixture) -> LibraryScreen {
 /// A movie section listed as its collections: the fixture's Cinema section, 36 slots, the first
 /// three of them collection rows.
 fn collections_fixture(total: usize) -> Fixture {
+    collections_fixture_on(total, plx_plex::plex::ServerId::from_raw(0))
+}
+
+/// The same collections, filed under server `sid`.
+fn collections_fixture_on(total: usize, sid: plx_plex::plex::ServerId) -> Fixture {
     let mut fixture = Fixture::new();
-    let sid = plx_plex::plex::ServerId::from_raw(0);
     let rows = (0..total.min(3)).map(|i| plx_data::pms::PmsMovie {
         sid, rk: format!("{}", 50_001 + i), title: format!("Collection {i}"),
         kind: plx_data::pms::KIND_COLLECTION, child_count: i as i64 + 1, ..Default::default()
@@ -180,15 +184,19 @@ fn ok_on_a_collection_card_requests_its_page() {
         "OK on a collection opens it, never plays it");
 }
 
-/// The hold hint teaches a hold that opens an item menu; a hold on a collection card opens
-/// nothing (`app/content.rs` drops the menu unless `item_menu::has_actions`), so the hint must not
-/// stand there and must not spend the kind's one showing.
+/// The hold hint teaches a hold that opens an item menu; a hold on a collection card from a
+/// server other than the current one opens nothing (its one row, Make a Channel, is offered only
+/// on the server the channels live on, and `app/content.rs` drops the menu unless
+/// `item_menu::has_actions`), so the hint must not stand there and must not spend the kind's one
+/// showing. Server 9 stands in for a borrowed server, as in `item_menu`'s tests; server 0 is the
+/// current one whenever an earlier test in the process registered a server, which made this test
+/// pass or fail by the order the tests ran in.
 #[test]
 fn the_hold_hint_does_not_stand_on_a_collection_card() {
     let _guard = plx_base::testlock::serial();
     plx_ui::hold_hint::reset_learned_for_test();
     plx_ui::hold_hint::reset_shown_for_test();
-    let fixture = collections_fixture(36);
+    let fixture = collections_fixture_on(36, plx_plex::plex::ServerId::from_raw(9));
     let mut page = fixture.screen();
     page.initial = false;
     page.live = true;
