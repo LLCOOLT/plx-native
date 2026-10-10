@@ -746,6 +746,12 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
     let et = rd_u32(&app.ev, 0);
     app.window_activity.event(et);
     plx_telemetry::telemetry::window::lifecycle(et, matches!(app.route(), AppArg::Player));
+    // A desktop window that changed size, display or fullscreen state: re-fit the blit. Before
+    // the replay gate, because it changes how the frame is shown and never what is drawn.
+    #[cfg(feature = "hostsim")]
+    if et == super::desktop_window::SDL_WINDOWEVENT {
+        plx_base::surface::window_resized(app.win);
+    }
     if controlled_replay(app) {
         // The tape owns logical ingress; real SDL startup notifications must not be
         // counted a second time. The real compositor still owns window safety.
@@ -774,6 +780,37 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
     // kind — rather than in each of the ~30 arms below, where the next one added would
     // silently draw nothing.
     plx_machine::idle::invalidate();
+    // The desktop's fullscreen shortcut belongs to the window, not to the interface: taken here,
+    // before the key reaches the ladder or the recorder. Real first presses only, never a
+    // synthetic one (whose `mod` field carries a wcode) or an auto-repeat.
+    #[cfg(feature = "hostsim")]
+    if et == SDL_KEYDOWN
+        && rd_u32(&app.ev, 8) != SYNTH_WINDOW
+        && app.ev[13] == 0
+        && super::desktop_window::toggles_fullscreen(
+            rd_u32(&app.ev, 20),
+            u16::from_ne_bytes([app.ev[24], app.ev[25]]),
+        )
+    {
+        super::desktop_window::toggle_fullscreen(app.win);
+        return;
+    }
+    // A desktop mouse has more buttons than the Magic Remote's one. The primary button is the
+    // remote's click; the back side-button is the remote's BACK (pushed as ESC, on the press);
+    // the others mean nothing here, and must not click either.
+    #[cfg(feature = "hostsim")]
+    if matches!(et, SDL_MOUSEBUTTONDOWN | SDL_MOUSEBUTTONUP) {
+        match super::desktop_window::mouse_button(app.ev[16]) {
+            super::desktop_window::Button::Primary => {}
+            super::desktop_window::Button::Back => {
+                if et == SDL_MOUSEBUTTONDOWN {
+                    remote_synth_key(SDLK_ESCAPE, 0);
+                }
+                return;
+            }
+            super::desktop_window::Button::Ignored => return,
+        }
+    }
     if et == SDL_KEYDOWN
         || et == SDL_KEYUP
         || et == SDL_TEXTINPUT

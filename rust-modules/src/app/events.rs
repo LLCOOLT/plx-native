@@ -122,6 +122,12 @@ pub(crate) fn host_wcode(sym: u32) -> u32 {
         112 => plx_ui::consts::WCODE_PLAY, // 'p'
         115 => plx_ui::consts::WCODE_STOP, // 's'
         8 => plx_ui::consts::WCODE_BACK,   // backspace
+        // A keyboard's media keys (Windows and Linux deliver them; macOS keeps them for its own
+        // Now Playing). SDL spells each as its scancode with bit 30 set.
+        0x4000_0105 => plx_ui::consts::WCODE_PLAYPAUSE, // AUDIOPLAY
+        0x4000_0104 => plx_ui::consts::WCODE_STOP_KEY,  // AUDIOSTOP
+        0x4000_011D | 0x4000_0103 => plx_ui::consts::WCODE_REWIND, // AUDIOREWIND, AUDIOPREV
+        0x4000_011E | 0x4000_0102 => plx_ui::consts::WCODE_FASTFORWARD, // AUDIOFASTFORWARD, AUDIONEXT
         _ => 0,
     }
 }
@@ -601,17 +607,34 @@ mod key_layout_tests {
     /// `make check` builds the television layout, so that is the one graded by default; a
     /// `--features hostsim` test run grades the stock-SDL2 one. Both arms are compiled either way
     /// (they are `cfg!`, not `#[cfg]`), so neither can rot.
+    /// A media key reaches the ladder as the remote button it is, through the classifier the
+    /// television's own transport keys go through.
+    #[test]
+    fn desktop_media_keys_classify_as_the_remote_transport_keys() {
+        use plx_ui::consts::Key;
+        for (sym, want) in [
+            (0x4000_0105, Key::PlayPause),
+            (0x4000_0104, Key::Stop),
+            (0x4000_011D, Key::Left { alt: true }),
+            (0x4000_0103, Key::Left { alt: true }),
+            (0x4000_011E, Key::Right { alt: true }),
+            (0x4000_0102, Key::Right { alt: true }),
+        ] {
+            assert_eq!(plx_ui::consts::classify(sym, crate::app::events::host_wcode(sym)), want, "sym 0x{sym:x}");
+        }
+    }
+
     #[test]
     fn key_bytes_round_trip() {
         // The wcode-only case is the one that breaks a sym-derived mapping, and the one a naive
         // host layout loses: `pause` carries no sym at all.
         //
         // **`(8, 42)` is the case that MATTERS and it was missing.** It is the `backspace` token,
-        // and 8 is one of the four syms `host_wcode` maps a desktop key onto — to `WCODE_BACK`.
+        // and 8 is one of the syms `host_wcode` maps a desktop key onto — to `WCODE_BACK`.
         // The only sym-plus-wcode case here used to be `(8, WCODE_BACK)`, the single pair where
         // the stand-in and the carrier agree, so a decode that consulted the stand-in FIRST passed
         // this test while turning the panel's delete key into a navigation. Every one of those
-        // four syms belongs here for the same reason.
+        // syms belongs here for the same reason.
         for (sym, wcode) in [
             (SDLK_DOWN, 0),
             (SDLK_RETURN, 0),
@@ -621,6 +644,9 @@ mod key_layout_tests {
             (32, 44),  // space, 'p', 's': the other three syms the stand-in claims, each
             (112, 19), // beside its own real scancode, which must survive unchanged
             (115, 22),
+            (0x4000_0105, 261), // the media keys, likewise beside their scancodes
+            (0x4000_0104, 260),
+            (0x4000_011E, 286),
         ] {
             for down in [true, false] {
                 let ev = encode_key(sym, wcode, down);

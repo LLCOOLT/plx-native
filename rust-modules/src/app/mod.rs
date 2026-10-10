@@ -26,19 +26,19 @@ const SIM_TAG: &str = if cfg!(feature = "hostsim") {
 
 /// OPENGL | FULLSCREEN on the television, which owns the whole panel.
 ///
-/// The desktop asks for OPENGL | ALLOW_HIGHDPI — no fullscreen grab (hostile on a laptop) and
-/// **not RESIZABLE**: `surface::probe` reads the drawable once, at boot, so a dragged edge would
-/// leave the viewport describing a window that no longer exists, and the interface would sit in a
-/// 1920x1080-shaped corner of the new one with every pointer hit landing somewhere else. The window
-/// opens at an exact divisor of the canvas instead — see `desktop_window_size`.
+/// The desktop asks for OPENGL | RESIZABLE | ALLOW_HIGHDPI and opens windowed (a fullscreen grab
+/// at launch is hostile on a laptop; `desktop_window` toggles it on request). Resizing is safe
+/// because the canvas is drawn offscreen at a fixed size and only scaled into the window
+/// (`surface::probe`), so a dragged edge never changes what the renderer sized. The window opens at
+/// an exact divisor of the canvas — see `desktop_window_size`.
 ///
 /// ALLOW_HIGHDPI is what makes that divisor land on a **1:1 surface** on the Mac people actually
 /// have: without it a Retina display gives a drawable equal to the window in POINTS, which the
 /// compositor then doubles, so the whole interface is an upscale of a half-size render. With it,
-/// the 960x540-point window `desktop_window_size` picks on a laptop has a 1920x1080 drawable —
-/// `surface::scale() == 1.0`, the same 1:1 texel contract the television gets.
+/// the 960x540-point window `desktop_window_size` picks on a laptop has a 1920x1080 drawable, and
+/// the 1920x1080 canvas is copied into it texel for texel.
 const SDL_WINDOW_FLAGS: u32 = if cfg!(feature = "hostsim") {
-    0x2 | 0x2000
+    0x2 | 0x20 | 0x2000
 } else {
     0x2 | 0x1
 };
@@ -124,6 +124,8 @@ pub(crate) mod clock;
 mod clock_notice;
 mod recorder;
 mod window_activity;
+#[cfg(feature = "hostsim")]
+mod desktop_window;
 pub(crate) mod events;
 pub(crate) mod lifecycle;
 pub(crate) mod playback;
