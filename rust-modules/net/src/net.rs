@@ -175,6 +175,30 @@ const CURLOPT_PINNEDPUBLICKEY: c_int = 10230;
 /// independence from a store nobody can update on a television, on a path whose far end is not a
 /// Plex service and whose CA may rotate.
 pub const CURLOPT_CAINFO: c_int = 10065;
+
+/// `CURLOPT_SSL_OPTIONS` (LONG + 216) and its `CURLSSLOPT_NATIVE_CA` bit (curl 7.71).
+#[cfg(windows)]
+const CURLOPT_SSL_OPTIONS: c_int = 216;
+#[cfg(windows)]
+const CURLSSLOPT_NATIVE_CA: c_long = 1 << 4;
+
+/// **The Windows desktop build trusts Windows' own certificate store.** The `libcurl-4.dll`
+/// `ci/mkwinapp.py` bundles is MSYS2's, whose default trust is a PEM bundle at a path under the
+/// MSYS2 install (`etc/ssl/certs/ca-bundle.crt`). That file is not on a user's PC, so without this
+/// every handshake ends in curl's "problem with the SSL CA cert" and sign-in cannot reach plex.tv.
+/// `CURLSSLOPT_NATIVE_CA` makes curl load the system store instead, which is the "device's own
+/// store" `Tls::Ca` means everywhere else. A `CURLOPT_CAINFO` set afterwards still adds its roots.
+/// Nothing on the television or the Mac calls this; there it is not compiled.
+///
+/// Answers curl's own code: 0, or the refusal (a libcurl too old for the option), which the
+/// callers treat like any refused security option: nothing is sent.
+///
+/// # Safety
+/// `easy` is a live curl easy handle.
+#[cfg(windows)]
+pub unsafe fn use_os_roots(easy: *mut CURL) -> c_int {
+    unsafe { curl_easy_setopt_long(easy, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA) }
+}
 /// `CURLOPTTYPE_SLISTPOINT + 203`: a `curl_slist` of `host:port:address` entries that pre-populate
 /// the DNS cache, so the named host is never resolved. Present since 7.21.3; the entry syntax the
 /// television's 7.53.1 parses is documented on [`origin::ResolvePin::entry`]. See [`resolve`].
@@ -1621,6 +1645,8 @@ fn request_tls_evidence(
                 return Err(RequestError::Transport.into());
             }
             let easy = Easy(h);
+            #[cfg(windows)]
+            require_setopt!(use_os_roots(easy.0), "CURLSSLOPT_NATIVE_CA");
             curl_easy_setopt_ptr(easy.0, CURLOPT_URL, url_c.as_ptr() as *const c_void);
             curl_easy_setopt_ptr(easy.0, CURLOPT_WRITEFUNCTION, write_cb as *const c_void);
             let mut sink = BodySink::new(max_body);

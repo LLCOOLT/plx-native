@@ -265,7 +265,7 @@ fn macos_bundle_resources(_exe: &Path) -> Option<PathBuf> {
 /// `None` unless this really is a bundle: a plain `make sim-run` keeps taking `/tmp` (or its
 /// `PLXNATIVE_RUNTIME_DIR` instance root) exactly as before, so no harness recipe moves.
 #[cfg(target_os = "macos")]
-fn macos_app_support() -> Option<PathBuf> {
+fn desktop_app_data() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     macos_bundle_resources(&exe)?;
     let home = std::env::var_os("HOME")?;
@@ -275,8 +275,22 @@ fn macos_app_support() -> Option<PathBuf> {
     Some(PathBuf::from(home).join("Library/Application Support/PlxNative"))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn macos_app_support() -> Option<PathBuf> {
+/// Where the **Windows app** keeps everything it writes: `%LOCALAPPDATA%\PlxNative`, for the same
+/// reasons as the Mac's. Without it the root was `\tmp` on the current drive — `C:\tmp`, which
+/// any account on the PC can read, holding `auth.json` and the event log. Every Windows build is
+/// the desktop app (the dev recipes pass `PLXNATIVE_RUNTIME_DIR`, which still wins), so no bundle
+/// test is needed.
+#[cfg(windows)]
+fn desktop_app_data() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    if base.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(base).join("PlxNative"))
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn desktop_app_data() -> Option<PathBuf> {
     None
 }
 
@@ -318,7 +332,7 @@ pub fn runtime_dir() -> &'static Path {
     DIR.get_or_init(|| {
         let d = resolve_runtime_dir(
             std::env::var_os("PLXNATIVE_RUNTIME_DIR"),
-            macos_app_support(),
+            desktop_app_data(),
             app_id(),
         );
         ensure_runtime_dir(&d);
@@ -397,9 +411,9 @@ const DEFAULT_RUNTIME_DIR: &str = "/tmp";
 /// its own write path through this same root. That is the crate-global-seam hazard `testlock`
 /// exists for, and here it is avoidable outright rather than lockable.
 ///
-/// `bundled` is the second-choice root for a host build that is a real macOS app bundle (see
-/// [`macos_app_support`]). It is a PARAMETER rather than a call inside, for the same testability
-/// reason: it reads `current_exe` and `HOME`, neither of which a test can pin. `app_id` is a
+/// `bundled` is the second-choice root for a host build that is a real macOS app bundle, or any
+/// Windows build (see [`desktop_app_data`]). It is a PARAMETER rather than a call inside, for the same testability
+/// reason: it reads `current_exe` and `HOME` (`LOCALAPPDATA` on Windows), none of which a test can pin. `app_id` is a
 /// parameter for the same reason.
 ///
 /// **A flavoured install gets its own root, and the app users get keeps `/tmp` byte for byte.**

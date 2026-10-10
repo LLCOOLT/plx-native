@@ -49,5 +49,8 @@ available in the Windows build yet**; the Mac and television builds have them.
 
 Windows 10 or 11, 64-bit (x64).
 
+The app keeps its sign-in and its log (`plxnative-events.log`) in `%LOCALAPPDATA%\PlxNative`. The
+sign-in is encrypted with Windows' own data protection, so only your Windows account can read it.
+
 Unofficial, and not affiliated with, endorsed by, or sponsored by Plex GmbH or LG Electronics. MIT
 licensed; the licence and the third-party notices are in this folder.

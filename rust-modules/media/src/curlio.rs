@@ -1112,6 +1112,9 @@ impl CurlSource {
                     }
                 }};
             }
+            // Windows: the system certificate store, as `plx_net::net::use_os_roots` explains.
+            #[cfg(windows)]
+            require_setopt!(plx_net::net::use_os_roots(easy), "CURLSSLOPT_NATIVE_CA");
             let xp = &mut *self.xfer as *mut Xfer as *mut c_void;
             plx_net::net::curl_easy_setopt_ptr(easy, CURLOPT_URL, self.hop_url.as_ptr() as *const c_void);
             plx_net::net::curl_easy_setopt_ptr(
