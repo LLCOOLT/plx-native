@@ -33,7 +33,8 @@ It is a TV interface, so it is driven like one, with the arrow keys.
 | Esc | Back |
 | Alt-F4 | Quit |
 
-Clicking works too, on most screens.
+Clicking works too, on most screens, and a **right-click** (or the mouse's back button) goes back,
+including out of a playing video.
 
 ## Watching
 

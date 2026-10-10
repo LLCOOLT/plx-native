@@ -38,7 +38,8 @@ It is a TV interface, so it is driven like one — with arrow keys, not the mous
 | Esc or Delete | Back |
 | Cmd-Q | Quit |
 
-Clicking works too, on most screens.
+Clicking works too, on most screens, and a **right-click** (or the mouse's back button) goes back,
+including out of a playing video.
 
 ## Watching
 

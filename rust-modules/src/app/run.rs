@@ -800,7 +800,8 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         return;
     }
     // A desktop mouse has more buttons than the Magic Remote's one. The primary button is the
-    // remote's click; the back side-button is the remote's BACK (pushed as ESC, on the press);
+    // remote's click; the right button and the back side-button are the remote's BACK (pushed as ESC,
+    // on the press);
     // the others mean nothing here, and must not click either.
     #[cfg(feature = "hostsim")]
     if matches!(et, SDL_MOUSEBUTTONDOWN | SDL_MOUSEBUTTONUP) {

@@ -93,11 +93,14 @@ pub(crate) enum Button {
 }
 
 /// `SDL_MouseButtonEvent::button`: 1 left, 2 middle, 3 right, 4 and 5 the side buttons, of which
-/// 4 (`SDL_BUTTON_X1`) is the one browsers and file managers read as Back.
+/// 4 (`SDL_BUTTON_X1`) is the one browsers and file managers read as Back. The right button is
+/// Back too, as in other ten-foot interfaces on a desktop (Kodi, Plex HTPC): this interface has no
+/// context menu for it to open, and a mouse with no side buttons otherwise has no way out of the
+/// player, whose only exit on a television is the remote's BACK.
 pub(crate) fn mouse_button(button: u8) -> Button {
     match button {
         1 => Button::Primary,
-        4 => Button::Back,
+        3 | 4 => Button::Back,
         _ => Button::Ignored,
     }
 }
@@ -124,10 +127,11 @@ mod tests {
     }
 
     #[test]
-    fn only_the_primary_button_clicks_and_the_side_button_goes_back() {
+    fn only_the_primary_button_clicks_and_the_right_and_side_buttons_go_back() {
         assert_eq!(mouse_button(1), Button::Primary);
+        assert_eq!(mouse_button(3), Button::Back);
         assert_eq!(mouse_button(4), Button::Back);
-        for b in [0, 2, 3, 5] {
+        for b in [0, 2, 5] {
             assert_eq!(mouse_button(b), Button::Ignored, "button {b}");
         }
     }
