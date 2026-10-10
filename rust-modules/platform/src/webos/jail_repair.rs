@@ -48,7 +48,7 @@ fn call_hbc(_payload: &str) -> Result<String, Failure> {
 
 fn device_readable(path: &str) -> bool {
     std::ffi::CString::new(path)
-        .map(|p| unsafe { libc::access(p.as_ptr(), libc::R_OK) } == 0)
+        .map(|p| unsafe { libc::access(p.as_ptr(), super::READABLE) } == 0)
         .unwrap_or(false)
 }
 

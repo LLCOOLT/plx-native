@@ -232,8 +232,13 @@ fn input_budget(manifest: usize, segments: impl IntoIterator<Item = usize>) -> R
 }
 
 fn bounded_read(path: &Path, remaining: usize) -> Result<Vec<u8>, RecError> {
+    #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(unix)]
     let mut file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path).map_err(|_| RecError::Io("cannot open recording file".into()))?;
+    #[cfg(windows)]
+    let mut file = plx_base::winfs::no_follow(fs::OpenOptions::new().read(true))
         .open(path).map_err(|_| RecError::Io("cannot open recording file".into()))?;
     let metadata = file.metadata().map_err(|_| RecError::Io("cannot inspect recording file".into()))?;
     if !metadata.is_file() { return Err(RecError::Io("recording input is not a regular file".into())); }
@@ -261,7 +266,11 @@ pub fn mode_value(path: &Path) -> Result<Option<String>, RecError> {
         Err(_) => return Err(RecError::Io("cannot inspect recorder trigger".into())),
         Ok(_) => {}
     }
-    let bytes = bounded_read(path,libc::PATH_MAX as usize)?;
+    #[cfg(unix)]
+    let limit = libc::PATH_MAX as usize;
+    #[cfg(windows)]
+    let limit = 260; // MAX_PATH: Windows has no PATH_MAX
+    let bytes = bounded_read(path,limit)?;
     let value = String::from_utf8(bytes).map_err(|_| malformed(0,"recorder trigger UTF-8"))?;
     Ok(Some(value.trim().to_owned()))
 }
@@ -292,15 +301,29 @@ enum CreatedIdentity {
     Known((u64,u64)),
 }
 
+#[cfg(unix)]
 fn file_identity(metadata: &fs::Metadata) -> (u64,u64) {
     use std::os::unix::fs::MetadataExt;
     (metadata.dev(),metadata.ino())
 }
 
+/// Stable std has no volume serial or file index on Windows, so every identity compares equal
+/// there: a rollback still refuses a non-file (a link put in a segment's place), but cannot prove
+/// that a regular file at a created path is still the one this capture made.
+#[cfg(windows)]
+fn file_identity(_metadata: &fs::Metadata) -> (u64,u64) {
+    (0,0)
+}
+
 impl DirSink {
     pub fn create(dir: &Path) -> std::io::Result<Self> {
+        #[cfg(unix)]
         use std::os::unix::fs::DirBuilderExt;
+        #[cfg(unix)]
         fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        // No mode on Windows: the runtime directory under the user's profile is already private.
+        #[cfg(windows)]
+        fs::DirBuilder::new().recursive(true).create(dir)?;
         if !fs::symlink_metadata(dir)?.is_dir() {
             return Err(std::io::Error::other("recording directory must not be a symlink"));
         }
@@ -379,10 +402,17 @@ impl Sink for DirSink {
     }
 }
 
+#[cfg(unix)]
 fn private_new_file(path: &Path) -> std::io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)
+}
+
+/// `create_new` refuses any existing name, a link included; there is no mode to set on Windows.
+#[cfg(windows)]
+fn private_new_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 /// An in-memory sink: every segment is a `Vec<u8>` the test reads back.

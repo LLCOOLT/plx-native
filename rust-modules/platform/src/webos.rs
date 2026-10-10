@@ -163,6 +163,13 @@ pub fn is_realtek_k5lp_family(machine_name: &str) -> bool {
     machine_name.starts_with("k5lp") || machine_name.starts_with("k3lp")
 }
 
+/// `access(2)`'s read-permission mode. The Windows CRT's `_access` (which `libc::access` binds
+/// there) takes the same bit, 4, without exporting a name for it.
+#[cfg(unix)]
+const READABLE: libc::c_int = libc::R_OK;
+#[cfg(windows)]
+const READABLE: libc::c_int = 4;
+
 /// Read the machine name and, only on a matching SoC, probe `/dev/rtkmem` with `access(2)` —
 /// once per boot, from [`probe`]'s own boot slot, so it shares that call's ordering guarantee
 /// (before the first Load can be attempted). Logs UNCONDITIONALLY, beside the `webos:` line:
@@ -175,7 +182,7 @@ fn probe_jail() {
         .unwrap_or_default();
     let result = if is_realtek_k5lp_family(&name) {
         let readable = std::ffi::CString::new(RTKMEM_DEVICE)
-            .map(|path| unsafe { libc::access(path.as_ptr(), libc::R_OK) } == 0)
+            .map(|path| unsafe { libc::access(path.as_ptr(), READABLE) } == 0)
             .unwrap_or(false);
         if readable {
             crate::tv::sandbox::Verdict::Ok

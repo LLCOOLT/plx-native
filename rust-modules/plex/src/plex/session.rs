@@ -4932,12 +4932,19 @@ fn has_protected_authority() -> bool {
 /// difference.
 pub fn write_atomic(path: &std::path::Path, json: &[u8]) -> Result<(), WriteFailure> {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
     let Some(parent) = path.parent() else {
         return Err(WriteFailure::InvalidPath);
     };
     if let Ok(meta) = std::fs::symlink_metadata(path) {
+        #[cfg(unix)]
         if !meta.file_type().is_file() || meta.uid() != unsafe { libc::geteuid() } {
+            return Err(WriteFailure::NotOwned);
+        }
+        // No uid on Windows: the profile directory's ACL is the owner check (`plx_base::winfs`).
+        #[cfg(windows)]
+        if !meta.file_type().is_file() {
             return Err(WriteFailure::NotOwned);
         }
     }
@@ -5018,6 +5025,13 @@ pub struct CandidateDiagnostic {
     pub failure: WriteFailure,
 }
 
+/// Windows has no uid, gid or mode to report, so its lines read `parent=unknown`.
+#[cfg(windows)]
+fn parent_stat(_path: &std::path::Path) -> Option<ParentStat> {
+    None
+}
+
+#[cfg(unix)]
 fn parent_stat(path: &std::path::Path) -> Option<ParentStat> {
     use std::os::unix::fs::MetadataExt;
     let parent = path.parent()?;
@@ -5073,18 +5087,24 @@ fn log_candidate_diagnostics(context: &str, failures: &[CandidateDiagnostic]) {
 fn create_private_temp(
     path: &std::path::Path,
 ) -> Result<(std::path::PathBuf, std::fs::File), WriteFailure> {
+    #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
     for attempt in 0..16u64 {
         let Some(tmp) = random_tmp_path(path, attempt) else {
             return Err(WriteFailure::InvalidPath);
         };
-        match std::fs::OpenOptions::new()
+        #[cfg(unix)]
+        let opened = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&tmp)
-        {
+            .open(&tmp);
+        // `create_new` already refuses any existing name, a link included; there is no mode to
+        // set on Windows (`plx_base::winfs`).
+        #[cfg(windows)]
+        let opened = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp);
+        match opened {
             Ok(file) => return Ok((tmp, file)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(WriteFailure::CreateFailed(e.raw_os_error().unwrap_or(0))),
@@ -5115,6 +5135,7 @@ fn random_tmp_path(path: &std::path::Path, attempt: u64) -> Option<std::path::Pa
 /// file this process owns. The metadata comes from the SAME descriptor the bytes will be read
 /// from, so a caller that records the file's identity describes what it read. A missing file is
 /// `NotFound`; anything else refused is `PermissionDenied`.
+#[cfg(unix)]
 pub fn open_owned_regular(
     path: &std::path::Path,
 ) -> std::io::Result<(std::fs::File, std::fs::Metadata)> {
@@ -5127,6 +5148,20 @@ pub fn open_owned_regular(
         .open(path)?;
     let meta = file.metadata()?;
     if !meta.file_type().is_file() || meta.uid() != unsafe { libc::geteuid() } {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
+    }
+    Ok((file, meta))
+}
+
+/// [`open_owned_regular`] on Windows: there is no uid to own the file, so this is the no-follow
+/// open and the regular-file check only (`plx_base::winfs`).
+#[cfg(windows)]
+pub fn open_owned_regular(
+    path: &std::path::Path,
+) -> std::io::Result<(std::fs::File, std::fs::Metadata)> {
+    let file = plx_base::winfs::no_follow(std::fs::OpenOptions::new().read(true)).open(path)?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
         return Err(std::io::ErrorKind::PermissionDenied.into());
     }
     Ok((file, meta))
@@ -5148,6 +5183,7 @@ pub fn read_owned_regular(path: &std::path::Path) -> Option<Vec<u8>> {
 }
 
 fn remove_temp_siblings(path: &std::path::Path) {
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
     if let Some(legacy) = tmp_path(path) {
         let _ = std::fs::remove_file(legacy);
@@ -5164,7 +5200,14 @@ fn remove_temp_siblings(path: &std::path::Path) {
             continue;
         }
         if let Ok(meta) = std::fs::symlink_metadata(entry.path()) {
+            #[cfg(unix)]
             if meta.file_type().is_symlink() || meta.uid() == unsafe { libc::geteuid() } {
+                let _ = std::fs::remove_file(entry.path());
+            }
+            // Every entry under the user's profile is the user's own (`plx_base::winfs`).
+            #[cfg(windows)]
+            {
+                let _ = meta;
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -5560,14 +5603,25 @@ fn canonical_write_completed_locked(s: &Session, authority: SaveAuthority, gener
 /// validate the opened fd before truncation, and never follow a symlink or create a new file.
 fn neutralize_session_candidate(path: &std::path::Path) -> std::io::Result<()> {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    #[cfg(unix)]
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)?;
+    // Windows: no uid or link count to check (`plx_base::winfs`); a link is still never followed.
+    #[cfg(windows)]
+    let mut file = plx_base::winfs::no_follow(std::fs::OpenOptions::new().write(true)).open(path)?;
     let meta = file.metadata()?;
+    #[cfg(unix)]
     if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1 {
         return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+    }
+    // A Win32 error code is not an errno, so the refusal is a kind rather than `EPERM`.
+    #[cfg(windows)]
+    if !meta.is_file() {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
     }
     file.set_len(0)?;
     let written = file.write_all(SESSION_TOMBSTONE);

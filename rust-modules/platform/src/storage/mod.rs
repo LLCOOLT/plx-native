@@ -7,19 +7,44 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+#[cfg(unix)]
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 // The canonical DB8 engine is introduced before its transport/adapters replace JsonStore.
 pub mod client;
+#[cfg(unix)]
+pub mod diagnostics;
+#[cfg(windows)]
+#[path = "diagnostics_windows.rs"]
 pub mod diagnostics;
 #[allow(dead_code)]
 pub mod state;
 #[path = "../storage_service/wire.rs"]
 pub mod wire;
+
+/// The record store's file primitives by path, for the Windows desktop build; the unix ones below
+/// work relative to a held directory descriptor. The module doc says what each guard became.
+#[cfg(windows)]
+#[path = "fs_windows.rs"]
+mod fs_windows;
+#[cfg(windows)]
+pub use fs_windows::read_owned_bytes;
+#[cfg(windows)]
+use fs_windows::{
+    create_temp, directory_names, open_at, read_owned_regular, remove_at, rename_at, unlink_at,
+    validate_destination, validate_root, validate_root_metadata, Dir,
+};
+/// The held state root: a directory descriptor every child operation is relative to.
+#[cfg(unix)]
+type Dir = File;
 
 const FORMAT: &str = "plxnative-record";
 const VERSION: u64 = 1;
@@ -171,6 +196,7 @@ pub enum StoreError {
 /// A bounded read of an owned legacy file. `trusted` is false when group/other write bits were
 /// present on the same fd used for the read; the caller must never parse those bytes as consent or
 /// credentials unless it first installs a durable revocation barrier.
+#[cfg(unix)]
 pub fn read_owned_bytes(path: &Path) -> Result<Option<(Vec<u8>, bool)>, StoreError> {
     let mut file = match OpenOptions::new()
         .read(true)
@@ -233,7 +259,7 @@ pub fn open(root: PathBuf) -> Result<impl RecordStore, StoreError> {
 #[derive(Clone)]
 pub struct JsonStore {
     root: PathBuf,
-    directory: std::sync::Arc<File>,
+    directory: std::sync::Arc<Dir>,
     #[cfg(any(test, feature = "test-support"))]
     injected: std::sync::Arc<std::sync::Mutex<Option<CommitStage>>>,
 }
@@ -282,7 +308,14 @@ impl JsonStore {
             .directory
             .metadata()
             .map_err(|e| io_error(CommitStage::ParentOpen, e))?;
+        #[cfg(unix)]
         if !named.is_dir() || named.dev() != held.dev() || named.ino() != held.ino() {
+            return Err(StoreError::RootChanged);
+        }
+        // The held handle denies FILE_SHARE_DELETE, so the named root cannot have been renamed or
+        // replaced while it is held; only its type is left to check (`fs_windows`).
+        #[cfg(windows)]
+        if !named.is_dir() {
             return Err(StoreError::RootChanged);
         }
         validate_root_metadata(&held)
@@ -346,10 +379,16 @@ impl JsonStore {
                 Ok(meta) => meta,
                 Err(_) => continue,
             };
+            #[cfg(unix)]
             if !meta.is_file()
                 || meta.uid() != unsafe { libc::geteuid() }
                 || meta.mode() & 0o077 != 0
             {
+                continue;
+            }
+            // No owner or mode on Windows (see `fs_windows`).
+            #[cfg(windows)]
+            if !meta.is_file() {
                 continue;
             }
             if unlink_at(&self.directory, &name).is_ok() {
@@ -487,6 +526,7 @@ enum ReadFailure {
     Error(StoreError),
 }
 
+#[cfg(unix)]
 fn validate_root(root: &Path) -> Result<File, StoreError> {
     let file = OpenOptions::new()
         .read(true)
@@ -501,6 +541,7 @@ fn validate_root(root: &Path) -> Result<File, StoreError> {
     Ok(file)
 }
 
+#[cfg(unix)]
 fn validate_root_metadata(meta: &std::fs::Metadata) -> Result<(), StoreError> {
     if !meta.is_dir() {
         return Err(StoreError::RootNotDirectory);
@@ -598,6 +639,7 @@ pub fn unlink(path: &Path) -> io::Result<()> {
 
 // All child names below are generated internally, with no path separators. Keep the already-open
 // directory descriptor across every operation: swapping the pathname cannot redirect our I/O.
+#[cfg(unix)]
 fn open_at(directory: &File, name: &str, flags: i32, mode: libc::mode_t) -> io::Result<File> {
     let name = std::ffi::CString::new(name)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid record name"))?;
@@ -616,6 +658,7 @@ fn open_at(directory: &File, name: &str, flags: i32, mode: libc::mode_t) -> io::
     }
 }
 
+#[cfg(unix)]
 fn remove_at(directory: &File, name: &str) {
     if let Ok(name) = std::ffi::CString::new(name) {
         unsafe {
@@ -633,6 +676,7 @@ fn remove_at(directory: &File, name: &str) {
     ),
     allow(dead_code)
 )]
+#[cfg(unix)]
 fn unlink_at(directory: &File, name: &str) -> io::Result<()> {
     let name = std::ffi::CString::new(name)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid temporary name"))?;
@@ -653,8 +697,10 @@ fn unlink_at(directory: &File, name: &str) -> io::Result<()> {
     ),
     allow(dead_code)
 )]
+#[cfg(unix)]
 struct Directory(*mut libc::DIR);
 
+#[cfg(unix)]
 impl Drop for Directory {
     fn drop(&mut self) {
         if !self.0.is_null() {
@@ -672,6 +718,7 @@ impl Drop for Directory {
     ),
     allow(dead_code)
 )]
+#[cfg(unix)]
 fn directory_names(directory: &File) -> io::Result<Vec<String>> {
     let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
     if duplicate < 0 {
@@ -713,6 +760,7 @@ fn safe_temp_name(name: &str, prefix: &str) -> bool {
     suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+#[cfg(unix)]
 fn rename_at(directory: &File, from: &str, to: &str) -> io::Result<()> {
     let from = std::ffi::CString::new(from).expect("internally generated name");
     let to = std::ffi::CString::new(to).expect("fixed record name");
@@ -731,6 +779,7 @@ fn rename_at(directory: &File, from: &str, to: &str) -> io::Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn validate_destination(
     directory: &File,
     name: &str,
@@ -759,6 +808,7 @@ fn validate_destination(
     Ok(())
 }
 
+#[cfg(unix)]
 fn read_owned_regular(directory: &File, name: &str) -> Result<Vec<u8>, ReadFailure> {
     let file = open_at(directory, name, libc::O_RDONLY, 0).map_err(|e| {
         if e.kind() == io::ErrorKind::NotFound {
@@ -797,6 +847,7 @@ fn read_owned_regular(directory: &File, name: &str) -> Result<Vec<u8>, ReadFailu
     Ok(bytes)
 }
 
+#[cfg(unix)]
 fn create_temp(
     directory: &File,
     destination: &str,
