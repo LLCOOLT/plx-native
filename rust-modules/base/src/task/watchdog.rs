@@ -231,7 +231,12 @@ impl LoopWatch {
                 // pthread_t ABI (pointer on Darwin, unsigned long on ARM Linux).
                 // fwcompat inventories export both symbols at GLIBC_2.4 across all releases:
                 // libpthread on older firmware, libc after the glibc pthread merge.
+                #[cfg(unix)]
                 let main_thread = unsafe { libc::pthread_self() } as usize;
+                // Windows has no per-thread SIGABRT; the observer aborts the whole process
+                // instead (see `observe_loop`), so there is no thread identity to carry.
+                #[cfg(windows)]
+                let main_thread = 0usize;
                 let log_only = crate::devtrig::guard_log_only();
                 super::spawn("main-thread watchdog", move || observe_loop(main_thread, log_only)).is_some()
             };
@@ -314,15 +319,31 @@ fn observe_loop(
         #[cfg(feature = "threadcheck")]
         {
             if observation.kill {
-                crate::eventlog::log(&format!("main-thread hang fatal: {}ms in {}; sending SIGABRT to main thread", observation.elapsed.unwrap(), label));
+                #[cfg(unix)]
+                const ACTION: &str = "sending SIGABRT to main thread";
+                #[cfg(windows)]
+                const ACTION: &str = "aborting the process";
+                crate::eventlog::log(&format!("main-thread hang fatal: {}ms in {}; {ACTION}", observation.elapsed.unwrap(), label));
                 // Recheck progress after logging: recovery while the observer was delayed must
                 // not kill a healthy loop. The loop owner is the process-lifetime main thread.
                 // Logging can itself be delayed by a process stop. Do not signal using a
                 // stale sample; the next poll will rebase and discard its warning as well.
                 let sample_age = origin.elapsed().as_millis().saturating_sub(now as u128);
                 if sample_age <= MAX_POLL_GAP_MS as u128 && SIGNALS.progress() == progress {
-                    let rc = unsafe { libc::pthread_kill(main_thread as libc::pthread_t, libc::SIGABRT) };
-                    if rc != 0 { crate::eventlog::log(&format!("main-thread hang: pthread_kill failed: {rc}")); }
+                    #[cfg(unix)]
+                    {
+                        let rc = unsafe { libc::pthread_kill(main_thread as libc::pthread_t, libc::SIGABRT) };
+                        if rc != 0 { crate::eventlog::log(&format!("main-thread hang: pthread_kill failed: {rc}")); }
+                    }
+                    // Windows cannot raise a signal on another thread, so the abort happens here,
+                    // on the observer: the crash report then shows the watchdog's stack rather
+                    // than the stalled main thread's, but the process still dies at the same
+                    // moment and the line above names the hang.
+                    #[cfg(windows)]
+                    {
+                        let _ = main_thread;
+                        std::process::abort();
+                    }
                 }
             }
         }

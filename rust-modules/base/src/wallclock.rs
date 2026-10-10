@@ -6,7 +6,8 @@
 //! nothing else — the epoch in milliseconds, and the local UTC offset the C library would apply to
 //! a given instant, so a guide can print "20:00" without each caller reaching into `libc`.
 //!
-//! The offset is asked per instant (`localtime_r`'s `tm_gmtoff`) rather than cached, because a
+//! The offset is asked per instant (`localtime_r`'s `tm_gmtoff`; on Windows `localtime_s`'s DST
+//! flag over the CRT's zone biases) rather than cached, because a
 //! daylight-saving change inside a guide's window moves it, and an airing at 01:30 on the night
 //! the clocks go back is printed with the offset of THAT instant.
 
@@ -67,6 +68,7 @@ pub fn local_offset_s(epoch_ms: i64) -> i32 {
     effective_offset(libc_offset_s(epoch_ms), load(&SYSTEM_OFFSET), load(&GUIDE_OFFSET))
 }
 
+#[cfg(unix)]
 fn libc_offset_s(epoch_ms: i64) -> i32 {
     let secs = epoch_ms.div_euclid(1000);
     // `.ok()`: `time_t` is 32 bits on the television and 64 on a host, so the conversion is
@@ -80,6 +82,30 @@ fn libc_offset_s(epoch_ms: i64) -> i32 {
             return 0;
         }
         i32::try_from(tm.tm_gmtoff).unwrap_or(0)
+    }
+}
+
+/// The Windows CRT has no `tm_gmtoff`. `localtime_s` (which runs `_tzset` itself) says whether
+/// daylight saving is in force at THIS instant, and the CRT's zone biases turn that into the
+/// offset: `_get_timezone` is the standard zone's seconds WEST of UTC, `_get_dstbias` the further
+/// shift while DST applies (normally -3600), so east-of-Greenwich is minus their sum.
+#[cfg(windows)]
+fn libc_offset_s(epoch_ms: i64) -> i32 {
+    // `.ok()` for the same reason as the unix arm: `time_t` is 32 bits on a 32-bit target.
+    let Some(t) = libc::time_t::try_from(epoch_ms.div_euclid(1000)).ok() else { return 0 };
+    // SAFETY: each call writes only into the out-parameter we hand it; a zeroed `tm` is a valid
+    // out-parameter.
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_s(&mut tm, &t) != 0 {
+            return 0;
+        }
+        let (mut zone, mut dst): (libc::c_long, libc::c_long) = (0, 0);
+        if libc::get_timezone(&mut zone) != 0 || libc::get_dstbias(&mut dst) != 0 {
+            return 0;
+        }
+        let west = i64::from(zone) + if tm.tm_isdst > 0 { i64::from(dst) } else { 0 };
+        i32::try_from(-west).unwrap_or(0)
     }
 }
 

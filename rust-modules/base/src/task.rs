@@ -70,6 +70,10 @@ use std::thread::{Builder, JoinHandle};
 
 mod blocking;
 pub mod watchdog;
+/// pthread mutex/condvar names over SRWLOCK and CONDITION_VARIABLE, for the Windows desktop build's
+/// C-shaped queues (`aq`) and lock tables; unix calls `libc` directly.
+#[cfg(windows)]
+pub mod pthread;
 #[cfg(feature = "threadcheck")]
 pub mod runtime_check;
 pub use blocking::{allow_blocking, AllowBlocking};

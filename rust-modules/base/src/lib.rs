@@ -27,6 +27,8 @@ pub mod wallclock; // the epoch and the local UTC offset, for the guide's wall-c
 pub mod tile; // `Tile`: the shelf-tile trait the data layer implements and `ui` draws through
 pub mod devtrig; // the /tmp trigger PRIMITIVES (`flag`, `read`, `latched_flag!`, `no_wan`...)
 pub mod diag; // the frame instruments (`heartbeat`, `spans`) and the zlib helper
+#[cfg(windows)]
+pub mod winfs; // the Windows desktop build's counterparts of the unix O_NOFOLLOW/owner open guards
 #[cfg(any(test, feature = "test-support"))]
 pub mod testlock; // one lock for every test that touches a process-global
 #[cfg(any(test, feature = "test-support"))]
