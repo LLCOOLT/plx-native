@@ -48,12 +48,14 @@
 # them without a television could not reach them: `ff: FFmpeg unavailable — the app runs, playback
 # will refuse`, measured 2026-08-28.
 #
-# **One script, and specifically ONE COMPONENT LIST.** Everything below `set --` is shared: same
-# version, same demuxers, parsers, bitstream filters and decoders, same `--disable-network` with
-# `file` as the only protocol, same `-plx` suffix, same LGPL flags. A second script would drift,
-# and the drift would be invisible — the host would demux something the television cannot, or
-# stop demuxing something it can, and the simulator would be answering about a different FFmpeg
-# while looking identical. The cross block is the only difference, and it is three lines.
+# **One script, and specifically ONE DEMUX COMPONENT LIST.** Everything below `set --` is shared:
+# same version, same demuxers, parsers, bitstream filters and subtitle decoders, same
+# `--disable-network` with `file` as the only protocol, same `-plx` suffix, same LGPL flags. A
+# second script would drift, and the drift would be invisible — the host would demux something the
+# television cannot, or stop demuxing something it can, and the simulator would be answering about
+# a different FFmpeg while looking identical. The cross block is one difference; the other is the
+# desktop's decode set (audio/video decoders, libswresample, the OS hardware decoder), which only
+# ADDS what the television decodes in hardware and leaves the demux half byte for byte the same.
 #
 # The output is `vendor/ffmpeg-prefix-host` and `libavformat-plx.63.dylib` — Mach-O naming, so
 # nothing here can be confused with the shipped ELF even by basename, and `make ipk`'s
@@ -66,6 +68,11 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 NDK=${WEBOS_SDK:-$HOME/webos-ndk/arm-webos-linux-gnueabi_sdk-buildroot}
 SYSROOT="$NDK/arm-webos-linux-gnueabi/sysroot"
 HOST=${HOST:-}
+# `shasum` is Perl's, on every Mac and Linux runner but not in MSYS2's MinGW shell, where the Windows
+# host build runs (`.github/workflows/desktop.yml`); coreutils' `sha256sum` prints the same line.
+if ! command -v shasum >/dev/null 2>&1; then
+  shasum() { [ "$1" = -a ] && shift 2; sha256sum "$@"; }
+fi
 # WHERE EACH HALF LIVES, and why they are no longer in the same place.
 #
 # The PREFIX — the 3.8 MB of installed libraries and headers — stays inside the checkout, exactly
@@ -147,8 +154,9 @@ fi
 #              h264/hevc are the raw Annex-B paths (/tmp/sample.h264 and the dev triggers).
 #   parsers    needed by avformat_find_stream_info to fill AVCodecParameters.
 #   bsf        AVCC -> Annex-B for mp4-family video, which the Starfish pipeline requires.
-#   decoders   SUBTITLES ONLY. Video and audio are decoded by the TV's hardware via Starfish;
-#              FFmpeg here never touches a video frame.
+#   decoders   SUBTITLES ONLY on the television. Video and audio are decoded by the TV's hardware
+#              via Starfish; FFmpeg there never touches a video frame. The host build adds the
+#              desktop's own decode set below.
 #   encoder/   mpeg1video + mpegts are the DEV capture stream only, dropped by RELEASE=1 along
 #   muxer      with swscale, which nothing else uses.
 #
@@ -195,6 +203,21 @@ set -- "$@" \
   --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,extract_extradata \
   --enable-decoder=pgssub,dvdsub,dvbsub,ass,srt,subrip,text,mov_text,webvtt \
   --enable-protocol=file
+
+# **The desktop decodes for itself, and only the host build carries the decoders.** On a television
+# Starfish decodes in hardware and FFmpeg never sees a video frame; the desktop app has no such
+# pipeline, so its FFmpeg adds exactly the decoders for what the demuxer above FEEDS (H.264 and
+# HEVC in Annex-B, AC-3, E-AC-3, ADTS AAC and DTS core — `player::engine`'s payload vocabulary),
+# libswresample to turn them into the sound card's format, and the OS's hardware decoder where
+# there is one. The demux half — demuxers, parsers, bitstream filters — is untouched, so the
+# simulator still answers about the television's demuxer, byte for byte.
+if [ -n "$HOST" ]; then
+  set -- "$@" --enable-swresample --enable-decoder=h264,hevc,ac3,eac3,aac,dca
+  case "$(uname -s)" in
+    Darwin) set -- "$@" --enable-videotoolbox --enable-hwaccel=h264_videotoolbox,hevc_videotoolbox ;;
+    MINGW*|MSYS*|CYGWIN*) set -- "$@" --enable-d3d11va --enable-hwaccel=h264_d3d11va,hevc_d3d11va,h264_d3d11va2,hevc_d3d11va2 ;;
+  esac
+fi
 
 if [ "${RELEASE:-}" = "1" ]; then
   set -- "$@" --disable-swscale

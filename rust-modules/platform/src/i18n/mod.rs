@@ -402,7 +402,10 @@ fn parse_reply(raw: &str) -> Option<SystemLocale> {
     })
 }
 fn platform_locale() -> Option<SystemLocale> {
-    match crate::tv::system_locale() {
+    from_reply(crate::tv::system_locale())
+}
+fn from_reply(reply: crate::tv::LocaleReply) -> Option<SystemLocale> {
+    match reply {
         crate::tv::LocaleReply::NoPlatform => None,
         crate::tv::LocaleReply::Reply(raw) => {
             let info = parse_reply(&raw);
@@ -410,6 +413,14 @@ fn platform_locale() -> Option<SystemLocale> {
                 plx_base::eventlog::log("locale: settings refused or returned malformed localeInfo");
             }
             info
+        }
+        crate::tv::LocaleReply::Os { ui, fmt } => {
+            let info = SystemLocale {
+                ui: ui.as_deref().and_then(normalize),
+                fmt: fmt.as_deref().and_then(normalize),
+                clock: None,
+            };
+            (info.ui.is_some() || info.fmt.is_some()).then_some(info)
         }
         crate::tv::LocaleReply::Unavailable => {
             plx_base::eventlog::log("locale: settings unavailable; using fallback");

@@ -1,8 +1,13 @@
 //! Private local protocol. No request can choose a DB8 owner, kind, ID, or arbitrary method.
 #[path = "failure.rs"]
 pub mod failure;
+#[cfg(unix)]
 #[path = "activation.rs"]
 #[allow(dead_code)] // Client activation and helper startup share this host-testable file protocol.
+pub mod activation;
+#[cfg(windows)]
+#[path = "activation_windows.rs"]
+#[allow(dead_code)]
 pub mod activation;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

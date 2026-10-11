@@ -64,7 +64,7 @@ is not a subset failure, it is a whole bypassed layer:
 | tier | command | cost | can never answer |
 |---|---|---|---|
 | **1 — host suite** | `make check` | **~100 s warm on an otherwise idle 10-core Mac** (the cargo branch, the harness and the concurrent Python/shell/C gates all run beside each other), no TV, but machine-wide-bounded to two concurrent runs: it queues behind two other worktrees' `make check`s first | anything that needs a native library, a Linux kernel, or a pixel |
-| **1.5 — simulator** | `make sim` + the `ui-sim` skill | seconds, N at once | frame rate, text rasterization, anything about video |
+| **1.5 — simulator** | `make sim` + the `ui-sim` skill | seconds, N at once | frame rate, text rasterization, LG's decoder and the video plane |
 | **2 — the device** | `tv-lock` → `wake-tv` → `tv-session` / `tests/run.py` | one television, serialized | what only a PHOTOGRAPH of the panel shows — see below |
 
 There is a fourth blind spot that is not a tier and catches people who did everything right: **a
@@ -155,9 +155,9 @@ It provably cannot answer:
   `loop=` from here as a perf result.
 - **Text rasterization truth** — different FreeType, so stem/bar weight and the `theme::size`
   ladder stay device questions.
-- **Anything about video.** The 29-symbol Starfish/ACB seam does not exist off-device; Play lands
-  on the app's real failure read-out, which is correct behaviour and a convenient way to look at
-  that screen.
+- **Anything about LG's decoder or the video plane.** The 29-symbol Starfish/ACB seam does not
+  exist off-device; the desktop build decodes with its own FFmpeg (`player::desk`), so a picture on
+  a desk proves only the engine above the sink.
 - **The cached modal ground.** The simulator runs with the frame cache OFF (`frame cache:
   CopyTexSubImage error=0x500 — cache off`), so `popover::host`'s cached stages never run and a sim
   capture cannot show a fault in them; only the TV can.

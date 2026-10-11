@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 pub enum Backend {
     Keymanager3,
     PalmKeymanager,
+    /// The desktop app on macOS: the login Keychain holds the secret (`src/desktop/keystore.rs`).
+    MacKeychain,
+    /// The desktop app on Windows: DPAPI-sealed, user scope (`src/desktop/keystore.rs`).
+    WinDpapi,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]

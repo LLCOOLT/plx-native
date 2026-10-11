@@ -12,17 +12,25 @@
 //! handler runs unchanged. This mirrors the existing `/tmp/plxnative-*` dev-trigger
 //! design; `tools/stream-screen.py` is the host-side driver. Boot-neutral: the FIFO is
 //! excluded from `automated_boot`, so its presence never changes the boot flow.
+//!
+//! Unix only: the Windows desktop build has no `mkfifo`, so [`Remote::open`] answers `None` there.
 
+#[cfg(unix)]
 use libc::c_void;
+#[cfg(unix)]
 use std::os::unix::io::RawFd;
+#[cfg(windows)]
+type RawFd = std::os::raw::c_int;
 
 /// The control FIFO. Kept in the `plxnative-*` dev namespace for consistency — and resolved
 /// through [`plx_base::paths`] rather than a literal, so a host build running several simulators at
 /// once gives each its own FIFO instead of all of them draining one.
+#[cfg(unix)]
 fn fifo_path() -> std::path::PathBuf {
     plx_base::paths::in_runtime_dir("plxnative-remote")
 }
 
+#[cfg_attr(windows, allow(dead_code))] // never opened on Windows (see `open`)
 pub struct Remote {
     fd: RawFd,
     /// Bytes read but not yet terminated by whitespace — an unfinished token held
@@ -77,6 +85,14 @@ impl Remote {
     /// trick). Returns `None` on any failure — the app then just runs without a remote:
     /// silently when the feature is off (the expected case in a release build), with a
     /// logged errno when the FIFO itself could not be opened.
+    /// Windows has no `mkfifo`, so there is no channel to open: the desktop window takes real
+    /// keys, and a run there has no remote control.
+    #[cfg(windows)]
+    pub fn open() -> Option<Remote> {
+        None
+    }
+
+    #[cfg(unix)]
     pub fn open() -> Option<Remote> {
         // Gated HERE rather than at the call site, so there is exactly one door and the caller's
         // `remote.as_mut()` type-checks unchanged in both feature sets.
@@ -138,9 +154,14 @@ impl Remote {
     /// token. A trailing partial token (no terminating whitespace yet) is retained for
     /// the next frame so a split write is never mis-parsed.
     pub fn drain(&mut self, mut f: impl FnMut(&str)) {
+        #[cfg_attr(windows, allow(unused_mut))] // only the unix read writes into it
         let mut tmp = [0u8; 512];
         loop {
+            #[cfg(unix)]
             let n = unsafe { libc::read(self.fd, tmp.as_mut_ptr() as *mut c_void, tmp.len()) };
+            // No FIFO on Windows (see `open`): only a test-buffered remote exists, with no fd.
+            #[cfg(windows)]
+            let n: isize = 0;
             if n <= 0 {
                 break; // EAGAIN (empty) or error → nothing more this frame
             }
@@ -184,6 +205,7 @@ impl Remote {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Remote {
     fn drop(&mut self) {
         unsafe {

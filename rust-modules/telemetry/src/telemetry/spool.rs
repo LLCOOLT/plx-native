@@ -199,6 +199,7 @@ fn after_append_for_test() {
 
 fn append_locked(r: &Record) -> bool {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
     let Some(p) = path() else { return false };
@@ -217,19 +218,26 @@ fn append_locked(r: &Record) -> bool {
     // `resolve`/compaction creates the file through `write_atomic`, so ordinary append only opens
     // an existing object. O_NOFOLLOW plus fstat closes the fixed-name symlink/TOCTOU path in the
     // shared runtime directory; the fd, rather than a second pathname lookup, is what is checked.
+    #[cfg(unix)]
     let opened = std::fs::OpenOptions::new()
         .append(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&p);
+    // Windows: the no-follow open and the regular-file check; no uid or mode (`plx_base::winfs`).
+    #[cfg(windows)]
+    let opened = plx_base::winfs::no_follow(std::fs::OpenOptions::new().append(true)).open(&p);
     let Ok(mut f) = opened else {
         plx_base::eventlog::log("telemetry: could not open the spool for append");
         return false;
     };
     let Ok(meta) = f.metadata() else { return false };
-    if !meta.file_type().is_file()
+    #[cfg(unix)]
+    let unsafe_file = !meta.file_type().is_file()
         || meta.uid() != unsafe { libc::geteuid() }
-        || meta.permissions().mode() & 0o077 != 0
-    {
+        || meta.permissions().mode() & 0o077 != 0;
+    #[cfg(windows)]
+    let unsafe_file = !meta.file_type().is_file();
+    if unsafe_file {
         plx_base::eventlog::log("telemetry: refused an unsafe spool file");
         return false;
     }

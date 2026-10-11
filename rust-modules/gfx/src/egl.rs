@@ -82,6 +82,7 @@ const GL_EXTENSIONS: c_uint = 0x1F03;
 
 extern "C" {
     fn glGetString(name: c_uint) -> *const c_char;
+    fn glGetError() -> c_uint;
 }
 
 type FnGetCurrentDisplay = unsafe extern "C" fn() -> *mut c_void;
@@ -601,6 +602,11 @@ pub fn late_probe() {
 fn log_gl_extensions() {
     let p = unsafe { glGetString(GL_EXTENSIONS) };
     if p.is_null() {
+        // A core-profile desktop context (macOS, and Windows on most drivers) has no single
+        // extension string: the query is GL_INVALID_ENUM, and that error stays latched until read.
+        // Left there, the next probe to call `glGetError` takes it for its own failure — the frame
+        // cache's `glCopyTexSubImage2D` check did, and turned the cache off on a Windows PC.
+        unsafe { glGetError() };
         plx_base::eventlog::log("gl extensions: <null>");
         return;
     }

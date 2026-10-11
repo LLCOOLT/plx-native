@@ -164,6 +164,7 @@ mod private_log_tests {
 /// longer what it was — [`log`] passes every line through [`scrub::scrub_local`] before the write.
 /// What stays open is that another native app in gid 5000 on the same television can read these
 /// files; `docs/distribution.md` §6.9 states that residual risk and the audit behind it.
+#[cfg(unix)]
 const LOG_MODE: u32 = 0o640;
 
 /// Open a log sink for append at [`LOG_MODE`] — **the one open discipline every Rust-side sink
@@ -185,6 +186,10 @@ const LOG_MODE: u32 = 0o640;
 /// it already owned. The mode is set with `fchmod` rather than trusted to `open(2)`, so it does not
 /// depend on the umask and an append target that survived from a 0600 release is corrected on its
 /// first write.
+///
+/// The Windows desktop build has a weaker twin below: it refuses a symlink or junction and
+/// anything that is not a regular file, and stops there.
+#[cfg(unix)]
 pub fn open_log_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     let open = |create: bool| {
@@ -212,6 +217,25 @@ pub fn open_log_append(path: &std::path::Path) -> std::io::Result<std::fs::File>
     }
     if meta.permissions().mode() & 0o777 != LOG_MODE {
         file.set_permissions(std::fs::Permissions::from_mode(LOG_MODE))?;
+    }
+    Ok(file)
+}
+
+/// [`open_log_append`] for the Windows desktop build. The sinks live under the user's own profile
+/// (`paths`), not in a shared sticky `/tmp`, and that directory's ACL already keeps other users
+/// out, so the unix owner, link-count and mode checks have no counterpart here: there is no
+/// stable-std way to read a link count, and no mode to correct. What is kept is the half that
+/// still means something — [`crate::winfs::no_follow`] opens a symlink or junction ITSELF rather
+/// than its target, and the type check then refuses it.
+#[cfg(windows)]
+pub fn open_log_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let file = crate::winfs::no_follow(std::fs::OpenOptions::new().append(true).create(true))
+        .open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "unsafe log sink",
+        ));
     }
     Ok(file)
 }

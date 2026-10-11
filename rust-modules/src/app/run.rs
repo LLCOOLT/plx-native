@@ -560,12 +560,16 @@ unsafe fn present_and_swap(
             crate::capture::tick(fr.now);
         }
         app.instr.mark(plx_base::diag::heartbeat::Phase::Capture); // capture
-        // `plxnative-simvideo`: the decoded picture goes UNDER the finished UI, as the television's
-        // compositor puts its video plane under ours — before the capture, so shots include it.
+        // The decoded picture (the desktop decoder's, or `plxnative-simvideo`'s) goes UNDER the
+        // finished UI, as the television's compositor puts its video plane under ours — before
+        // the capture, so shots include it.
         #[cfg(feature = "hostsim")]
         if fr.player {
             plx_media::player::sim_video::composite_under();
+            plx_media::player::desk::video::composite_under();
         }
+        #[cfg(feature = "hostsim")]
+        super::desktop_window::keep_display_awake(fr.player && !plx_media::player::lifecycle::paused());
         // Before the swap, never after: the back buffer is undefined once presented.
         // A dump decides here whether this frame is written (`dev::framedump`); otherwise the
         // ordinary screenshot seam.
@@ -746,6 +750,12 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
     let et = rd_u32(&app.ev, 0);
     app.window_activity.event(et);
     plx_telemetry::telemetry::window::lifecycle(et, matches!(app.route(), AppArg::Player));
+    // A desktop window that changed size, display or fullscreen state: re-fit the blit. Before
+    // the replay gate, because it changes how the frame is shown and never what is drawn.
+    #[cfg(feature = "hostsim")]
+    if et == super::desktop_window::SDL_WINDOWEVENT {
+        plx_base::surface::window_resized(app.win);
+    }
     if controlled_replay(app) {
         // The tape owns logical ingress; real SDL startup notifications must not be
         // counted a second time. The real compositor still owns window safety.
@@ -774,6 +784,38 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
     // kind — rather than in each of the ~30 arms below, where the next one added would
     // silently draw nothing.
     plx_machine::idle::invalidate();
+    // The desktop's fullscreen shortcut belongs to the window, not to the interface: taken here,
+    // before the key reaches the ladder or the recorder. Real first presses only, never a
+    // synthetic one (whose `mod` field carries a wcode) or an auto-repeat.
+    #[cfg(feature = "hostsim")]
+    if et == SDL_KEYDOWN
+        && rd_u32(&app.ev, 8) != SYNTH_WINDOW
+        && app.ev[13] == 0
+        && super::desktop_window::toggles_fullscreen(
+            rd_u32(&app.ev, 20),
+            u16::from_ne_bytes([app.ev[24], app.ev[25]]),
+        )
+    {
+        super::desktop_window::toggle_fullscreen(app.win);
+        return;
+    }
+    // A desktop mouse has more buttons than the Magic Remote's one. The primary button is the
+    // remote's click; the right button and the back side-button are the remote's BACK (pushed as ESC,
+    // on the press);
+    // the others mean nothing here, and must not click either.
+    #[cfg(feature = "hostsim")]
+    if matches!(et, SDL_MOUSEBUTTONDOWN | SDL_MOUSEBUTTONUP) {
+        match super::desktop_window::mouse_button(app.ev[16]) {
+            super::desktop_window::Button::Primary => {}
+            super::desktop_window::Button::Back => {
+                if et == SDL_MOUSEBUTTONDOWN {
+                    remote_synth_key(SDLK_ESCAPE, 0);
+                }
+                return;
+            }
+            super::desktop_window::Button::Ignored => return,
+        }
+    }
     if et == SDL_KEYDOWN
         || et == SDL_KEYUP
         || et == SDL_TEXTINPUT
@@ -3664,6 +3706,7 @@ mod lifecycle_regression_tests {
         clock::set_replay(100);
         let mut fr=Frame::begin(&app.player.session, app.bridge.metadata_view());
         for et in [SDL_MOUSEBUTTONDOWN,SDL_MOUSEMOTION,SDL_MOUSEBUTTONUP] {
+            app.ev[16]=1; // SDL_BUTTON_LEFT: the desktop ignores every other button's click
             app.ev[20..24].copy_from_slice(&400i32.to_ne_bytes());
             app.ev[24..28].copy_from_slice(&300i32.to_ne_bytes());
             event(&mut app,&mut fr,et);
@@ -4258,7 +4301,7 @@ mod lifecycle_regression_tests {
         super::super::bridge::show_page(&mut app.pages, AppArg::Home);
         app.bridge.seed_hub_grid_for_test(3, 4);
         if declined {
-            // The first card is a collection: the menu has nothing to offer it.
+            // The first card is another server's collection: the menu has nothing to offer it.
             app.bridge.retag_hub_item_as_collection_for_test("1");
         }
         settle(&mut app, &mut t);
@@ -4421,7 +4464,7 @@ mod lifecycle_regression_tests {
         assert!(!app.pages.input.press.is_active(), "the spring came to rest");
     }
 
-    /// A hold the app DECLINES (nothing to offer a collection) is not taken: the dispatcher
+    /// A hold the app DECLINES (nothing to offer another server's collection) is not taken: the dispatcher
     /// abandons the press and it springs back, then comes to rest.
     #[test]
     fn a_real_card_hold_the_app_declines_springs_back() {
@@ -4429,7 +4472,7 @@ mod lifecycle_regression_tests {
         let (active, scale, mut app, mut t) = hold_a_home_card(true);
         assert!(active && scale < 0.99, "the declined hold springs back: active={active} scale={scale}");
         for _ in 0..4 { step(&mut app, &mut t, vec![]); }
-        assert!(!super::super::bridge::item_menu_up(&app.pages), "a collection has no item menu");
+        assert!(!super::super::bridge::item_menu_up(&app.pages), "another server's collection has no item menu");
         for _ in 0..40 { step(&mut app, &mut t, vec![]); }
         assert!(!app.pages.input.press.is_active(), "…and the spring comes to rest");
     }

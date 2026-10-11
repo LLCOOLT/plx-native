@@ -341,9 +341,11 @@ plx_base::dynlib! {
         // The ELF the app SHIPS, and the Mach-O the desktop simulator builds beside it
         // (`HOST=1 ci/build-ffmpeg.sh` — same version, same component list). A candidate
         // LIST rather than a `cfg`: `dynlib!` already tries each name and reports the ones
-        // it could not open, and only one of these two can ever exist in an app directory.
+        // it could not open, and only one of these can ever exist in an app directory. The
+        // third is the Windows DLL FFmpeg names `<name><suffix>-<major>.dll` on MinGW.
         "libavformat-plx.so.63",
         "libavformat-plx.63.dylib",
+        "avformat-plx-63.dll",
     ] {
     // Declared beside libavformat's other entry points because that is the library that DEFINES
     // it. Under `#[link]` the final link resolved every name against every library at once and
@@ -398,9 +400,11 @@ plx_base::dynlib! {
         // The ELF the app SHIPS, and the Mach-O the desktop simulator builds beside it
         // (`HOST=1 ci/build-ffmpeg.sh` — same version, same component list). A candidate
         // LIST rather than a `cfg`: `dynlib!` already tries each name and reports the ones
-        // it could not open, and only one of these two can ever exist in an app directory.
+        // it could not open, and only one of these can ever exist in an app directory. The
+        // third is the Windows DLL FFmpeg names `<name><suffix>-<major>.dll` on MinGW.
         "libavcodec-plx.so.63",
         "libavcodec-plx.63.dylib",
+        "avcodec-plx-63.dll",
     ] {
     fn avcodec_version() -> c_uint;
     fn av_packet_alloc() -> *mut AVPacket;
@@ -444,9 +448,11 @@ plx_base::dynlib! {
         // The ELF the app SHIPS, and the Mach-O the desktop simulator builds beside it
         // (`HOST=1 ci/build-ffmpeg.sh` — same version, same component list). A candidate
         // LIST rather than a `cfg`: `dynlib!` already tries each name and reports the ones
-        // it could not open, and only one of these two can ever exist in an app directory.
+        // it could not open, and only one of these can ever exist in an app directory. The
+        // third is the Windows DLL FFmpeg names `<name><suffix>-<major>.dll` on MinGW.
         "libavutil-plx.so.61",
         "libavutil-plx.61.dylib",
+        "avutil-plx-61.dll",
     ] {
     fn avutil_version() -> c_uint;
     fn av_malloc(size: usize) -> *mut c_void;
@@ -473,9 +479,11 @@ plx_base::dynlib! {
         // The ELF the app SHIPS, and the Mach-O the desktop simulator builds beside it
         // (`HOST=1 ci/build-ffmpeg.sh` — same version, same component list). A candidate
         // LIST rather than a `cfg`: `dynlib!` already tries each name and reports the ones
-        // it could not open, and only one of these two can ever exist in an app directory.
+        // it could not open, and only one of these can ever exist in an app directory. The
+        // third is the Windows DLL FFmpeg names `<name><suffix>-<major>.dll` on MinGW.
         "libswscale-plx.so.10",
         "libswscale-plx.10.dylib",
+        "swscale-plx-10.dll",
     ] {
     fn sws_getContext(
         src_w: c_int, src_h: c_int, src_fmt: c_int,

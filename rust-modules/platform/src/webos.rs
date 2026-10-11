@@ -163,6 +163,13 @@ pub fn is_realtek_k5lp_family(machine_name: &str) -> bool {
     machine_name.starts_with("k5lp") || machine_name.starts_with("k3lp")
 }
 
+/// `access(2)`'s read-permission mode. The Windows CRT's `_access` (which `libc::access` binds
+/// there) takes the same bit, 4, without exporting a name for it.
+#[cfg(unix)]
+const READABLE: libc::c_int = libc::R_OK;
+#[cfg(windows)]
+const READABLE: libc::c_int = 4;
+
 /// Read the machine name and, only on a matching SoC, probe `/dev/rtkmem` with `access(2)` —
 /// once per boot, from [`probe`]'s own boot slot, so it shares that call's ordering guarantee
 /// (before the first Load can be attempted). Logs UNCONDITIONALLY, beside the `webos:` line:
@@ -175,7 +182,7 @@ fn probe_jail() {
         .unwrap_or_default();
     let result = if is_realtek_k5lp_family(&name) {
         let readable = std::ffi::CString::new(RTKMEM_DEVICE)
-            .map(|path| unsafe { libc::access(path.as_ptr(), libc::R_OK) } == 0)
+            .map(|path| unsafe { libc::access(path.as_ptr(), READABLE) } == 0)
             .unwrap_or(false);
         if readable {
             crate::tv::sandbox::Verdict::Ok
@@ -295,7 +302,7 @@ pub fn poll_home() {
 /// minimize leg instead of leaving the user on a screen whose BACK did nothing.
 const HOME_APP_ID: &str = "com.webos.app.home";
 
-#[cfg(any(feature = "hostsim", test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support"))]
 fn launch_home() -> bool {
     plx_base::eventlog::log(&format!(
         "gohome: no LS2 bus off-device — the root press would launch {HOME_APP_ID} on a television"
@@ -303,22 +310,22 @@ fn launch_home() -> bool {
     true
 }
 
-#[cfg(any(feature = "hostsim", test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support"))]
 fn minimize() {}
 
-#[cfg(any(feature = "hostsim", test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support"))]
 fn ls2_probe() {
     plx_base::eventlog::log("gohome: no LS2 bus off-device — nothing to probe");
 }
 
-#[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn ls2_probe() {
     ls2::probe();
 }
 
 /// Grade only the allowlisted fields in the LS2 wake reply. The raw platform JSON never enters a
 /// report or the local snapshot.
-#[cfg(any(test, all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"))))]
+#[cfg(any(test, all(target_os = "linux", target_arch = "arm")))]
 fn storage_activation_reply(reply: &str) -> crate::storage::wire::failure::Detail {
     use crate::storage::wire::failure::{Detail, Stage};
     if reply.len() > 4096 { return Detail::new(Stage::ActivationInvalidReply, None); }
@@ -340,7 +347,7 @@ fn storage_activation_reply(reply: &str) -> crate::storage::wire::failure::Detai
 /// The helper publishes readiness from its startup path, so neither a successful method reply nor
 /// delivery of `/wake` is required; the result is retained only as diagnostics and the authenticated
 /// Unix-socket `Hello` is the sole readiness proof.
-#[cfg(all(target_os = "linux", target_arch = "arm", not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
+#[cfg(all(target_os = "linux", target_arch = "arm", not(any(test, feature = "test-support"))))]
 pub fn activate_storage_helper(service: &str) -> crate::storage::wire::failure::Detail {
     use crate::storage::wire::failure::{Detail, Stage};
     let uri = format!("luna://{service}/wake");
@@ -358,7 +365,7 @@ pub fn activate_storage_helper(service: &str) -> crate::storage::wire::failure::
 /// Hosts and the simulator have no storage helper to wake: the same answer an absent port gives.
 #[cfg(all(
     target_os = "linux",
-    not(all(target_arch = "arm", not(feature = "hostsim"), not(any(test, feature = "test-support"))))
+    not(all(target_arch = "arm", not(any(test, feature = "test-support"))))
 ))]
 pub fn activate_storage_helper(_service: &str) -> crate::storage::wire::failure::Detail {
     use crate::storage::wire::failure::{Detail, Stage};
@@ -368,7 +375,7 @@ pub fn activate_storage_helper(_service: &str) -> crate::storage::wire::failure:
 /// What the platform's settings service says about the locale; `i18n` owns the parse and the log
 /// lines. The same 600 ms bus budget as a root press, and for the same reason: the caller is the
 /// main thread at boot.
-#[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
+#[cfg(not(any(test, feature = "test-support")))]
 pub fn system_locale() -> crate::tv::LocaleReply {
     let result = ls2::register()
         .map_err(ls2::Fail::from)
@@ -385,7 +392,7 @@ pub fn system_locale() -> crate::tv::LocaleReply {
     }
 }
 
-#[cfg(any(feature = "hostsim", test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support"))]
 pub fn system_locale() -> crate::tv::LocaleReply {
     crate::tv::LocaleReply::NoPlatform
 }
@@ -395,7 +402,7 @@ pub fn system_locale() -> crate::tv::LocaleReply {
 /// east of UTC beside `timezone`). A jailed native process's `localtime` can read UTC on a set
 /// configured for another zone, so the clock and the guide ask here. `None` when the bus refuses
 /// or the reply has no offset. Same 600 ms boot budget as [`system_locale`].
-#[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
+#[cfg(not(any(test, feature = "test-support")))]
 pub fn system_utc_offset_s() -> Option<i32> {
     let raw = ls2::register().map_err(ls2::Fail::from).and_then(|client| {
         client.call(
@@ -417,7 +424,7 @@ pub fn system_utc_offset_s() -> Option<i32> {
     }
 }
 
-#[cfg(any(feature = "hostsim", test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support"))]
 pub fn system_utc_offset_s() -> Option<i32> {
     None
 }
@@ -449,7 +456,7 @@ mod system_time_tests {
     }
 }
 
-#[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn launch_home() -> bool {
     let payload = format!("{{\"id\":\"{HOME_APP_ID}\"}}");
     let started = std::time::Instant::now();
@@ -491,7 +498,7 @@ fn launch_home() -> bool {
     }
 }
 
-#[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn minimize() {
     let win = WINDOW.load(std::sync::atomic::Ordering::Relaxed);
     if win.is_null() {
@@ -504,11 +511,11 @@ fn minimize() {
     plx_base::eventlog::log("gohome: fallback=SDL minimize — asked, and SDL cannot say whether it took");
 }
 
-#[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
+#[cfg(not(any(test, feature = "test-support")))]
 static WINDOW: std::sync::atomic::AtomicPtr<std::os::raw::c_void> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
-#[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
+#[cfg(not(any(test, feature = "test-support")))]
 extern "C" {
     fn SDL_MinimizeWindow(win: *mut std::os::raw::c_void);
 }
@@ -516,12 +523,12 @@ extern "C" {
 /// Hand this module the SDL window, once, at boot — `textinput::bind`'s shape and for its reason:
 /// the window is created deep inside `plex_run` and the platform call needs it a long way from
 /// there.
-#[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
+#[cfg(not(any(test, feature = "test-support")))]
 pub fn bind_window(win: *mut std::os::raw::c_void) {
     WINDOW.store(win, std::sync::atomic::Ordering::Relaxed);
 }
 
-#[cfg(any(feature = "hostsim", test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support"))]
 pub fn bind_window(_win: *mut std::os::raw::c_void) {}
 
 /// One LS2 request/reply, on the calling thread.
@@ -552,7 +559,7 @@ pub fn bind_window(_win: *mut std::os::raw::c_void) {}
 /// in [`RegisterFail`] to the caller's log line instead of being freed. Anonymous clients do not
 /// collide with each other, so nothing here is serialised; a registration lives for one caller's
 /// use and is unregistered on drop, as both copies always did.
-#[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
+#[cfg(not(any(test, feature = "test-support")))]
 pub mod ls2 {
     use std::ffi::{CStr, CString};
     use std::os::raw::{c_char, c_int, c_void};
