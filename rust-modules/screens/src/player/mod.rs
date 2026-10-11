@@ -281,8 +281,11 @@ impl PlayerScreen {
     }
 
     /// **Every element this screen's `Focusable` declares and the frame DRAWS, registered as a
-    /// pointer stop at the rect `place` gives it** — the rect D-pad focus uses, so "reachable by
-    /// the D-pad" and "clickable with the pointer" are one statement (issue #162).
+    /// pointer stop at the rect `place` gives it** — the rect D-pad focus uses, so on the
+    /// television "reachable by the D-pad" and "clickable with the pointer" are one statement
+    /// (issue #162). The one exception is the desktop pointer transport's faces (`DeskCtl`),
+    /// registered last, pointer-only, in no group, and only while `DrawFrame::pointer` is live —
+    /// so a census written against `Focusable` does not cover them.
     ///
     /// Until #162 the stops were a by-product of painting: `player_hud::draw_hud` pushed each rect
     /// as it drew, in PAINT order, and the hit map resolves the LAST stop under the pointer. The

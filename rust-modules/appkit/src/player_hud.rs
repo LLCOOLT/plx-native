@@ -936,9 +936,10 @@ pub fn busy(ps: &plx_media::route::PlaybackSession) -> Busy {
 
 // ---- the transport STATE READ-OUT (the glyph slot just past the elapsed clock) ---------------
 //
-// One slot, one glyph, four states. It is a READ-OUT and not an action toggle — there is no
-// transport button row in this app and a standing owner decision forbids adding one, so nothing
-// here is focusable, hit-tested or in `BTN_N`. The glyphs are the design system's transport
+// One slot, one glyph, four states. It is a READ-OUT and not an action toggle — on the television
+// there is no transport button row and a standing owner decision forbids adding one, so nothing
+// here is focusable, hit-tested or in `BTN_N`. (The desktop's own row, `DeskCtl` below, is drawn
+// only while the pointer is live, which webOS never makes it, and is not a `BTN_N` entry.) The glyphs are the design system's transport
 // family (`Icon::Rewind` / `Icon::Pause` / `Icon::FastForward`, all in one 14-unit band, with
 // `Icon::Play` swapping in for `Pause`), which is what keeps the slot from shifting optical
 // weight as the state flips under a running clock.

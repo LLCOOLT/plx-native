@@ -1683,6 +1683,17 @@ where
         let modals = &mut nav.modals;
         let field = modals.underlay.field();
         let (mut drain_surface_text, mut capture_surface) = (false, false);
+        // The desktop pointer chrome over a full-screen SURFACE that asks for it (`ui::desk`) —
+        // one with nothing outside it to click away to, Settings: its back arrow alone, keyed to
+        // it (the input owner), once it is fully open. Painted right after that surface's own
+        // draw, in its layer and its scope, so it is shown exactly when the surface is.
+        let desk_surface = navigation.pointer.live.then(|| modals.surfaces.iter()
+            .rposition(|s| s.phase != super::containers::modal::Phase::Hidden)).flatten()
+            .filter(|&i| {
+                let s = &modals.surfaces[i];
+                s.phase == super::containers::modal::Phase::Open && s.entry.arg.pointer_chrome()
+                    && s.entry.inst.as_ref().is_some_and(|inst| inst.screen.hit_source() == HitSource::Engine)
+            });
         for (index, s) in modals.surfaces.iter_mut().enumerate() {
             let z = Z::surface(index);
             if z >= ceiling { break; }
@@ -1722,29 +1733,7 @@ where
                 }
                 report.drawn.push(inst.id);
                 stops.extend(f.into_stops());
-                // (b) is a count of THIS SURFACE's own backing renders, asked of the surface —
-                // not a literal `1`, which is what made "more than one render per surface"
-                // unspellable and the rule inert. A surface served from the shared FrameCache
-                // owns none and reports 0.
-                let render = inst.screen.render_report();
-                set.surfaces.push((s.entry.id, render.textures));
-                set.bytes += render.bytes;
-                // an Opaque surface's ground has drawn: the fold REPLACES the host from here
-                if !plx_gfx::gfx::blur_source_pass() { s.ground_ready = inst.screen.ground_ready(); }
-            }
-        }
-        // The desktop pointer chrome over a full-screen SURFACE that asks for it (`ui::desk`) — one
-        // with nothing outside it to click away to, Settings: its back arrow alone, above it and
-        // keyed to it, the input owner. Only once the surface is fully open, like its own controls.
-        if navigation.pointer.live && Z::surface(modals.surfaces.len()) < ceiling {
-            if let Some(s) = modals.surfaces.iter().rev().find(|s| s.phase != super::containers::modal::Phase::Hidden) {
-                let engine = s.entry.inst.as_ref().is_some_and(|i| i.screen.hit_source() == HitSource::Engine);
-                if s.phase == super::containers::modal::Phase::Open && engine && s.entry.arg.pointer_chrome() {
-                    // Drawn as a surface is: in its own layer above the top one, and inside the
-                    // surface scope — outside it a frozen host's cull refuses every fill
-                    // (`popover::host`), and the arrow would be clickable and invisible.
-                    let _layer = backdrop::layer(Z::surface(modals.surfaces.len()), false);
-                    let _scope = rig.surface_scope();
+                if desk_surface == Some(index) && !held {
                     let r = super::desk::place(DeskAction::Back);
                     super::desk::draw_button(Painter::root().alpha(s.motion.appear), r, DeskAction::Back.icon(),
                         navigation.pointer.over(r), super::widgets::ControlGround::Keyed);
@@ -1754,6 +1743,15 @@ where
                         hover: super::screen::Hover::Ignore, activate: Activate::Direct,
                     });
                 }
+                // (b) is a count of THIS SURFACE's own backing renders, asked of the surface —
+                // not a literal `1`, which is what made "more than one render per surface"
+                // unspellable and the rule inert. A surface served from the shared FrameCache
+                // owns none and reports 0.
+                let render = inst.screen.render_report();
+                set.surfaces.push((s.entry.id, render.textures));
+                set.bytes += render.bytes;
+                // an Opaque surface's ground has drawn: the fold REPLACES the host from here
+                if !plx_gfx::gfx::blur_source_pass() { s.ground_ready = inst.screen.ground_ready(); }
             }
         }
         if drain_surface_text && !capture_surface && !source_pass && warm_budget_us > 0 {
