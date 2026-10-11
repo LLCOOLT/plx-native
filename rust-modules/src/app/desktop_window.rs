@@ -11,7 +11,26 @@ extern "C" {
     fn SDL_SetWindowMinimumSize(win: *mut c_void, w: c_int, h: c_int);
     fn SDL_EnableScreenSaver();
     fn SDL_DisableScreenSaver();
+    fn SDL_CreateRGBSurfaceWithFormatFrom(
+        pixels: *mut c_void,
+        w: c_int,
+        h: c_int,
+        depth: c_int,
+        pitch: c_int,
+        format: u32,
+    ) -> *mut c_void;
+    fn SDL_SetWindowIcon(win: *mut c_void, icon: *mut c_void);
+    fn SDL_FreeSurface(surface: *mut c_void);
 }
+
+/// `SDL_PIXELFORMAT_RGBA32`: bytes R, G, B, A in memory — `SDL_PIXELFORMAT_ABGR8888` on the
+/// little-endian hosts every desktop build targets.
+const SDL_PIXELFORMAT_RGBA32: u32 = 0x1676_2004;
+
+/// The window's own icon (`tools/make-app-icons.py`): what the Windows taskbar and Alt-Tab and a
+/// Linux title bar show while the app runs. A bundled Mac app takes its Dock icon from the bundle,
+/// so there it only matters to an unbundled simulator.
+const WINDOW_ICON: &[u8] = include_bytes!("../../../assets/app-icon/window-256.png");
 
 /// `SDL_WINDOWEVENT`: resized, moved to another display, entered or left fullscreen.
 pub(crate) const SDL_WINDOWEVENT: u32 = 0x200;
@@ -42,6 +61,31 @@ const MIN_H: c_int = 270;
 pub(crate) unsafe fn configure(win: *mut c_void) {
     SDL_SetWindowMinimumSize(win, MIN_W, MIN_H);
     SDL_EnableScreenSaver();
+    set_icon(win);
+}
+
+/// Give the window [`WINDOW_ICON`]. SDL copies the pixels, so the decoded buffer and the surface
+/// wrapping it are released at once. A decode or surface failure leaves the platform's default
+/// icon and a log line — never a failed boot over a cosmetic.
+unsafe fn set_icon(win: *mut c_void) {
+    let Some((w, h, mut rgba)) = plx_gfx::img::img_decode_owned(WINDOW_ICON) else {
+        plx_base::eventlog::log("window: icon did not decode; keeping the default");
+        return;
+    };
+    let surface = SDL_CreateRGBSurfaceWithFormatFrom(
+        rgba.as_mut_ptr() as *mut c_void,
+        w as c_int,
+        h as c_int,
+        32,
+        (w * 4) as c_int,
+        SDL_PIXELFORMAT_RGBA32,
+    );
+    if surface.is_null() {
+        plx_base::eventlog::log("window: icon surface refused; keeping the default");
+        return;
+    }
+    SDL_SetWindowIcon(win, surface);
+    SDL_FreeSurface(surface);
 }
 
 /// Hold the display awake while a video plays, and let it sleep again once it stops or pauses.
@@ -74,10 +118,18 @@ pub(crate) fn toggles_fullscreen(sym: u32, keymod: u16) -> bool {
         || (sym == SDLK_RETURN && only(KMOD_ALT))
 }
 
+/// Publish whether the window is fullscreen (`plx_base::surface::fullscreen`), from the window's
+/// own flags — after a toggle, and on every window event, since the platform can leave fullscreen
+/// on its own (macOS's green button, a window manager's shortcut).
+pub(crate) unsafe fn sync_fullscreen(win: *mut c_void) {
+    plx_base::surface::set_fullscreen(super::SDL_GetWindowFlags(win) & FULLSCREEN != 0);
+}
+
 /// Enter fullscreen, or leave it.
 pub(crate) unsafe fn toggle_fullscreen(win: *mut c_void) {
     let full = super::SDL_GetWindowFlags(win) & FULLSCREEN != 0;
     let rc = SDL_SetWindowFullscreen(win, if full { 0 } else { FULLSCREEN_DESKTOP });
+    sync_fullscreen(win);
     plx_base::eventlog::log(&format!(
         "window: fullscreen {} rc={rc}",
         if full { "off" } else { "on" }
@@ -108,6 +160,18 @@ pub(crate) fn mouse_button(button: u8) -> Button {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The embedded window icon is a real image at the size `tools/make-app-icons.py` writes, so
+    /// `set_icon` never falls back to the platform default over a bad asset.
+    #[test]
+    fn the_window_icon_decodes_at_its_generated_size() {
+        let (w, h, rgba) = plx_gfx::img::img_decode_owned(WINDOW_ICON).expect("the window icon decodes");
+        assert_eq!((w, h), (256, 256));
+        assert_eq!(rgba.len(), 256 * 256 * 4);
+        // a rounded tile: the corner is transparent, the centre opaque
+        assert_eq!(rgba[3], 0, "the corner pixel is outside the tile");
+        assert_eq!(rgba[((128 * 256 + 128) * 4 + 3) as usize], 255, "the centre is inside it");
+    }
 
     #[test]
     fn the_fullscreen_shortcuts_and_nothing_near_them() {

@@ -373,6 +373,19 @@ pub fn to_physical(lx: f32, ly: f32) -> (f32, f32) {
     (lx * s + vx, ly * s + vy)
 }
 
+/// Is the desktop window fullscreen right now? Written by the desktop port on every window event
+/// and toggle (`app::desktop_window`); read by the player's desktop fullscreen control for its
+/// glyph. Always `false` on a television, which owns the whole panel and has no window to toggle.
+static FULLSCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn fullscreen() -> bool {
+    FULLSCREEN.load(Ordering::Relaxed)
+}
+
+pub fn set_fullscreen(full: bool) {
+    FULLSCREEN.store(full, Ordering::Relaxed);
+}
+
 /// The window changed size, display or fullscreen state: re-letterbox the offscreen frame into
 /// its new drawable and re-derive the pointer mapping. Nothing the renderer sized is touched (see
 /// [`probe`]). A no-op without the offscreen target.

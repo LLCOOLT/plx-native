@@ -1275,6 +1275,24 @@ impl HomeScreen {
         ));
     }
 
+    /// A desktop card's hover play button (`ScreenEvent::PlayCard`): play the card's item from its
+    /// resume point, as the Continue Watching deck's press does in Play mode — whatever the row.
+    fn play_card<H: HomeLike>(&self, elem: u32, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
+        let Some(Located::Item(row, col)) = self.locate(self.activation_elem(elem)) else {
+            return Handled::No;
+        };
+        let Some(item) = self.item_at(H::hubs(cx), row, col).filter(|m| crate::registry::item_plays_directly(m)) else {
+            return Handled::No;
+        };
+        fx.push(Fx::App(AppFx::Home(HomeReq::Play {
+            sid: item.sid,
+            rk: item.rk.clone(),
+            resume_ns: crate::registry::item_play_resume_ns(item),
+        })));
+        fx.invalidate(Provenance::Input);
+        Handled::Yes
+    }
+
     fn emit_item_menu<H: HomeLike>(&self, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
         if self.snap.pos < 0.5 {
             return Handled::No;
@@ -2438,6 +2456,7 @@ impl<H: HomeLike> Machine<H> for HomeScreen {
                 Handled::Yes
             }
             ScreenEvent::PressHold(_) => self.emit_item_menu(cx, fx),
+            ScreenEvent::PlayCard(elem) => self.play_card(*elem, cx, fx),
             ScreenEvent::App(AppMsg::Home(command)) => {
                 self.sync_catalog(cx);
                 self.command(*command, cx, fx)
@@ -3043,6 +3062,14 @@ impl<H: HomeLike> CardSource<H> for HomeCards<'_> {
 
     fn hover(&self, _i: usize) -> Hover {
         self.hover
+    }
+
+    fn has_menu(&self, i: usize) -> bool {
+        self.item(i).is_some_and(crate::registry::item_has_menu)
+    }
+
+    fn playable(&self, i: usize) -> bool {
+        self.item(i).is_some_and(crate::registry::item_plays_directly)
     }
 
     /// The row sweeps in with the dive: its offset and its caption's lag are the spring's times `snap`.

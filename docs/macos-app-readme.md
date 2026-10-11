@@ -29,17 +29,31 @@ the server directly over the LAN and has no remote-access path.
 
 ## Getting around
 
-It is a TV interface, so it is driven like one — with arrow keys, not the mouse.
+It is a TV interface, so it can be driven like one, with the arrow keys:
 
 | Key | Does |
 |---|---|
 | ↑ ↓ ← → | Move focus |
 | Return | Open / select |
 | Esc or Delete | Back |
+| Ctrl-Cmd-F | Fullscreen |
 | Cmd-Q | Quit |
 
-Clicking works too, on most screens, and a **right-click** (or the mouse's back button) goes back,
-including out of a playing video.
+A **right-click** (or the mouse's back button) goes back too, including out of a playing video.
+
+## Using the mouse
+
+Move the mouse and the app grows the buttons a remote would otherwise provide; press an arrow key and
+they step aside again, leaving the TV interface exactly as it is.
+
+- **Pages you open** (a film, a show, a person, a collection): a **back arrow** in the top-left
+  corner, and **Search** and **Settings** in the top-right.
+- **Rows of posters**: **‹ ›** arrows at the ends of a row page it sideways.
+- **A poster under the pointer**: **▶** plays it straight away (films and episodes), and **⋯** opens
+  its menu — mark watched, go to the show, remove from Continue Watching.
+- **While a video plays**: skip back, play/pause and skip forward in the middle of the picture (and
+  the next episode, when there is one); a back arrow top-left; **volume** (hover it for the slider,
+  click it to mute) and **fullscreen** top-right. Click the progress bar to jump, or drag it.
 
 ## Watching
 

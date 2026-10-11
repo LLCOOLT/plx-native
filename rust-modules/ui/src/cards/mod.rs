@@ -144,6 +144,19 @@ pub trait CardSource<H: Host> {
     fn more(&self) -> bool {
         false
     }
+    /// **Does a hold on card `i` open a menu?** The desktop pointer chrome (`ui::desk`) draws the
+    /// card's overflow button only where it does — the button IS that hold, so on a card whose
+    /// screen answers a hold with nothing it would be a dead control. `false` unless the screen
+    /// says so; [`holdable`](Self::holdable) is the press machine's question, not this one.
+    fn has_menu(&self, _i: usize) -> bool {
+        false
+    }
+    /// **Can card `i` be played directly?** The desktop pointer chrome's hover play button is drawn
+    /// only on such a card, and its click arrives as `ScreenEvent::PlayCard`, which the screen
+    /// must then answer. `false` unless the screen says so.
+    fn playable(&self, _i: usize) -> bool {
+        false
+    }
 }
 
 /// Where one card was drawn, handed to [`CardSource::overlay`].
@@ -316,6 +329,59 @@ pub(crate) fn warm_cards<H: Host, S: CardSource<H>>(p: Painter, src: &S, order: 
         if crate::widgets::warm_card_art(&src.art(i)) != crate::tex::Warm::Known {
             return;
         }
+    }
+}
+
+/// **A hovered card's buttons** (the desktop pointer chrome, `ui::desk`): the play disc where card
+/// `i` plays directly ([`CardSource::playable`]) and the overflow disc where a hold opens its menu
+/// ([`CardSource::has_menu`]), each with the click kind its stop carries, in the painter space of
+/// `rect` — the card as drawn through `p`. Only a card under the live pointer has them, and only one
+/// big enough to hold both apart; a section asks for its FOCUSED card alone, which hover has
+/// already made the card under the pointer.
+pub(crate) fn hover_buttons<H: Host, S: CardSource<H>>(
+    f: &DrawFrame<'_, '_, H>,
+    p: Painter,
+    src: &S,
+    i: usize,
+    rect: Rect,
+) -> impl Iterator<Item = (Rect, usize, crate::screen::Activate)> {
+    use crate::screen::Activate;
+    let shown = f.pointer.over(p.to_screen(rect).0) && rect.w >= crate::desk::CARD_PLAY + 2.0 * crate::desk::CARD_MORE;
+    let (play, more) = crate::desk::card_buttons(rect);
+    let play = (shown && src.playable(i)).then_some((play, i, Activate::Play));
+    let more = (shown && src.has_menu(i)).then_some((more, i, Activate::Hold));
+    play.into_iter().chain(more)
+}
+
+/// Paint [`hover_buttons`] over card `i`, drawn at `rect` through `p`.
+pub(crate) fn paint_hover_buttons<H: Host, S: CardSource<H>>(f: &DrawFrame<'_, '_, H>, p: Painter, src: &S, i: usize, rect: Rect) {
+    for (r, _, activate) in hover_buttons(f, p, src, i, rect) {
+        let icon = if activate == crate::screen::Activate::Play { crate::icons::Icon::Play } else { crate::icons::Icon::More };
+        crate::desk::draw_button(p, r, icon, f.pointer.over(p.to_screen(r).0), crate::widgets::ControlGround::Keyed);
+    }
+}
+
+/// Register [`hover_buttons`]' stops for card `i` (drawn at `rect` through `p`), above the cards:
+/// keyed by the card and saying what the click means, never parking focus on hover.
+pub(crate) fn hover_button_stops<H: Host, S: CardSource<H>>(
+    f: &mut DrawFrame<'_, '_, H>,
+    p: Painter,
+    src: &S,
+    entry: EntryId,
+    i: usize,
+    rect: Rect,
+    clip: Rect,
+) {
+    let buttons: Vec<_> = hover_buttons(f, p, src, i, rect).collect();
+    for (r, i, activate) in buttons {
+        f.stop(p, crate::screen::Stop {
+            key: plx_machine::machine::FocusKey { entry, elem: src.elem(i) },
+            rect: r,
+            rest_rect: r,
+            clip,
+            hover: crate::screen::Hover::Ignore,
+            activate,
+        });
     }
 }
 

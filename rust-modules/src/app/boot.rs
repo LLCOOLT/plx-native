@@ -986,6 +986,10 @@ pub(crate) unsafe fn construct(
     let mut pages = plx_ui::dispatch::Dispatcher::with_transition(Box::new(
         plx_ui::containers::transition::PageDip::new(),
     ));
+    // The desktop builds (the simulator, the Mac and Windows apps) draw the pointer chrome a mouse
+    // needs (`plx_ui::desk`); the television, which has a remote, never enables it.
+    #[cfg(feature = "hostsim")]
+    pages.desk.enable();
     // Install-wide playback preference, restored before any route can resolve a stream.
     // A legacy file with no value resolves to Original; a new file can choose Auto only
     // through route's explicit readiness gate (session::load records that decision once).

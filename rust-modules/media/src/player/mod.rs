@@ -44,6 +44,7 @@ pub mod sidecar;
 pub mod subside; // the side subtitle reader's thread and state (dev trigger `plxnative-subside`)
 #[cfg(feature = "hostsim")]
 pub mod desk; // the desktop's own decoder behind the simulator's sink (see its doc)
+pub mod volume; // the desktop player's volume and mute: written by its pointer transport, applied by `desk`'s audio lane
 #[cfg(feature = "hostsim")]
 pub mod sim_video; // the simulator's decoded picture, for screenshots (see its doc)
 pub mod threads;

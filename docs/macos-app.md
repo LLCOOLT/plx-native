@@ -72,6 +72,19 @@ divisor of the 1920x1080 canvas (`app.rs`'s `desktop_window_size`) with ALLOW_HI
 keeps the text as crisp as it is on the panel. A non-Retina 1080p display gets 960x540 at scale
 0.5 instead; Ctrl+Cmd+F (F11 elsewhere) toggles desktop fullscreen, which gives it a 1:1 surface.
 
+The icon is the logo on Apple's inset rounded tile (`assets/app-icon/plxnative-1024.png`, from
+`tools/make-app-icons.py`), not the full-bleed master square the bundle first shipped with, which
+read as an unfinished icon in the Dock. The window also carries an icon of its own
+(`app::desktop_window::set_icon`), which is what an unbundled simulator shows.
+
+## Mouse controls
+
+A remote's hardware keys are buttons on screen here, drawn only while the mouse is the input in
+use: a back arrow and Search/Settings on pushed pages, paging arrows on shelves, ▶ and ⋯ on a
+hovered card, and a transport with volume and fullscreen in the player. The first arrow key hides
+them all and leaves the television's interface exactly as it is. The contract is
+`rust-modules/ui/src/CLAUDE.md`'s "The desktop pointer chrome"; the television never draws any of it.
+
 ## Bundling: the three traps
 
 All three are in `ci/mkmacapp.py`'s module doc, because they belong with the code — repeated here

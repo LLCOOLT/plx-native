@@ -37,6 +37,7 @@ use super::screen::{
     GroupSpec, HitSource, Mounter, Placed, ReturnState, Screen, ScreenArg, ScreenEvent, Step, Stop,
 };
 
+use super::desk::DeskAction;
 use super::{Painter, Rect};
 
 /// The strip's control namespace: `of_index(STRIP_BASE + stable_id)`, never display position.
@@ -384,6 +385,9 @@ pub struct Dispatcher<H: Host> {
     /// The previous frame's page-owned motion/resource verdict, retained past `Present::take` so
     /// the held transition image can wait for the destination's visual quiescence.
     page_quiescent: bool,
+    /// The desktop pointer chrome (`ui::desk`): enabled by the desktop port alone, its global
+    /// buttons drawn above a pushed page and their clicks queued here for the application.
+    pub desk: super::desk::Desk,
 }
 
 impl<H: Host> Default for Dispatcher<H>
@@ -433,6 +437,7 @@ where
             lifted_last: None,
             prepared: false,
             page_quiescent: false,
+            desk: Default::default(),
         }
     }
 
@@ -878,9 +883,24 @@ where
                             tap.resolution_error("impossible hit resolution");
                             continue;
                         }
+                        // **A desktop chrome button is the dispatcher's, not the page's** (`ui::desk`):
+                        // a click on one is queued for the application and goes no further, and a
+                        // move over one reaches the page as a move over nothing — no page knows the
+                        // namespace, and none may read the button as one of its own elements.
+                        let desk_hit = res.hit.and_then(|k| k.elem.index()).and_then(super::desk::DeskAction::of_elem);
+                        if let Some(action) = desk_hit {
+                            if kind == PointerKind::Click {
+                                if let Some(arm) = self.input.arm {
+                                    if arm.from == PressFrom::Pointer { self.input.cancel_press(); }
+                                }
+                                self.desk.push(action);
+                                tap.input(f, &ev);
+                                continue;
+                            }
+                        }
                         match &mut ev.kind {
                             InputKind::Pointer { hit, .. } | InputKind::Click { hit, .. } | InputKind::Drag { hit, .. } => {
-                                *hit = res.hit.map(|k| k.elem);
+                                *hit = res.hit.filter(|_| desk_hit.is_none()).map(|k| k.elem);
                             }
                             _ => {}
                         }
@@ -931,6 +951,48 @@ where
                                         fx: Fx::Deliver(
                                             MachineId::Instance(inst),
                                             Delivery::Screen(ScreenEvent::Activate(k.elem)),
+                                        ),
+                                    }),
+                                    // The desktop pointer chrome's card buttons (`ui::desk`). A
+                                    // paging arrow is a pointer FOCUS move — the section reveals the
+                                    // card as it would for a D-pad move — and nothing more.
+                                    Activate::Focus => {
+                                        if let Outcome::Moved { from, to, by } = self.input.engine.set(
+                                            InputOwner::Entry(e), k, None, super::screen::By::Pointer)
+                                        {
+                                            head.push(Stamped {
+                                                from: MachineId::Input,
+                                                fx: Fx::Deliver(
+                                                    MachineId::Instance(inst),
+                                                    Delivery::Screen(ScreenEvent::FocusMoved { from, to, by }),
+                                                ),
+                                            });
+                                        }
+                                    }
+                                    // The overflow button: the remote's press-and-hold, already
+                                    // held — armed `LONG_MS` in the past (so the press latches as a
+                                    // hold and never commits) and its hold delivered at once
+                                    // (`InputMachine::hold_now`, which says why not from the tick):
+                                    // the page's ordinary `PressHold` path opens the item menu, and
+                                    // the card dips and pops as it does for a hold.
+                                    Activate::Hold => {
+                                        self.input.arm(
+                                            PressArm { key: k, from: PressFrom::Pointer, holdable: true },
+                                            MachineId::Instance(inst),
+                                            tick.ms.wrapping_sub(super::press::LONG_MS),
+                                        );
+                                        if let Some(PressEvent::Hold(id, owner, key)) = self.input.hold_now() {
+                                            head.push(Stamped {
+                                                from: MachineId::Input,
+                                                fx: Fx::Deliver(owner, Delivery::Press { id, key, held: true }),
+                                            });
+                                        }
+                                    }
+                                    Activate::Play => head.push(Stamped {
+                                        from: MachineId::Input,
+                                        fx: Fx::Deliver(
+                                            MachineId::Instance(inst),
+                                            Delivery::Screen(ScreenEvent::PlayCard(k.elem)),
                                         ),
                                     }),
                                 }
@@ -1346,7 +1408,8 @@ where
         mut glass: Option<&mut super::frame::glass::GlassPlan>, ceiling: super::frame::backdrop::Z) {
         use super::frame::backdrop::{self, Z};
         let strip_owner = self.owner_entry();
-        let navigation = rig.navigation_presentation();
+        let mut navigation = rig.navigation_presentation();
+        navigation.pointer = self.desk.read(self.input.hit.pointer_at());
         // The element the opener lift draws live above the host snapshot is NOT part of the page
         // pass (`DrawFrame::lifted`). When it changes (the menu mounts, or the lift stands down
         // because focus moved off the opener while the menu fades) the snapshot no longer matches
@@ -1561,6 +1624,29 @@ where
                     }));
                 }
             }
+            // **The desktop pointer chrome's global buttons** (`ui::desk`): above a pushed page
+            // that asks for them, below the dims and the surfaces, and never part of the page — so
+            // never inside its snapshot either. Drawn and registered only while the pointer is
+            // live, which a television never is.
+            if navigation.pointer.live && Z::CHROME < ceiling {
+                if let Some(entry) = nav.tabs.stack.top() {
+                    let engine_page = entry.inst.as_ref().is_some_and(|i| i.screen.hit_source() == HitSource::Engine);
+                    if engine_page && strip_owner == Some(entry.id) {
+                        let _desk_layer = backdrop::layer(Z::CHROME, false);
+                        let p = Painter::root().alpha(navigation.page_alpha * nav.tabs.stack.transition.page_alpha());
+                        for &action in super::desk::Desk::buttons(entry.arg.pointer_chrome()) {
+                            let r = super::desk::place(action);
+                            super::desk::draw_button(p, r, action.icon(), navigation.pointer.over(r),
+                                super::widgets::ControlGround::Keyed);
+                            stops.push(Stop {
+                                key: FocusKey { entry: entry.id, elem: H::Elem::of_index(action.elem()) },
+                                rect: r, rest_rect: r, clip: Rect::FULL,
+                                hover: super::screen::Hover::Ignore, activate: Activate::Direct,
+                            });
+                        }
+                    }
+                }
+            }
             // **The surfaces' modal dim, last thing in the page pass** (§6.2, §8.3). It is here
             // and not with each panel because the dim has to be on the framebuffer BEFORE any
             // surface's glass grabs its backdrop — see `ModalStack::draw_scrims`, which owns the
@@ -1645,6 +1731,29 @@ where
                 set.bytes += render.bytes;
                 // an Opaque surface's ground has drawn: the fold REPLACES the host from here
                 if !plx_gfx::gfx::blur_source_pass() { s.ground_ready = inst.screen.ground_ready(); }
+            }
+        }
+        // The desktop pointer chrome over a full-screen SURFACE that asks for it (`ui::desk`) — one
+        // with nothing outside it to click away to, Settings: its back arrow alone, above it and
+        // keyed to it, the input owner. Only once the surface is fully open, like its own controls.
+        if navigation.pointer.live && Z::surface(modals.surfaces.len()) < ceiling {
+            if let Some(s) = modals.surfaces.iter().rev().find(|s| s.phase != super::containers::modal::Phase::Hidden) {
+                let engine = s.entry.inst.as_ref().is_some_and(|i| i.screen.hit_source() == HitSource::Engine);
+                if s.phase == super::containers::modal::Phase::Open && engine && s.entry.arg.pointer_chrome() {
+                    // Drawn as a surface is: in its own layer above the top one, and inside the
+                    // surface scope — outside it a frozen host's cull refuses every fill
+                    // (`popover::host`), and the arrow would be clickable and invisible.
+                    let _layer = backdrop::layer(Z::surface(modals.surfaces.len()), false);
+                    let _scope = rig.surface_scope();
+                    let r = super::desk::place(DeskAction::Back);
+                    super::desk::draw_button(Painter::root().alpha(s.motion.appear), r, DeskAction::Back.icon(),
+                        navigation.pointer.over(r), super::widgets::ControlGround::Keyed);
+                    stops.push(Stop {
+                        key: FocusKey { entry: s.entry.id, elem: H::Elem::of_index(DeskAction::Back.elem()) },
+                        rect: r, rest_rect: r, clip: Rect::FULL,
+                        hover: super::screen::Hover::Ignore, activate: Activate::Direct,
+                    });
+                }
             }
         }
         if drain_surface_text && !capture_surface && !source_pass && warm_budget_us > 0 {
@@ -2204,6 +2313,9 @@ where
     fn valid_resolution_key(&self, rig: &mut dyn Rig<H>, parts: &CxParts<H::Elem>, key: FocusKey<H::Elem>,
         group: Option<GroupId>, check_group: bool) -> bool {
         if self.owner_entry() != Some(key.entry) { return false; }
+        if key.elem.index().and_then(super::desk::DeskAction::of_elem).is_some() {
+            return self.desk.enabled() && group.is_none();
+        }
         let Some(view) = Self::owner_view(&self.nav, key.entry) else { return false; };
         let Split { views, measure, .. } = rig.split();
         let cx = parts.cx::<H>(views, measure);

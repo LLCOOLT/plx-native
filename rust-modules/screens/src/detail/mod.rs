@@ -1838,6 +1838,20 @@ impl<H: ContentLike + crate::registry::MetadataLike> Machine<H> for DetailScreen
                 self.activate(*elem, cx, fx);
                 Handled::Yes
             }
+            // A desktop card's hover play button (`plx_ui::desk`) on a Related or collection card:
+            // that title, from its resume point — not this page's own item.
+            ScreenEvent::PlayCard(elem) => {
+                let key = FocusKey { entry: self.entry, elem: *elem };
+                let Some(item) = self.focused_related(Some(key), meta).filter(|m| crate::registry::item_plays_from_page(m)) else {
+                    return Handled::No;
+                };
+                self.content(fx, ContentReq::Play {
+                    play: crate::registry::PlayIntent::Movie(item.clone()),
+                    resume_ns: crate::registry::item_play_resume_ns(item),
+                });
+                fx.invalidate(Provenance::Input);
+                Handled::Yes
+            }
             ScreenEvent::PressHold(_) => {
                 let supported = cx
                     .focus

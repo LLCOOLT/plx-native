@@ -1471,6 +1471,8 @@ impl Rig<AppHost> for Bridge {
             chrome_alpha: plx_ui::nav::chrome_alpha(),
             view_tab: u32::try_from(plx_ui::nav::view_tab(-1)).ok(),
             blur_amount: plx_ui::nav::blur_amount(),
+            // the dispatcher's to fill (`Dispatcher::draw_with`): a rig does not know the pointer
+            pointer: Default::default(),
         }
     }
     fn surface_scope(&mut self) -> Option<plx_ui::popover::host::Live> {

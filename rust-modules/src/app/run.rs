@@ -755,6 +755,7 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
     #[cfg(feature = "hostsim")]
     if et == super::desktop_window::SDL_WINDOWEVENT {
         plx_base::surface::window_resized(app.win);
+        super::desktop_window::sync_fullscreen(app.win);
     }
     if controlled_replay(app) {
         // The tape owns logical ingress; real SDL startup notifications must not be
@@ -2111,7 +2112,29 @@ pub(super) fn reduce_navigation_request(request: plx_screens::registry::LoopReq,
     Ok(())
 }
 
+/// **The desktop pointer chrome's clicks** (`plx_ui::desk`), performed through the paths the remote
+/// and the strip already take, so a button can never do something its key does not: BACK is the
+/// remote's BACK (pushed as ESC, exactly as the right mouse button is), Search is the strip's Search
+/// destination, and Settings presents the Settings surface. Empty on a television, which never
+/// enables the chrome.
+fn desk_actions(app: &mut App) {
+    use plx_ui::desk::DeskAction;
+    for action in app.pages.desk.take() {
+        plx_base::eventlog::log(&format!("desk: {action:?}"));
+        match action {
+            DeskAction::Back => remote_synth_key(SDLK_ESCAPE, 0),
+            DeskAction::Search => {
+                let ret = app.pages.return_state();
+                super::bridge::nav_tab(&mut app.pages, &mut app.bridge,
+                    plx_screens::registry::HomeTab::Search, None, Some(ret));
+            }
+            DeskAction::Settings => super::bridge::open_settings(&mut app.pages),
+        }
+    }
+}
+
 fn loop_requests(app: &mut App) {
+    desk_actions(app);
     for req in app.bridge.take_reqs() {
         let req = match reduce_navigation_request(req, &mut app.pages) {
             Ok(()) => continue,

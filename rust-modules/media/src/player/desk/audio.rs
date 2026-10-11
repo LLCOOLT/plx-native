@@ -209,7 +209,7 @@ fn run(codec: &'static str, inbox: &(Mutex<Inbox>, Condvar), queued: &Mutex<Queu
                 super::refresh_sound();
             }
             let Some(r) = resampler.as_mut() else { continue };
-            let samples = r.convert(&frame);
+            let mut samples = r.convert(&frame);
             if samples.is_empty() {
                 continue;
             }
@@ -240,6 +240,14 @@ fn run(codec: &'static str, inbox: &(Mutex<Inbox>, Condvar), queued: &Mutex<Queu
                 q.end_ns = pts;
             }
             q.end_ns += duration;
+            // The desktop player's volume (`player::volume`): applied here, at the one place
+            // samples leave for the card, so the clock above never sees it.
+            let gain = super::super::volume::gain();
+            if gain != 1.0 {
+                for s in samples.iter_mut() {
+                    *s *= gain;
+                }
+            }
             o.queue(&samples);
         }
     }

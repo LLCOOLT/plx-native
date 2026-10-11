@@ -656,6 +656,18 @@ pub(crate) fn player_requests(
             PlayerReq::Exit => {
                 exit_player(ps, pa, refresh_hubs_at, pages);
             }
+            // The desktop pointer transport's own three (`player_hud::DeskCtl`): the next episode
+            // now, through the path Up Next's own button takes; the desktop's volume; and the
+            // window's fullscreen, which the content pump performs before this (it needs the window).
+            PlayerReq::PlayNext => {
+                play_up_next(ps, pa, HUD_LINGER_MS, pages, bridge);
+            }
+            PlayerReq::Volume(op) => match op {
+                plx_screens::registry::VolumeOp::ToggleMute => plx_media::player::volume::toggle_mute(),
+                plx_screens::registry::VolumeOp::Set(permille) =>
+                    plx_media::player::volume::set_level(f32::from(permille) / 1000.0),
+            },
+            PlayerReq::ToggleFullscreen => {}
         }
     }
 }

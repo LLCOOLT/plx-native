@@ -321,6 +321,8 @@ impl<H: Host<Elem = u32>> CardSource<H> for HubSrc<'_> {
     fn progress(&self, i: usize) -> Option<f32> {
         self.shelf.filter(|shelf| !shelf.landscape).and_then(|_| self.item(i)).and_then(|item| item.resume_frac())
     }
+    fn has_menu(&self, i: usize) -> bool { self.item(i).is_some_and(crate::registry::item_has_menu) }
+    fn playable(&self, i: usize) -> bool { self.item(i).is_some_and(crate::registry::item_plays_directly) }
     /// A landscape shelf's episode still carries its show line, and the Continue Watching deck its
     /// play mark when a press plays.
     fn overlay(&self, p: plx_ui::Painter, i: usize, tile: &Tile, measure: &dyn Measure) {

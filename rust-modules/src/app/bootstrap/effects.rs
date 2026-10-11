@@ -334,6 +334,7 @@ pub(crate) fn encode(effect: &Fx<super::super::bridge::AppHost>) -> Result<Value
                         ScreenEvent::Timer(id) => json!(id.0),
                         ScreenEvent::PressHold(id) | ScreenEvent::PressCommit(id) => json!(id.0),
                         ScreenEvent::Activate(elem) => json!(elem),
+                        ScreenEvent::PlayCard(elem) => json!({"play_card":elem}),
                         ScreenEvent::Input(event) => input(event)?,
                         ScreenEvent::StoreChanged(store, generation) => json!([store.0,generation]),
                         ScreenEvent::FocusMoved { from, to, by } => json!({"from":from.map(focus),

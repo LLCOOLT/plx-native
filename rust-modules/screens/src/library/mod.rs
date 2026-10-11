@@ -1125,6 +1125,16 @@ impl LibraryScreen {
             ScreenEvent::PressHold(_) => {
                 return self.command(LibraryCmd::ItemMenu, cx, fx);
             }
+            // A desktop card's hover play button (`plx_ui::desk`): the card's item from its resume
+            // point, the request the Continue Watching deck's press makes in Play mode.
+            ScreenEvent::PlayCard(elem) => {
+                let Some(item) = self.focused_item(Some(self.key(*elem)), cx)
+                    .filter(|item| crate::registry::item_plays_directly(item)) else { return Handled::No };
+                fx.push(Fx::App(AppFx::Library(LibraryReq::Play {
+                    sid: item.sid, rk: item.rk.clone(), resume_ns: crate::registry::item_play_resume_ns(item),
+                })));
+                return Handled::Yes;
+            }
             ScreenEvent::PressCommit(_) => {
                 return cx.focus.current.map_or(Handled::No, |key| self.activate(key.elem, false, cx, fx));
             }

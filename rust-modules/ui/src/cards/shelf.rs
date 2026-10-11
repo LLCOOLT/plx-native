@@ -379,6 +379,42 @@ impl Shelf {
             let s = super::press_scale(self.pop(src, i, focus), i, pressed, f.cx);
             self.draw_card(f, pr, src, i, at, s, true);
         }
+        // The desktop pointer chrome's paging arrows, over every card of the strip.
+        for (r, _) in self.arrows(f, src, at).into_iter().flatten() {
+            crate::desk::draw_button(p, crate::desk::local(p, r),
+                if r.x < SCR_W * 0.5 { crate::icons::Icon::ChevronLeft } else { crate::icons::Icon::Chevron },
+                f.pointer.over(r), crate::widgets::ControlGround::Keyed);
+        }
+    }
+
+    /// The run of cards wholly on screen at the drawn scroll, `first..=last`, if there is one.
+    fn full_run<H: Host, S: CardSource<H>>(&self, src: &S, at: SectionFrame) -> Option<(usize, usize)> {
+        let sx = self.drawn_scroll(src);
+        let full = |i: usize| {
+            let r = self.slot(i, at, sx);
+            r.x >= -0.5 && r.x + r.w <= SCR_W + 0.5
+        };
+        let first = (0..src.len()).find(|&i| full(i))?;
+        let last = (first..src.len()).take_while(|&i| full(i)).last().unwrap_or(first);
+        Some((first, last))
+    }
+
+    /// **The desktop pointer chrome's paging arrows** (`ui::desk`): while the live pointer is over
+    /// this strip, a disc in each side margin that has cards beyond it, in SCREEN space, with the
+    /// card it focuses — a page away, so the strip's own reveal moves it by the cards that were
+    /// showing. Nothing at all on a television or while keys drive a desktop.
+    fn arrows<H: Host, S: CardSource<H>>(&self, f: &DrawFrame<'_, '_, H>, src: &S, at: SectionFrame) -> [Option<(Rect, usize)>; 2] {
+        let band = Rect::new(0.0, at.y, SCR_W, self.style.h).intersect(at.clip);
+        if !f.pointer.over(band) {
+            return [None, None];
+        }
+        let Some((first, last)) = self.full_run(src, at) else { return [None, None] };
+        let (left, right) = crate::desk::shelf_arrows(at.y, self.style.h);
+        let n = src.len();
+        [
+            crate::desk::page_target(first, last, n, false).map(|t| (left, t)),
+            crate::desk::page_target(first, last, n, true).map(|t| (right, t)),
+        ]
     }
 
     /// Register the stops of the on-axis cards: each is the rect [`draw`](Self::draw) paints. Unlike
@@ -401,6 +437,31 @@ impl Shelf {
                 clip: at.clip,
                 hover: src.hover(i),
                 activate: Activate::Press,
+            });
+        }
+        // The desktop pointer chrome (`ui::desk`), registered after — so above — the cards: the
+        // focused card's buttons, keyed by that card and saying what the click means, and the
+        // paging arrows, keyed by the card each pages to. None of them parks focus on hover.
+        if !f.pointer.live {
+            return;
+        }
+        let mut chrome = Vec::new();
+        if let Some(i) = focus.filter(|&i| i < src.len()) {
+            let s = super::press_scale(self.pop(src, i, focus), i, pressed, f.cx);
+            let rect = super::to_local(p, self.slot(i, at, sx)).scaled(s);
+            chrome.extend(super::hover_buttons(f, p, src, i, rect));
+        }
+        for (r, target) in self.arrows(f, src, at).into_iter().flatten() {
+            chrome.push((crate::desk::local(p, r), target, Activate::Focus));
+        }
+        for (rect, i, activate) in chrome {
+            f.stop(p, Stop {
+                key: FocusKey { entry: self.entry, elem: src.elem(i) },
+                rect,
+                rest_rect: rect,
+                clip: at.clip,
+                hover: crate::screen::Hover::Ignore,
+                activate,
             });
         }
     }
@@ -452,6 +513,9 @@ impl Shelf {
         }
         let tile = Tile { rect, scale: s, radius: self.style.tile_radius(rect, s), focused };
         src.overlay(pr, i, &tile, f.measure);
+        if focused {
+            super::paint_hover_buttons(f, pr, src, i, rect);
+        }
     }
 
     /// The `Focusable` neighbour of `key` inside the shelf: left and right by index, the edge

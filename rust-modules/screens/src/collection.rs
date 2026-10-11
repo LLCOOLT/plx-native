@@ -212,6 +212,8 @@ impl<H: Host<Elem = u32>> CardSource<H> for Members<'_> {
         if let Some(frac) = self.collection.items.get(i).and_then(PmsMovie::resume_frac) { ui_cards::resume_bar(p, tile.rect, frac, tile.radius); }
     }
     fn more(&self) -> bool { self.collection.more }
+    fn has_menu(&self, i: usize) -> bool { self.collection.items.get(i).is_some_and(crate::registry::item_has_menu) }
+    fn playable(&self, i: usize) -> bool { self.collection.items.get(i).is_some_and(crate::registry::item_plays_from_page) }
 }
 
 /// The page's content and the state its sections read. The `Stack` is the screen's other field so
@@ -742,6 +744,19 @@ impl<H: ContentLike + CollectionLike> Machine<H> for CollectionScreen {
                     fx.push(plx_machine::machine::Fx::App(AppFx::Content(ContentReq::ItemMenu)));
                     Handled::Yes
                 } else { Handled::No }
+            }
+            // A desktop card's hover play button (`plx_ui::desk`): the member, from its resume point.
+            ScreenEvent::PlayCard(elem) => {
+                let key = plx_machine::machine::FocusKey { entry: self.entry(), elem: *elem };
+                let Some(item) = self.focused_item(Some(key), cx).filter(|m| crate::registry::item_plays_from_page(m)) else {
+                    return Handled::No;
+                };
+                fx.push(plx_machine::machine::Fx::App(AppFx::Content(ContentReq::Play {
+                    play: crate::registry::PlayIntent::Movie(item.clone()),
+                    resume_ns: crate::registry::item_play_resume_ns(item),
+                })));
+                fx.invalidate(Provenance::Input);
+                Handled::Yes
             }
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Back, edge: Edge::Down, .. }, .. }) => {
                 fx.push(plx_machine::machine::Fx::App(AppFx::Content(ContentReq::Back))); Handled::Yes

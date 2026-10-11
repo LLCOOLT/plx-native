@@ -163,6 +163,13 @@ pub struct PlayerScreen {
     /// closes on OK, BACK, a channel change, or [`LIVE_SURF_MS`] without a key (`live_surf_at`).
     live_surf: Option<usize>,
     live_surf_at: u32,
+    /// **The desktop pointer transport's hover** (`player_hud::DeskCtl`): which of its faces the
+    /// pointer is over, from the last pointer event's hit — what lights a face and keeps the
+    /// volume track out. A render fact, not logical state: it is not in [`LogicalState::write`].
+    desk_hover: Option<plx_appkit::player_hud::DeskCtl>,
+    /// A click on the volume track has seated a drag on it (§7.5): pointer drags move the slider
+    /// until the button comes up. Like `desk_hover`, never set on a television.
+    desk_drag: bool,
 }
 
 /// How long a typed channel number waits for its next digit before it tunes.
@@ -199,6 +206,8 @@ impl PlayerScreen {
             live_typed_at: 0,
             live_surf: None,
             live_surf_at: 0,
+            desk_hover: None,
+            desk_drag: false,
         }
     }
 
@@ -319,6 +328,22 @@ impl PlayerScreen {
                 );
             }
         }
+        // The desktop pointer transport's faces, above everything else on the page and only while
+        // they are drawn: `Hover::Ignore` (they are not focus stops; hover lights them through the
+        // pointer's `hit`) and `Direct`, answered by `handle_click` like the transport's own.
+        let ps = H::session(f.cx);
+        if self.desk_shown(f.pointer, hud_drawn, ps) {
+            for (ctl, rect) in plx_appkit::player_hud::desk_layout(&self.desk_facts(ps)) {
+                f.stop(plx_ui::Painter::root(), Stop {
+                    key: FocusKey { entry: self.entry, elem: ctl.elem() },
+                    rect,
+                    rest_rect: rect,
+                    clip: Rect::FULL,
+                    hover: Hover::Ignore,
+                    activate: Activate::Direct,
+                });
+            }
+        }
     }
 
     /// Is group `g` on screen this frame — the same gates `player_hud::draw_hud`/`draw_readout`
@@ -410,6 +435,12 @@ impl PlayerScreen {
             mix((plx_base::wallclock::now_ms() / 60_000) as u64);
         }
         mix(self.live_typed.len() as u64);
+        // The desktop pointer transport's hover and the facts its faces show — nothing moves them on
+        // a television, where they are constant.
+        mix(self.desk_hover.map_or(u64::MAX, |c| c.elem() as u64));
+        mix(u64::from(self.desk_drag));
+        mix(u64::from(plx_media::player::volume::level().to_bits()));
+        mix(u64::from(plx_media::player::volume::muted()) | (u64::from(plx_base::surface::fullscreen()) << 1));
         mix(self.live_surf.map_or(u64::MAX, |i| i as u64));
         mix(u64::from(
             self.row
@@ -792,10 +823,15 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
                     // dismissal, which is how a Magic Remote user finds the HUD over full-screen
                     // video. `app/run.rs`'s own motion arm did this and then RETURNED, so the page
                     // never saw a pointer event at all.
-                    InputKind::Pointer { .. } => {
+                    InputKind::Pointer { hit, .. } => {
                         self.hud.dismissed = false;
                         self.hud.extend(input.at.ms, input::HUD_LINGER_MS);
                         self.publish();
+                        let hover = hit.and_then(plx_appkit::player_hud::DeskCtl::of_elem);
+                        if hover != self.desk_hover {
+                            self.desk_hover = hover;
+                            fx.invalidate(plx_machine::present::Provenance::Input);
+                        }
                         Handled::Yes
                     }
                     _ => Handled::No,
@@ -927,6 +963,10 @@ impl PlayerScreen {
                 Self::ask(fx, PlayerReq::ArmControlRow);
                 Handled::Yes
             }
+            e if plx_appkit::player_hud::DeskCtl::of_elem(e).is_some() => {
+                self.desk_click(ps, plx_appkit::player_hud::DeskCtl::of_elem(e).expect("matched"), x, now, fx);
+                Handled::Yes
+            }
             e if (ELEM_TAB_BASE..ELEM_FAILURE_BASE).contains(&e) => {
                 let tab = e - ELEM_TAB_BASE;
                 self.hud.nav.focus = 2;
@@ -956,6 +996,12 @@ impl PlayerScreen {
     /// capture the scrubber the moment it passes over it. Nothing is committed — that is the
     /// release's job.
     fn handle_drag(&mut self, x: f32, now: u32) -> Handled {
+        if self.desk_drag {
+            // the volume track's drag (`DeskCtl::VolumeBar`): the slider follows the pointer's x
+            plx_media::player::volume::set_level(self.desk_volume_at(x));
+            plx_machine::idle::invalidate();
+            return Handled::Yes;
+        }
         if !self.scrub.drag {
             return Handled::No;
         }
@@ -976,6 +1022,7 @@ impl PlayerScreen {
     /// reasoning) and the dispatcher's press machine reads it the same way. A real OK key-up
     /// reaches here too and is inert, since nothing but a click on the bar ever sets `drag`.
     fn handle_release<H: AppLike>(&mut self, now: u32, fx: &mut Effects<'_, H>) {
+        self.desk_drag = false;
         if !self.scrub.drag {
             return;
         }
@@ -1192,20 +1239,99 @@ impl PlayerScreen {
                 // key's repeats engage the continuous ramp below and the release commits; a tap's
                 // release arms the debounce so that a rapid burst coalesces into one seek. The
                 // commit belonging to the press was this package's first regression.
-                self.scrub.commit_at = 0; // more input → cancel a pending tap commit
-                self.scrub.alive = now;
-                self.scrub.reveal = false; // a visible press is a real gesture whatever raised the HUD
-                if self.scrub.dir == 0 && self.scrub.ns < 0 {
-                    self.scrub.ns = plx_media::player::intended_pos_ns(ps);
-                }
-                if !self.scrub.hold {
-                    let step = if fwd { input::scrub_step_ns() } else { -input::scrub_step_ns() };
-                    self.scrub.ns = Scrub::clamp_target(self.scrub.ns.max(0) + step, dur);
-                }
-                self.scrub.dir = if fwd { 1 } else { -1 };
+                self.scrub_hop(ps, fwd, now, dur);
             }
             input::ScrubPress::Nothing => {}
         }
+    }
+
+    /// **One Skip-interval hop of the preview** — the scrubber's fresh-press arm, shared by the
+    /// remote's LEFT/RIGHT and the desktop transport's skip faces, and committing NOTHING: the
+    /// caller decides when (a key's release, [`Self::desk_skip`]'s debounce).
+    fn scrub_hop(&mut self, ps: &plx_media::route::PlaybackSession, fwd: bool, now: u32, dur: i64) {
+        self.scrub.commit_at = 0; // more input → cancel a pending tap commit
+        self.scrub.alive = now;
+        self.scrub.reveal = false; // a visible press is a real gesture whatever raised the HUD
+        if self.scrub.dir == 0 && self.scrub.ns < 0 {
+            self.scrub.ns = plx_media::player::intended_pos_ns(ps);
+        }
+        if !self.scrub.hold {
+            let step = if fwd { input::scrub_step_ns() } else { -input::scrub_step_ns() };
+            self.scrub.ns = Scrub::clamp_target(self.scrub.ns.max(0) + step, dur);
+        }
+        self.scrub.dir = if fwd { 1 } else { -1 };
+    }
+
+    /// **The desktop transport's skip faces** (`DeskCtl::SkipBack`/`SkipForward`): a tap of the
+    /// remote's LEFT/RIGHT on the scrubber, down and up in one — the Skip-interval hop, then the
+    /// release's debounced commit, so a quick run of clicks coalesces into ONE seek exactly as a
+    /// quick run of key taps does.
+    fn desk_skip(&mut self, ps: &plx_media::route::PlaybackSession, fwd: bool, now: u32) {
+        let dur = plx_media::player::duration_ns();
+        if dur <= 0 {
+            return;
+        }
+        self.hud.nav.focus = 0;
+        self.scrub_hop(ps, fwd, now, dur);
+        self.scrub.commit_at = now.wrapping_add(input::TAP_COMMIT_MS).max(1);
+        self.hud.extend(now, input::HUD_LINGER_MS);
+        self.publish();
+    }
+
+    /// What the desktop transport draws from this frame (`player_hud::DeskFacts`).
+    fn desk_facts(&self, ps: &plx_media::route::PlaybackSession) -> plx_appkit::player_hud::DeskFacts {
+        use plx_appkit::player_hud::DeskCtl;
+        plx_appkit::player_hud::DeskFacts {
+            paused: plx_media::player::TX.paused.load(std::sync::atomic::Ordering::Relaxed),
+            has_next: plx_media::route::up_next(ps).is_some(),
+            level: plx_media::player::volume::level(),
+            silent: plx_media::player::volume::silent(),
+            fullscreen: plx_base::surface::fullscreen(),
+            slider_open: self.desk_drag || matches!(self.desk_hover, Some(DeskCtl::Volume | DeskCtl::VolumeBar)),
+        }
+    }
+
+    /// Is the desktop transport on screen: a desktop with the pointer live, the transport drawn
+    /// with its middle (no Info card or Chapters strip over it), and no failure owning the frame.
+    fn desk_shown(&self, pointer: plx_ui::desk::PointerChrome, hud_drawn: bool, ps: &plx_media::route::PlaybackSession) -> bool {
+        pointer.live && hud_drawn && self.transport && !plx_appkit::player_hud::transport_hidden(ps)
+    }
+
+    /// The volume a pointer at `x` asks of the track, from the track's own layout.
+    fn desk_volume_at(&self, x: f32) -> f32 {
+        use plx_appkit::player_hud::{desk_layout, desk_volume_at, DeskCtl, DeskFacts};
+        let facts = DeskFacts { slider_open: true, ..Default::default() };
+        desk_layout(&facts).into_iter().find(|(c, _)| *c == DeskCtl::VolumeBar)
+            .map_or(plx_media::player::volume::level(), |(_, bar)| desk_volume_at(bar, x))
+    }
+
+    /// One click on a desktop transport face — each the path its remote key, or the desktop's own
+    /// window and sound, already has.
+    fn desk_click<H: AppLike>(
+        &mut self,
+        ps: &plx_media::route::PlaybackSession,
+        ctl: plx_appkit::player_hud::DeskCtl,
+        x: f32,
+        now: u32,
+        fx: &mut Effects<'_, H>,
+    ) {
+        use crate::registry::VolumeOp;
+        use plx_appkit::player_hud::DeskCtl;
+        plx_base::eventlog::log(&format!("desk: player {ctl:?}"));
+        match ctl {
+            DeskCtl::Back => Self::ask(fx, PlayerReq::Exit),
+            DeskCtl::SkipBack => self.desk_skip(ps, false, now),
+            DeskCtl::SkipForward => self.desk_skip(ps, true, now),
+            DeskCtl::PlayPause => Self::ask(fx, PlayerReq::Transport(None)),
+            DeskCtl::Next => Self::ask(fx, PlayerReq::PlayNext),
+            DeskCtl::Volume => Self::ask(fx, PlayerReq::Volume(VolumeOp::ToggleMute)),
+            DeskCtl::VolumeBar => {
+                self.desk_drag = true;
+                Self::ask(fx, PlayerReq::Volume(VolumeOp::Set(VolumeOp::permille(self.desk_volume_at(x)))));
+            }
+            DeskCtl::Fullscreen => Self::ask(fx, PlayerReq::ToggleFullscreen),
+        }
+        fx.invalidate(plx_machine::present::Provenance::Input);
     }
 
     /// A hardware auto-repeat while the scrubber holds a direction: port of `on_auto_repeat`'s
@@ -1477,6 +1603,11 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Focusable<H> for PlayerScree
             e if (ELEM_FAILURE_BASE..ELEM_FAILURE_END).contains(&e) => {
                 player_hud::FailureReadout::now(H::session(cx)).frames(cx.measure)[(e - ELEM_FAILURE_BASE) as usize]?
             }
+            e if player_hud::DeskCtl::of_elem(e).is_some() => {
+                let ctl = player_hud::DeskCtl::of_elem(e)?;
+                player_hud::desk_layout(&self.desk_facts(H::session(cx))).into_iter()
+                    .find(|(c, _)| *c == ctl).map(|(_, r)| r)?
+            }
             _ => return None,
         };
         Some(Placed { rect, rest_rect: rect, clip: Rect::FULL, index: None })
@@ -1589,6 +1720,10 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Screen<H> for PlayerScreen {
         let hud_drawn = self.hud_drawn(ps, now);
         if hud_drawn {
             self.draw_hud(ps, now, f.measure, H::metadata(f.cx));
+        }
+        // The desktop pointer transport (`player_hud::draw_desk`), over the HUD it belongs to.
+        if self.desk_shown(f.pointer, hud_drawn, ps) {
+            plx_appkit::player_hud::draw_desk(plx_ui::Painter::root(), &self.desk_facts(ps), f.pointer);
         }
         if let (Some(live), Some(phase)) = (plx_media::route::live(ps), self.live_banner_up(ps, now)) {
             if !plx_appkit::player_hud::transport_hidden(ps) {
@@ -2480,6 +2615,82 @@ mod scrub_ownership_tests {
 
         let (_, reqs) = tick(&mut page, 1_020 + input::TAP_COMMIT_MS + 500);
         assert!(seeks(reqs).is_empty(), "…and it is not repeated on every frame after it");
+    }
+
+    /// **The desktop transport's skip face is a TAP of the remote's RIGHT** (`DeskCtl::SkipForward`):
+    /// two quick clicks hop the preview twice and coalesce into ONE seek on the debounce, exactly as
+    /// two quick key taps do — never a seek per click.
+    #[test]
+    fn two_quick_desk_skip_clicks_coalesce_into_one_seek() {
+        use plx_appkit::player_hud::DeskCtl;
+        let _g = plx_base::testlock::serial();
+        let _f = Fixture::new(false);
+        let mut page = PlayerScreen::new(ENTRY);
+        let at = |c: DeskCtl| InputKind::Click { x: 0.0, y: 0.0, hit: Some(c.elem()) };
+        let (handled, reqs) = pointer(&mut page, at(DeskCtl::SkipForward), 1_000);
+        assert_eq!(handled, Handled::Yes);
+        assert!(seeks(reqs).is_empty(), "a click moves the preview and commits nothing yet");
+        let (_, reqs) = pointer(&mut page, at(DeskCtl::SkipForward), 1_100);
+        assert!(seeks(reqs).is_empty());
+        assert_eq!(page.scrub.ns, 2 * DEFAULT_HOP, "two clicks, two hops");
+        let (_, reqs) = tick(&mut page, 1_100 + input::TAP_COMMIT_MS + 1);
+        assert_eq!(seeks(reqs).len(), 1, "…and ONE seek for the pair");
+    }
+
+    /// Every other desktop face asks for the request its remote key (or the desktop's window and
+    /// sound) already has.
+    #[test]
+    fn each_desk_face_asks_for_its_own_request() {
+        use crate::registry::VolumeOp;
+        use plx_appkit::player_hud::DeskCtl;
+        let _g = plx_base::testlock::serial();
+        let _f = Fixture::new(false);
+        for (ctl, want) in [
+            (DeskCtl::Back, PlayerReq::Exit),
+            (DeskCtl::PlayPause, PlayerReq::Transport(None)),
+            (DeskCtl::Next, PlayerReq::PlayNext),
+            (DeskCtl::Volume, PlayerReq::Volume(VolumeOp::ToggleMute)),
+            (DeskCtl::Fullscreen, PlayerReq::ToggleFullscreen),
+        ] {
+            let mut page = PlayerScreen::new(ENTRY);
+            let (_, reqs) = pointer(&mut page, InputKind::Click { x: 0.0, y: 0.0, hit: Some(ctl.elem()) }, 1_000);
+            assert_eq!(reqs, vec![want], "{ctl:?}");
+        }
+    }
+
+    /// The volume track: a click sets the level where it lands and seats a drag; the drag follows
+    /// the pointer; the button coming up ends it.
+    #[test]
+    fn the_volume_track_sets_on_click_and_follows_a_drag_until_release() {
+        use crate::registry::VolumeOp;
+        use plx_appkit::player_hud::{desk_layout, DeskCtl, DeskFacts};
+        let _g = plx_base::testlock::serial();
+        let _f = Fixture::new(false);
+        let bar = desk_layout(&DeskFacts { slider_open: true, ..Default::default() })
+            .into_iter().find(|(c, _)| *c == DeskCtl::VolumeBar).unwrap().1;
+        let mut page = PlayerScreen::new(ENTRY);
+        let (_, reqs) = pointer(&mut page, InputKind::Click { x: bar.x - 100.0, y: bar.cy(), hit: Some(DeskCtl::VolumeBar.elem()) }, 1_000);
+        assert_eq!(reqs, vec![PlayerReq::Volume(VolumeOp::Set(0))], "left of the track is silence");
+        assert!(page.desk_drag);
+        pointer(&mut page, InputKind::Drag { x: bar.x + bar.w + 100.0, y: bar.cy(), hit: None }, 1_050);
+        assert_eq!(plx_media::player::volume::level(), 1.0, "the drag carried the slider to the top");
+        key(&mut page, plx_ui::consts::SDLK_RETURN, Edge::Up, 1_100);
+        assert!(!page.desk_drag, "the button coming up ends the drag");
+        plx_media::player::volume::set_level(1.0);
+    }
+
+    /// Hovering a face lights it and asks for a frame; leaving it does the same once.
+    #[test]
+    fn hovering_a_desk_face_is_damage_and_is_tracked() {
+        use plx_appkit::player_hud::DeskCtl;
+        let _g = plx_base::testlock::serial();
+        let _f = Fixture::new(false);
+        let mut page = PlayerScreen::new(ENTRY);
+        pointer(&mut page, InputKind::Pointer { x: 0.0, y: 0.0, hit: Some(DeskCtl::Volume.elem()) }, 1_000);
+        assert_eq!(page.desk_hover, Some(DeskCtl::Volume));
+        assert!(page.desk_facts(&plx_media::route::PlaybackSession::default()).slider_open, "the speaker opens its track");
+        pointer(&mut page, InputKind::Pointer { x: 0.0, y: 0.0, hit: None }, 1_050);
+        assert_eq!(page.desk_hover, None);
     }
 
     /// **A press hops the chosen Skip interval, in both directions, and clamps like any scrub.**

@@ -38,10 +38,50 @@ fn main() {
     println!("cargo:rerun-if-changed=build_support/host_link.rs");
     emit_version();
     emit_build_sha();
+    emit_windows_icon();
 
     // Host link configuration (SDL, GL, the nanosvg object): shared with the gfx layer's build
     // script, which needs the same lines for its own test binary.
     host_link::emit(Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("rust-modules has a parent"));
+}
+
+/// **The Windows desktop app's icon**, embedded in `plxnative-sim.exe` (shipped as `PlxNative.exe`,
+/// `ci/mkwinapp.py`): a one-line resource script naming `assets/app-icon/plxnative.ico`
+/// (`tools/make-app-icons.py`), compiled by the MinGW toolchain's `windres` into a COFF object the
+/// binary links. Without it Explorer, the taskbar and Alt-Tab show Windows' generic program icon.
+///
+/// Only for a Windows target with the desktop feature on — the television and every other host
+/// build never reach it. A toolchain with no `windres` (it ships in MinGW binutils, which
+/// `.github/workflows/desktop.yml` installs) builds an icon-less executable and says so, rather than
+/// failing a developer's local build over a cosmetic resource. `WINDRES` names it explicitly.
+fn emit_windows_icon() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || std::env::var_os("CARGO_FEATURE_HOSTSIM").is_none()
+    {
+        return;
+    }
+    println!("cargo:rerun-if-env-changed=WINDRES");
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ico = manifest.parent().expect("rust-modules has a parent").join("assets/app-icon/plxnative.ico");
+    println!("cargo:rerun-if-changed={}", ico.display());
+    let out = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
+    let rc = out.join("plxnative-icon.rc");
+    let obj = out.join("plxnative-icon.o");
+    // A resource script's string is C-escaped; forward slashes need none and windres takes them.
+    let path = ico.display().to_string().replace('\\', "/");
+    std::fs::write(&rc, format!("1 ICON \"{path}\"\n")).expect("write the icon resource script");
+    let candidates: Vec<String> = std::env::var("WINDRES").ok().into_iter()
+        .chain(["windres", "x86_64-w64-mingw32-windres"].map(String::from)).collect();
+    for windres in &candidates {
+        let ran = std::process::Command::new(windres)
+            .args(["--input-format=rc", "--output-format=coff", "-i"]).arg(&rc).arg("-o").arg(&obj)
+            .status();
+        if ran.is_ok_and(|status| status.success()) {
+            println!("cargo:rustc-link-arg-bin=plxnative-sim={}", obj.display());
+            return;
+        }
+    }
+    println!("cargo:warning=no windres among {candidates:?}: PlxNative.exe is built without its icon");
 }
 
 /// Publish `PLX_VERSION` — the version this build REPORTS, which is not always the version it was

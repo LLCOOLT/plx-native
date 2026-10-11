@@ -365,17 +365,17 @@ impl ResolutionWire {
     fn hit(phase: u8, entry: Option<plx_machine::machine::EntryId>, answer: plx_ui::hit::Resolution<u32>) -> Self {
         use plx_ui::screen::Activate;
         Self::Hit { phase, entry:entry.map(|e|e.0), hit:answer.hit.map(wire_key), focus:answer.focus.map(wire_key),
-            activate:answer.activate.map(|(k,a)|(wire_key(k),match a { Activate::Press=>0,Activate::Immediate=>1,Activate::Direct=>2 })), miss:answer.miss }
+            activate:answer.activate.map(|(k,a)|(wire_key(k),match a { Activate::Press=>0,Activate::Immediate=>1,Activate::Direct=>2,Activate::Focus=>3,Activate::Hold=>4,Activate::Play=>5 })), miss:answer.miss }
     }
     fn hit_answer(&self) -> Result<plx_ui::hit::Resolution<u32>, &'static str> {
         use plx_ui::screen::Activate;
         let Self::Hit { phase,entry,hit,focus,activate,miss } = *self else { return Err("wrong resolution family"); };
         if phase > 2 || entry == Some(0) || [hit,focus,activate.map(|a|a.0)].into_iter().flatten().any(|k|Some(k.0)!=entry)
-            || (focus.is_some() && focus!=hit) || activate.is_some_and(|a|Some(a.0)!=hit || a.1>2 || phase!=1)
+            || (focus.is_some() && focus!=hit) || activate.is_some_and(|a|Some(a.0)!=hit || a.1>5 || phase!=1)
             || (miss && (phase!=1 || hit.is_some() || focus.is_some() || activate.is_some()))
             || (phase==2 && (focus.is_some() || activate.is_some())) { return Err("invalid hit resolution"); }
         Ok(plx_ui::hit::Resolution { hit:hit.map(focus_key), focus:focus.map(focus_key), miss,
-            activate:activate.map(|(k,a)|(focus_key(k), match a { 0=>Activate::Press,1=>Activate::Immediate,_=>Activate::Direct })) })
+            activate:activate.map(|(k,a)|(focus_key(k), match a { 0=>Activate::Press,1=>Activate::Immediate,3=>Activate::Focus,4=>Activate::Hold,5=>Activate::Play,_=>Activate::Direct })) })
     }
     fn decode(value: Value) -> Result<Self, &'static str> {
         let v: Self = serde_json::from_value(value.clone()).map_err(|_|"invalid resolution encoding")?;

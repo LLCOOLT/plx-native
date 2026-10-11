@@ -135,10 +135,12 @@ def build_binary(tdir: Path) -> Path:
 
 
 def write_icon(res: Path):
-    """`.icns` from the 1254px master — macOS wants a 512@2x rung, and upscaling `pkg/icon320.png`
-    into it is visible in the Dock."""
+    """`.icns` from the macOS app icon `tools/make-app-icons.py` generates: the logo on Apple's inset
+    rounded tile, at 1024 px — macOS wants a 512@2x rung, and upscaling `pkg/icon320.png` into it is
+    visible in the Dock. (The bundle used the full-bleed master square until the desktop icons
+    were drawn, which read as an unfinished icon beside every other one in the Dock.)"""
     print("==> icon")
-    master = REPO / "assets/logo-master.png"
+    master = REPO / "assets/app-icon/plxnative-1024.png"
     with tempfile.TemporaryDirectory() as tmp:
         iconset = Path(tmp) / "AppIcon.iconset"
         iconset.mkdir()

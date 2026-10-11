@@ -48,6 +48,12 @@ impl<H: SearchLike> CardSource<H> for RowCards<'_> {
             _ => None,
         }
     }
+    fn has_menu(&self, i: usize) -> bool {
+        matches!(self.items.get(i), Some(Item::Media(media)) if crate::registry::item_has_menu(media))
+    }
+    fn playable(&self, i: usize) -> bool {
+        matches!(self.items.get(i), Some(Item::Media(media)) if crate::registry::item_plays_directly(media))
+    }
     fn overlay(&self, p: Painter, i: usize, tile: &Tile, measure: &dyn Measure) {
         if let (Kind::Episode, Some(Item::Media(media))) = (self.kind, self.items.get(i)) {
             plx_ui::widgets::still_overlay(p, &tile_facts::of(media), tile.rect, tile.radius, false, measure);

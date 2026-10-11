@@ -75,8 +75,10 @@ pub enum Icon {
     /// the player HUD's transport state read-out beside the elapsed clock (`player_hud::draw_hud`,
     /// via `plx_appkit::player_hud::transport_mark`), where `Rewind` marks the playhead travelling
     /// BACKWARDS and `FastForward` marks it travelling forwards — a scrub, a chapter/marker hop and
-    /// a rapid-seek burst alike. They are a read-out, never a control: there is no rewind BUTTON in
-    /// this app and the design system forbids adding one.
+    /// a rapid-seek burst alike. On the television they are a read-out, never a control: there is
+    /// no rewind BUTTON there and the design system forbids adding one. The one exception is the
+    /// desktop pointer transport (`player_hud::draw_desk`), which a mouse needs because it has no
+    /// skip keys and which a television never draws (`ui/src/CLAUDE.md`, rule 3).
     ///
     /// **Both live in [`Icon::Pause`]'s own 14-unit band** (y 5..19 of a 24 viewBox), which is the
     /// design system's transport rule rather than a coincidence — the read-out is one small slot
@@ -234,6 +236,19 @@ pub enum Icon {
     WatchlistAdd,
     /// The same bookmark with a minus — the press that takes it off again.
     WatchlistRemove,
+    /// Three sliders — the desktop pointer chrome's Settings shortcut (`ui::desk`).
+    Settings,
+    /// A speaker with sound arcs — the desktop player's volume control. A television's volume is
+    /// the set's own, so only the desktop transport row (`appkit::player_hud`) draws it.
+    Volume,
+    /// The speaker crossed out — that control while muted.
+    VolumeMute,
+    /// Corners pointing out — the desktop window's fullscreen toggle, entering.
+    Fullscreen,
+    /// Corners pointing in — the same toggle, leaving.
+    FullscreenExit,
+    /// A triangle against a bar — the desktop transport row's next-episode button.
+    SkipNext,
 }
 
 /// **Where a mark's INK sits inside its 24-unit viewBox**, as `(left, right)` fractions — and
@@ -323,6 +338,12 @@ fn src(id: Icon) -> &'static str {
         Icon::WifiSlash => include_str!("../../../assets/icons/wifi-slash.svg"),
         Icon::WatchlistAdd => include_str!("../../../assets/icons/watchlist-add.svg"),
         Icon::WatchlistRemove => include_str!("../../../assets/icons/watchlist-remove.svg"),
+        Icon::Settings => include_str!("../../../assets/icons/settings.svg"),
+        Icon::Volume => include_str!("../../../assets/icons/volume.svg"),
+        Icon::VolumeMute => include_str!("../../../assets/icons/volume-mute.svg"),
+        Icon::Fullscreen => include_str!("../../../assets/icons/fullscreen.svg"),
+        Icon::FullscreenExit => include_str!("../../../assets/icons/fullscreen-exit.svg"),
+        Icon::SkipNext => include_str!("../../../assets/icons/skip-next.svg"),
     }
 }
 
@@ -564,6 +585,25 @@ mod ink_tests {
             for y in 0..px {
                 assert_eq!(alpha(0, y), 0, "{id:?} has ink on the left border");
                 assert_eq!(alpha(px - 1, y), 0, "{id:?} has ink on the right border");
+            }
+        }
+    }
+
+    /// The desktop pointer chrome's marks (`ui::desk`, the desktop transport row) at the sizes a
+    /// 56/64px disc draws them and at 4x: full opacity, a clean border.
+    #[test]
+    fn the_desktop_chrome_marks_rasterize_clean() {
+        for id in [Icon::Settings, Icon::Volume, Icon::VolumeMute, Icon::Fullscreen, Icon::FullscreenExit, Icon::SkipNext] {
+            for px in [26, 30, 120] {
+                let rgba = plx_gfx::svg::rasterize(src(id), px, px).unwrap_or_else(|| panic!("{id:?} failed at {px}px"));
+                let alpha = |x: i32, y: i32| rgba[((y * px + x) * 4 + 3) as usize];
+                let max_alpha = (0..px).flat_map(|y| (0..px).map(move |x| alpha(x, y))).max().unwrap();
+                assert_eq!(max_alpha, 255, "{id:?} never reaches full opacity at {px}px");
+                for i in 0..px {
+                    for (x, y) in [(i, 0), (i, px - 1), (0, i), (px - 1, i)] {
+                        assert_eq!(alpha(x, y), 0, "{id:?} has ink on its border at {px}px ({x},{y})");
+                    }
+                }
             }
         }
     }

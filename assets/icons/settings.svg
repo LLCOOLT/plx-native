@@ -1,0 +1,5 @@
+<!-- Three sliders — "Settings", the desktop pointer chrome's shortcut to the Settings surface
+     (`ui::desk`). Stroked, like search.svg: each track is broken where its knob sits, so the knob
+     reads as a ring on a line rather than a ring with a line through it, and no subpath encloses
+     another (nothing for nonzero fill to punch). Knobs at x 15 / 8 / 16 on rows 6 / 12 / 18. -->
+<svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6H13M17 6H21M17 6a2 2 0 1 1-4 0 2 2 0 1 1 4 0M3 12H6M10 12H21M10 12a2 2 0 1 1-4 0 2 2 0 1 1 4 0M3 18H14M18 18H21M18 18a2 2 0 1 1-4 0 2 2 0 1 1 4 0"/></svg>

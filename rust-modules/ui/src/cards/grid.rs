@@ -386,6 +386,12 @@ impl Grid {
                 activate: Activate::Press,
             });
         }
+        // The desktop pointer chrome's buttons on the focused card (`ui::desk`), above every card.
+        if let Some(i) = focus.filter(|&i| f.pointer.live && i < src.len()) {
+            let s = super::press_scale(self.pop(src, i, focus), i, pressed, f.cx);
+            let rect = super::to_local(p, self.cell(i, &bands)).scaled(s);
+            super::hover_button_stops(f, p, src, self.entry, i, rect, Rect::FULL);
+        }
     }
 
     /// The opener redraw: card `focus` drawn alone, popped and captioned exactly as in-page.
@@ -433,6 +439,9 @@ impl Grid {
             card_row::draw_tile(p, src.art(i), rect, s, &self.spec.style, src.progress(i));
         }
         src.overlay(p, i, &Tile { rect, scale: s, radius: self.spec.style.tile_radius(rect, s), focused }, f.measure);
+        if focused {
+            super::paint_hover_buttons(f, p, src, i, rect);
+        }
     }
 
     /// The `Focusable` neighbour of `key`: down from above a short last row lands on its last card.

@@ -221,6 +221,25 @@ pub fn has_actions(m: &PmsMovie) -> bool {
     }
 }
 
+/// **Does `m` play directly?** A movie or an episode with a key: the cards a desktop's hover play
+/// button (`plx_ui::desk`) is drawn on. A show, a season, a collection, a playlist or a channel
+/// opens a page or tunes instead, so that button is never drawn on one.
+pub fn plays_directly(m: &PmsMovie) -> bool {
+    !m.rk.is_empty() && matches!(m.kind, 0 | 3)
+}
+
+/// **Does `m` play straight from a content page?** A page's direct play is `PlayIntent::Movie`,
+/// which streams the part the row already carries — so a movie whose part is known, and nothing a
+/// further metadata read would have to complete.
+pub fn plays_from_page(m: &PmsMovie) -> bool {
+    plays_directly(m) && m.kind == 0 && !m.part.is_empty()
+}
+
+/// Where a direct play of `m` starts: its resume point, as every other Play of an item reads it.
+pub fn play_resume_ns(m: &PmsMovie) -> i64 {
+    plx_data::metadata::resume_ns(m.resume_ms, m.dur_ns / 1_000_000)
+}
+
 /// Does `m` offer *Make a Channel*? A show, a season, a collection or a playlist on the server
 /// the profile's channels live on (`plex::current_server`, the server `vchannel` keeps them on):
 /// a title borrowed from another server could not be read back to air.

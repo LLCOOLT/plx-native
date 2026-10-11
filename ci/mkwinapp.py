@@ -109,6 +109,13 @@ def main():
 
     print("==> executable")
     shutil.copy2(exe, app / "PlxNative.exe")
+    # The icon is a resource `rust-modules/build.rs` embeds through MinGW's windres, and a toolchain
+    # without windres builds an icon-less executable with only a cargo warning to say so. A shipped
+    # app must carry it: Explorer, the taskbar and Alt-Tab otherwise show the generic program icon.
+    sections = subprocess.run(["objdump", "-h", str(app / "PlxNative.exe")], check=True, text=True,
+                              capture_output=True).stdout
+    if ".rsrc" not in sections:
+        sys.exit("mkwinapp: PlxNative.exe carries no resource section, so no icon (was windres missing?)")
 
     print("==> dlopened libraries")
     roots = [app / "PlxNative.exe"]

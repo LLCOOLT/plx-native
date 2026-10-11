@@ -128,6 +128,8 @@ pub enum PreferenceCmd {
 /// app declines a menu with and the card screens' hold hint is gated by. The screens reach it
 /// here, never by naming the sibling `item_menu`.
 pub use crate::item_menu::has_actions as item_has_menu;
+/// The desktop card play button's rules (`plx_ui::desk`), re-exported for the screens that draw it.
+pub use crate::item_menu::{play_resume_ns as item_play_resume_ns, plays_directly as item_plays_directly, plays_from_page as item_plays_from_page};
 
 /// **What the item context menu asks of the loop**, once its own `step` has resolved the pressed
 /// row to an [`crate::item_menu::Action`].
@@ -235,6 +237,28 @@ pub enum PlayerReq {
     /// failure read-out's own BACK escape all perform (`exit_player`; restructure phase 12,
     /// replacing `app/run.rs`'s direct calls to it from the player's own key arms).
     Exit,
+    /// The desktop pointer transport's next-episode face (`player_hud::DeskCtl::Next`): start the
+    /// episode Up Next would (`app::playback::play_up_next`), now.
+    PlayNext,
+    /// The desktop pointer transport's volume: the speaker face and its track
+    /// (`plx_media::player::volume`). A television's volume is the set's own; never sent there.
+    Volume(VolumeOp),
+    /// The desktop pointer transport's fullscreen face: enter or leave the window's fullscreen.
+    ToggleFullscreen,
+}
+
+/// What [`PlayerReq::Volume`] does to the desktop player's volume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VolumeOp {
+    ToggleMute,
+    /// Set the slider, in thousandths (a request is `Eq`; a float is not).
+    Set(u16),
+}
+
+impl VolumeOp {
+    pub fn permille(level: f32) -> u16 {
+        (level.clamp(0.0, 1.0) * 1000.0).round() as u16
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -243,6 +267,8 @@ pub enum SearchReq {
     Detail { sid: plx_plex::plex::ServerId, rk: String },
     Person { sid: plx_plex::plex::ServerId, key: String, guid: String, name: String, thumb: String },
     ItemMenu { sid: plx_plex::plex::ServerId, rk: String },
+    /// A desktop card's hover play button on a library hit (`plx_ui::desk`): play it from `resume_ns`.
+    Play { sid: plx_plex::plex::ServerId, rk: String, resume_ns: i64 },
     /// OK on a Collections-shelf hit. `rk` is the collection's ratingKey (empty for a tag-shaped
     /// hit from a server that ignored `includeCollections`), `tag` its tag id; both are checked
     /// against the retained selection before the route is built from it.
@@ -1667,6 +1693,16 @@ impl plx_ui::screen::ScreenArg for AppArg {
             | AppArg::PersonBio
             | AppArg::CollectionAbout => Chrome::None,
         }
+    }
+    /// The pushed content pages — Detail, Person, Filmography, Collection — are the pages a desktop
+    /// mouse reaches with nothing on screen to leave by (`ui::desk`), and the Settings surface is
+    /// the one surface in the same position. The tab-bar roots carry the strip's Search pill and
+    /// profile chip already, the player draws its own back arrow, and the menus and panels are
+    /// popovers a click outside dismisses.
+    fn pointer_chrome(&self) -> bool {
+        // Settings is a full-screen surface: nothing outside it to click, so it gets the back
+        // arrow (alone — a surface wears no Search or Settings shortcut).
+        matches!(self, AppArg::Content(_) | AppArg::Settings(_))
     }
     fn id(&self) -> ScreenId {
         ScreenId(match self {

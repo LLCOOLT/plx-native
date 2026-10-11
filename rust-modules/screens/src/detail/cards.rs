@@ -149,6 +149,16 @@ impl<H: Host<Elem = u32>> CardSource<H> for Cards<'_> {
         }
     }
 
+    /// The poster shelves of other items hold to the item menu (`DetailScreen`'s `PressHold`);
+    /// Extras and Cast do not, so they draw no overflow button. `movies()` is empty for those two.
+    fn has_menu(&self, i: usize) -> bool {
+        self.movies().get(i).is_some_and(crate::registry::item_has_menu)
+    }
+
+    fn playable(&self, i: usize) -> bool {
+        self.movies().get(i).is_some_and(crate::registry::item_plays_from_page)
+    }
+
     fn overlay(&self, p: Painter, i: usize, tile: &Tile, measure: &dyn Measure) {
         if self.which != Which::Cast {
             return;

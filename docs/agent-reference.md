@@ -618,7 +618,13 @@ the pinned Sentry Native cross-build), and `sshpass` (Homebrew; deploy/run use y
   it for `arm64` and `x86_64`, and the Windows folder beside it (`ci/mkwinapp.py`). `ci/mkmacapp.py` is
   the recipe (its module doc names the three ways a Mac bundle silently ships broken);
   `docs/macos-app.md` is the design note, and `docs/macos-app-readme.md` is what ships beside the
-  zip for the recipient.
+  zip for the recipient. The desktop apps' icons are generated from `assets/logo-master.png` by
+  `tools/make-app-icons.py` and COMMITTED under `assets/app-icon/` (the Mac tile `mkmacapp.py`
+  turns into `AppIcon.icns`, the `.ico` `rust-modules/build.rs` embeds in the Windows executable
+  through MinGW's `windres` — `mkwinapp.py` refuses an executable without it — and the PNG the
+  running window carries); re-run it only when the logo changes. Their pointer controls (back,
+  Search, Settings, shelf arrows, card ▶/⋯, the player's transport, volume and fullscreen) are the
+  desktop pointer chrome, `rust-modules/ui/src/CLAUDE.md` "The desktop pointer chrome".
 - **`FLAVOR`** selects **WHICH INSTALL** every TV-facing target talks to. Three builds live on one
   television: `stable` (`com.beb.plxnative` — the app users install, the id in every release,
   manifest and channel listing), `debug` (`com.beb.plxnative.debug` — the day-to-day developer
