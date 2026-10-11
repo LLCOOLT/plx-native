@@ -40,7 +40,21 @@ on:
       - 'docs/windows-app.md'
   pull_request:
     paths: *desktop_paths
+  # By hand: build any branch (`ref` empty = the dispatched commit). With `release` and
+  # `attach_to` (an existing tag) it builds the released configuration and attaches the zips to
+  # that release, uploaded by the workflow's own token — for a release whose desktop jobs failed
+  # after the television package was published (v0.13.0: a Makefile fix landed after the tag).
+  # The attach job refuses a zip whose version is not the tag's.
   workflow_dispatch:
+    inputs:
+      release:
+        description: Build the released version (PLX_RELEASE=1, RELEASE=1).
+        type: boolean
+        default: false
+      attach_to:
+        description: Attach the zips to this existing release tag (needs release).
+        type: string
+        default: ''
   workflow_call:
     inputs:
       ref:
@@ -198,3 +212,33 @@ jobs:
           path: pkg/PlxNative-*.zip
           if-no-files-found: error
           retention-days: 14
+
+  attach:
+    name: attach the zips to an existing release
+    if: github.event_name == 'workflow_dispatch' && inputs.release && inputs.attach_to != ''
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: desktop
+      - name: Upload the zips
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.attach_to }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          ls -l desktop
+          for zip in desktop/PlxNative-*.zip; do
+            case "$(basename "$zip")" in
+              "PlxNative-${TAG#v}-"*) ;;
+              *) echo "::error::$zip does not carry ${TAG#v}, the version of $TAG"; exit 1 ;;
+            esac
+          done
+          gh release upload "$TAG" desktop/PlxNative-*.zip --clobber --repo "$GITHUB_REPOSITORY"

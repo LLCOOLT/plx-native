@@ -2022,7 +2022,12 @@ SIM_PRE = mkdir -p $(SIM_DIR); test -n "$(SIM_PMS)" || \
 # names. `APP_FILES` is an explicit list, so none of it can reach an .ipk or a television.
 FFMPEG_HOST_PREFIX = vendor/ffmpeg-prefix-host
 FFMPEG_HOST_INC    = $(FFMPEG_HOST_PREFIX)/include
-FFMPEG_HOST_NAMES  = libavutil-plx.61 libswresample-plx.7 libavcodec-plx.63 libavformat-plx.63 libswscale-plx.10
+# RELEASE=1 builds no libswscale (the dev capture stream's alone, as for the television's list
+# below); naming it here regardless made `make RELEASE=1 macapp-zip` die staging a library the
+# build never produced — the v0.13.0 release's macOS jobs. The app bundler already treats it as
+# optional (`ci/mkmacapp.py`).
+FFMPEG_HOST_NAMES  = libavutil-plx.61 libswresample-plx.7 libavcodec-plx.63 libavformat-plx.63 \
+                     $(if $(RELEASE),,libswscale-plx.10)
 FFMPEG_HOST_STAGED = $(addprefix pkg/,$(addsuffix .dylib,$(FFMPEG_HOST_NAMES)))
 LIBASS_HOST_NAME = $(if $(filter Darwin,$(shell uname -s)),libass-plx.0.dylib,libass-plx-host.so.0)
 LIBASS_HOST_STAGED = pkg/$(LIBASS_HOST_NAME)
