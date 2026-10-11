@@ -282,7 +282,13 @@ impl ReplayMode {
         let (mode, path) = if let Some(path) = value.strip_prefix("v1\ntargets\n") { (Self::Targets, path) }
             else if let Some(path) = value.strip_prefix("v1\nresolve\n") { (Self::Resolve, path) }
             else { (Self::Targets, value) };
-        if value.len() > libc::PATH_MAX as usize || !path.starts_with('/')
+        // Windows: MAX_PATH. A replay directory still has to be spelled `/…`, so on a desktop
+        // Windows build the trigger takes only current-drive-rooted paths; it is a TV/sim dev surface.
+        #[cfg(unix)]
+        const PATH_LIMIT: usize = libc::PATH_MAX as usize;
+        #[cfg(windows)]
+        const PATH_LIMIT: usize = 260;
+        if value.len() > PATH_LIMIT || !path.starts_with('/')
             || path.chars().any(char::is_control) || path.trim() != path {
             return Err("invalid replay mode or directory");
         }

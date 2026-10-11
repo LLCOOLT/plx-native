@@ -10,7 +10,11 @@
 //! `acb_on_event`, `plx_media`'s player/mod.rs). Everything else is Rust-internal (the per-module `repr(C)`
 //! shapes are migration legacy, not ABI).
 mod app; // run_application — the Rust app core / event loop (the entry inverted from main.c; port.rs's `plex_run` hands over to it)
+#[cfg(unix)]
 mod capture; // dev live UI capture stream: own-GLES-frame grab → MPEG1/TS or JPEG → TCP (UI plane only)
+#[cfg(windows)]
+#[path = "capture_windows.rs"]
+mod capture; // the same entry points, doing nothing: the desktop window is the view
 mod coldstart; // retires old last-page bookmarks; authenticated cold boots now stay on Home
 mod dev; // the /tmp/plxnative-* trigger surface, behind one `devtriggers` feature — read it before adding a trigger
 mod focusprobe; // dev: one diffable line naming everything app.rs's key ladder can move, logged when it changes
@@ -26,7 +30,8 @@ mod release_line;
 mod remote; // dev/testing remote-control channel: a FIFO the loop drains into synthetic SDL keys
 #[cfg(feature = "hostsim")]
 mod shot; // simulator screenshots: read the frame back and write a PNG (see the module doc)
-mod system;
+#[cfg(not(feature = "hostsim"))]
+mod system; // the webOS port's SDL/Wayland window glue; the desktop port has its own
 
 mod textinput; // the TV's own on-screen keyboard, via plain SDL_StartTextInput (see the module doc)
 
@@ -52,17 +57,16 @@ pub fn sim_events_log() -> std::path::PathBuf {
     plx_base::eventlog::events_log()
 }
 
-/// The port holds `plex_run`, the C entry the simulator binary calls too. It is reached by path
-/// (`plxnative_modules::port::plex_run`) so the SAME entry the C shim calls is the one called, with
-/// the compiler checking the signature. It previously re-declared `plex_run` in its own `extern "C"`
-/// block, which meant the one binary whose whole premise is "cannot drift from the shipped boot
-/// path" was the one place a signature change would become a silent ABI mismatch instead of a
-/// compile error. There is deliberately no `pub use` here: a re-export would be a reference from
-/// the crate root into the port.
-#[cfg(feature = "hostsim")]
-pub mod port;
+/// The two ports, one per build: `port` is the webOS port the C shim (`src/main.c`) enters through,
+/// and `desktop` is the simulator's (and the desktop app's) own port, which `src/bin/sim.rs` enters
+/// through. Each holds a `plex_run` that installs its table and hands over to the same
+/// `app::run_application`. The simulator reaches its entry by path (`plxnative_modules::desktop::
+/// plex_run`) so the compiler checks the signature. There is deliberately no `pub use` here: a
+/// re-export would be a reference from the crate root into a port.
 #[cfg(not(feature = "hostsim"))]
 mod port;
+#[cfg(feature = "hostsim")]
+pub mod desktop;
 #[cfg(feature = "hostsim")]
 pub use app::synthetic_home_initial;
 

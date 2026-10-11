@@ -10,9 +10,11 @@ pub mod window;
 use std::os::raw::c_void;
 use std::sync::OnceLock;
 
-/// What the platform's settings service said about the locale. i18n owns the parse and the log lines.
-#[cfg_attr(any(feature = "hostsim", test, feature = "test-support"), allow(dead_code))] // Reply/Unavailable: TV arm only
-pub enum LocaleReply { NoPlatform, Unavailable, Reply(String) }
+/// What the platform said about the locale. i18n owns the parse, the normalization and the log
+/// lines. `Reply` is the television's settings-service JSON; `Os` is a desktop's own answer, the
+/// user's first preferred UI language and its regional-format locale, as the OS spells them.
+#[allow(dead_code)] // each port constructs only its own variants
+pub enum LocaleReply { NoPlatform, Unavailable, Reply(String), Os { ui: Option<String>, fmt: Option<String> } }
 
 pub struct Port {
     pub probe_device: fn(),
@@ -45,8 +47,8 @@ pub struct Port {
 
 fn nothing() {}
 
-/// No port installed: host unit tests (nothing calls `plex_run`). Every entry is what today's
-/// `cfg(any(hostsim, test))` arm answered, minus the off-device log lines the other entries would
+/// No port installed: host unit tests (nothing calls `plex_run`). Every entry is what the webOS
+/// modules' `cfg(test)` arms answer, minus the off-device log lines the other entries would
 /// write (`deliver_toast` keeps its one).
 static ABSENT: Port = Port {
     probe_device: nothing,

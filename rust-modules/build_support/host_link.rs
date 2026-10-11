@@ -3,7 +3,7 @@
 //! (`gfx/build.rs`): both produce a host executable (the simulator, a `--test` binary) that
 //! reaches the `extern "C"` GL/SDL_ttf/nanosvg declarations in `plx_gfx`, and a `cargo:rustc-link-*`
 //! line reaches only the package whose build script prints it (`rustc-link-lib` also flows to the
-//! packages that depend on it; `rustc-link-arg`, which carries the nanosvg object, does not).
+//! packages that depend on it; `rustc-link-arg`, which carries the nanosvg object everywhere but Windows, does not).
 //!
 //! A no-op for the build that ships: the television binary is linked by the Makefile, not by cargo.
 
@@ -50,6 +50,11 @@ pub fn emit(repo: &Path) {
             // see `app.rs`'s context-attribute branch for why it cannot ask for GLES2 here.
             println!("cargo:rustc-link-lib=framework=OpenGL");
         }
+        "windows" => {
+            // The GL 1.1 export library every Windows toolchain ships; later entry points are
+            // resolved through the context, which SDL does.
+            println!("cargo:rustc-link-lib=dylib=opengl32");
+        }
         _ => {
             println!("cargo:rustc-link-lib=dylib=GL");
         }
@@ -74,13 +79,13 @@ fn compile_svg(repo: &Path) {
     println!("cargo:rerun-if-changed={}", src.display());
 
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-    let st = Command::new(&cc)
-        .arg("-c")
-        .arg(&src)
-        .arg("-o")
-        .arg(&out)
-        .arg("-O2")
-        .arg("-fPIC")
+    let mut cmd = Command::new(&cc);
+    cmd.arg("-c").arg(&src).arg("-o").arg(&out).arg("-O2");
+    // PE/COFF code is position-independent by construction; MinGW's gcc warns on `-fPIC`.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        cmd.arg("-fPIC");
+    }
+    let st = cmd
         // Matches the Makefile's include set for this file.
         .arg(format!("-I{}", repo.join("src").display()))
         .arg(format!("-I{}", repo.join("vendor/nanosvg").display()))
@@ -96,7 +101,29 @@ fn compile_svg(repo: &Path) {
         "host link: compiling {} failed ({st})",
         src.display()
     );
-    // Link the object directly; no intermediate archive, so no `ar` involved.
+    // On Windows the object goes in an archive, linked as a native library. A `rustc-link-arg`
+    // lands at the END of the link line, after MinGW's C runtime (`-lmingwex -lmsvcrt`), and GNU
+    // ld searches each archive once, in order: `svg.o`'s `fopen`, `qsort`, `sqrtf` and the rest
+    // were left undefined (the first Windows CI link). A `rustc-link-lib` is placed with the
+    // crate's own native libraries, ahead of the runtime. ELF and Mach-O links never hit this,
+    // because `libc` is a shared library there and resolves from anywhere on the line.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let dir = out.parent().expect("OUT_DIR");
+        let lib = dir.join("libplxsvg.a");
+        let _ = std::fs::remove_file(&lib);
+        let ar = std::env::var("AR").unwrap_or_else(|_| "ar".into());
+        let st = Command::new(&ar)
+            .arg("crs")
+            .arg(&lib)
+            .arg(&out)
+            .status()
+            .unwrap_or_else(|e| panic!("host link: could not run {ar:?} to archive svg.o: {e}"));
+        assert!(st.success(), "host link: archiving svg.o failed ({st})");
+        println!("cargo:rustc-link-search=native={}", dir.display());
+        println!("cargo:rustc-link-lib=static=plxsvg");
+        return;
+    }
+    // Elsewhere, link the object directly; no intermediate archive, so no `ar` involved.
     //
     // The UNSUFFIXED form, which covers binaries, examples, benches and TESTS alike. It used to be
     // `-bins`, which reaches the simulator executable and nothing else, so the host test binary was
@@ -147,6 +174,13 @@ fn sdl_search_paths(target_os: &str) -> Option<Vec<PathBuf>> {
         return Some(paths);
     }
 
+    if target_os == "windows" {
+        // No package manager to ask that answers for the TARGET: the supported toolchain is
+        // MSYS2's MinGW-w64, whose SDL2/SDL2_ttf packages install into the toolchain's own `lib`,
+        // which its linker searches by default. A host pkg-config, when cross-compiling, would
+        // answer with the host's directories instead. So: the default path, by design.
+        return Some(Vec::new());
+    }
     if target_os != "macos" {
         return None;
     }

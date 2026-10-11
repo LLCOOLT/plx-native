@@ -722,6 +722,8 @@ pub(crate) unsafe fn construct(
         log("CreateWindow failed");
         return Err(1);
     }
+    #[cfg(feature = "hostsim")]
+    super::desktop_window::configure(win);
     let ctx = SDL_GL_CreateContext(win);
     if ctx.is_null() {
         log("GL ctx failed");

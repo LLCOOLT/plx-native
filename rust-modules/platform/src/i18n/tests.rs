@@ -118,3 +118,17 @@ fn pseudo_locale_exercises_expansion_without_changing_arguments() {
     assert!(!msg::settings_language_contribute_body_in(&cx).contains("github.com"),
         "only the guide caption belongs to the translated catalog, never its address");
 }
+
+#[test]
+fn a_desktop_os_answer_is_normalized_and_an_unusable_one_is_no_answer() {
+    use crate::tv::LocaleReply;
+    // macOS spells its format locale with an underscore and may carry a region override.
+    let s = from_reply(LocaleReply::Os { ui: Some("fr-CA".into()), fmt: Some("en_GB@rg=gbzzzz".into()) }).unwrap();
+    assert_eq!((s.ui.as_deref(), s.fmt.as_deref(), s.clock), (Some("fr-CA"), Some("en-GB"), None));
+    // Windows answers only the format half when no UI language pack is chosen.
+    let s = from_reply(LocaleReply::Os { ui: None, fmt: Some("de-DE".into()) }).unwrap();
+    assert_eq!((s.ui, s.fmt.as_deref()), (None, Some("de-DE")));
+    // Nothing usable falls through to the environment, like a missing settings service.
+    assert!(from_reply(LocaleReply::Os { ui: Some("C".into()), fmt: None }).is_none());
+    assert!(from_reply(LocaleReply::Os { ui: None, fmt: None }).is_none());
+}

@@ -24,6 +24,17 @@ use std::time::Instant;
 
 use plx_base::checkpoint::{Checkpoint, NoCheckpoint, Pacer};
 
+/// The BSD socket API: `libc` itself on unix, and on Windows the Winsock wrappers that give the
+/// same names the same meaning ([`winsock`]).
+#[cfg(unix)]
+use libc as sock;
+#[cfg(windows)]
+use winsock as sock;
+
+#[cfg(windows)]
+#[path = "stream_winsock.rs"]
+mod winsock;
+
 static FD_GATE: Mutex<()> = Mutex::new(());
 
 // repr(C) for a stable layout: the player boxes it + hands raw ptrs across threads.
@@ -85,15 +96,23 @@ pub struct HttpStream {
 /// `curlio`, which follows the https hops itself, keeps the same bound.
 pub const LOCATION_CAP: usize = 8192;
 
+#[cfg(unix)]
 fn errno() -> c_int {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+/// Winsock reports through `WSAGetLastError`, which the platform does not promise is
+/// `GetLastError` (what `last_os_error` reads).
+#[cfg(windows)]
+fn errno() -> c_int {
+    winsock::last_error()
 }
 
 fn retry_interrupted_recv(result: isize, error: c_int) -> bool {
     result != HTTP_READ_DEADLINE as isize
         && result != HTTP_READ_STOPPED as isize
         && result < 0
-        && error == libc::EINTR
+        && error == sock::EINTR
 }
 
 /// Case-insensitive search for an ASCII `needle` in a byte haystack — the header-block lookup
@@ -286,11 +305,11 @@ enum FdWait {
 /// The socket option `opt` (`SO_RCVTIMEO`/`SO_SNDTIMEO`) as a duration; `None` when unset (zero)
 /// or unreadable, which is what a blocking `recv` treats as "wait forever" too.
 unsafe fn socket_timeout(fd: c_int, opt: c_int) -> Option<std::time::Duration> {
-    let mut tv: libc::timeval = std::mem::zeroed();
-    let mut len = std::mem::size_of::<libc::timeval>() as libc::socklen_t;
-    if libc::getsockopt(
+    let mut tv: sock::timeval = std::mem::zeroed();
+    let mut len = std::mem::size_of::<sock::timeval>() as sock::socklen_t;
+    if sock::getsockopt(
         fd,
-        libc::SOL_SOCKET,
+        sock::SOL_SOCKET,
         opt,
         &mut tv as *mut _ as *mut c_void,
         &mut len,
@@ -319,7 +338,7 @@ unsafe fn idle_bound(fd: c_int, opt: c_int, deadline: Option<Instant>) -> Option
 /// waiting; it is not a timeout, and it does not move `deadline` or `idle_at`.
 unsafe fn wait_fd(
     fd: c_int,
-    events: libc::c_short,
+    events: sock::c_short,
     deadline: Option<Instant>,
     idle_at: Option<Instant>,
     pacer: &mut Pacer,
@@ -363,16 +382,16 @@ unsafe fn wait_fd(
                 plx_base::checkpoint::wait_ms_until(at, c_int::MAX)
             }
         };
-        let mut pfd = libc::pollfd {
+        let mut pfd = sock::pollfd {
             fd,
             events,
             revents: 0,
         };
-        let ready = libc::poll(&mut pfd, 1, timeout_ms);
+        let ready = sock::poll(&mut pfd, 1, timeout_ms);
         if ready > 0 {
             return FdWait::Ready;
         }
-        if ready < 0 && errno() != libc::EINTR {
+        if ready < 0 && errno() != sock::EINTR {
             return FdWait::Error;
         }
         // A timeout or EINTR: the top of the loop decides which bound, if any, has passed.
@@ -397,36 +416,36 @@ unsafe fn recv_until(
     deadline: Option<Instant>,
     pacer: &mut Pacer,
 ) -> isize {
-    let queued = libc::recv(fd, dst, n, libc::MSG_DONTWAIT);
+    let queued = sock::recv(fd, dst, n, sock::MSG_DONTWAIT);
     if queued >= 0 {
         return queued;
     }
     let e = errno();
-    if e != libc::EAGAIN && e != libc::EWOULDBLOCK && e != libc::EINTR {
+    if e != sock::EAGAIN && e != sock::EWOULDBLOCK && e != sock::EINTR {
         return queued;
     }
     if deadline.is_none() {
         match pacer.before_wait() {
             Err(_) => return HTTP_READ_STOPPED as isize,
-            Ok(None) => return libc::recv(fd, dst, n, 0),
+            Ok(None) => return sock::recv(fd, dst, n, 0),
             Ok(Some(_)) => {}
         }
     }
-    let idle_at = idle_bound(fd, libc::SO_RCVTIMEO, deadline);
+    let idle_at = idle_bound(fd, sock::SO_RCVTIMEO, deadline);
     loop {
-        match wait_fd(fd, libc::POLLIN, deadline, idle_at, pacer) {
+        match wait_fd(fd, sock::POLLIN, deadline, idle_at, pacer) {
             FdWait::Ready => {}
             FdWait::Deadline => return HTTP_READ_DEADLINE as isize,
             FdWait::Stopped => return HTTP_READ_STOPPED as isize,
             // What the blocking call would have returned at its SO_RCVTIMEO: EAGAIN, or the bytes
             // that raced the bound in.
-            FdWait::Idle => return libc::recv(fd, dst, n, libc::MSG_DONTWAIT),
+            FdWait::Idle => return sock::recv(fd, dst, n, sock::MSG_DONTWAIT),
             FdWait::Error => return -1,
         }
-        let r = libc::recv(fd, dst, n, libc::MSG_DONTWAIT);
+        let r = sock::recv(fd, dst, n, sock::MSG_DONTWAIT);
         if r < 0 {
             let e = errno();
-            if e == libc::EINTR || e == libc::EAGAIN || e == libc::EWOULDBLOCK {
+            if e == sock::EINTR || e == sock::EAGAIN || e == sock::EWOULDBLOCK {
                 continue;
             }
         }
@@ -447,23 +466,23 @@ unsafe fn send_until(
     if deadline.is_none() {
         match pacer.before_wait() {
             Err(_) => return HTTP_READ_STOPPED as isize,
-            Ok(None) => return libc::send(fd, src, n, 0),
+            Ok(None) => return sock::send(fd, src, n, 0),
             Ok(Some(_)) => {}
         }
     }
-    let idle_at = idle_bound(fd, libc::SO_SNDTIMEO, deadline);
+    let idle_at = idle_bound(fd, sock::SO_SNDTIMEO, deadline);
     loop {
-        match wait_fd(fd, libc::POLLOUT, deadline, idle_at, pacer) {
+        match wait_fd(fd, sock::POLLOUT, deadline, idle_at, pacer) {
             FdWait::Ready => {}
             FdWait::Deadline => return HTTP_READ_DEADLINE as isize,
             FdWait::Stopped => return HTTP_READ_STOPPED as isize,
-            FdWait::Idle => return libc::send(fd, src, n, libc::MSG_DONTWAIT),
+            FdWait::Idle => return sock::send(fd, src, n, sock::MSG_DONTWAIT),
             FdWait::Error => return -1,
         }
-        let sent = libc::send(fd, src, n, libc::MSG_DONTWAIT);
+        let sent = sock::send(fd, src, n, sock::MSG_DONTWAIT);
         if sent < 0 {
             let e = errno();
-            if e == libc::EINTR || e == libc::EAGAIN || e == libc::EWOULDBLOCK {
+            if e == sock::EINTR || e == sock::EAGAIN || e == sock::EWOULDBLOCK {
                 continue;
             }
         }
@@ -772,31 +791,31 @@ enum ConnectAttempt {
 /// which would turn an exhausted budget into the unbounded wait this whole function removes.
 unsafe fn connect_timeout_cause(
     fd: c_int,
-    sa: *const libc::sockaddr,
-    salen: libc::socklen_t,
+    sa: *const sock::sockaddr,
+    salen: sock::socklen_t,
     timeout_ms: c_int,
     pacer: &mut Pacer,
 ) -> ConnectAttempt {
-    let flags = libc::fcntl(fd, libc::F_GETFL, 0);
+    let flags = sock::fcntl(fd, sock::F_GETFL, 0);
     if flags < 0 {
         return ConnectAttempt::Failed;
     }
     let restore = |outcome: ConnectAttempt| -> ConnectAttempt {
-        libc::fcntl(fd, libc::F_SETFL, flags);
+        sock::fcntl(fd, sock::F_SETFL, flags);
         outcome
     };
-    if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+    if sock::fcntl(fd, sock::F_SETFL, flags | sock::O_NONBLOCK) < 0 {
         return ConnectAttempt::Failed;
     }
-    if libc::connect(fd, sa, salen) == 0 {
+    if sock::connect(fd, sa, salen) == 0 {
         return restore(ConnectAttempt::Connected); // connected immediately (loopback / same host)
     }
-    if errno() != libc::EINPROGRESS {
+    if errno() != sock::EINPROGRESS {
         return restore(ConnectAttempt::Failed);
     }
-    let mut pfd = libc::pollfd {
+    let mut pfd = sock::pollfd {
         fd,
-        events: libc::POLLOUT,
+        events: sock::POLLOUT,
         revents: 0,
     };
     // The budget as an absolute end, so a checkpoint slice's expiry (a recheck, then more
@@ -816,7 +835,7 @@ unsafe fn connect_timeout_cause(
                 _ => (left_ms, false),
             }
         };
-        let r = libc::poll(&mut pfd, 1, wait_ms);
+        let r = sock::poll(&mut pfd, 1, wait_ms);
         if r > 0 {
             break;
         }
@@ -826,18 +845,18 @@ unsafe fn connect_timeout_cause(
             }
             return restore(ConnectAttempt::TimedOut); // the host is not answering
         }
-        if errno() != libc::EINTR {
+        if errno() != sock::EINTR {
             return restore(ConnectAttempt::Failed);
         }
         end = Instant::now(); // a signal ate the wait; poll once more without blocking again
     }
     // Writable does not imply connected — SO_ERROR carries the verdict.
     let mut err: c_int = 0;
-    let mut elen = std::mem::size_of::<c_int>() as libc::socklen_t;
-    if libc::getsockopt(
+    let mut elen = std::mem::size_of::<c_int>() as sock::socklen_t;
+    if sock::getsockopt(
         fd,
-        libc::SOL_SOCKET,
-        libc::SO_ERROR,
+        sock::SOL_SOCKET,
+        sock::SO_ERROR,
         &mut err as *mut _ as *mut c_void,
         &mut elen,
     ) < 0
@@ -852,8 +871,8 @@ unsafe fn connect_timeout_cause(
 #[cfg(test)]
 unsafe fn connect_timeout(
     fd: c_int,
-    sa: *const libc::sockaddr,
-    salen: libc::socklen_t,
+    sa: *const sock::sockaddr,
+    salen: sock::socklen_t,
     timeout_ms: c_int,
 ) -> c_int {
     let mut none = NoCheckpoint;
@@ -869,12 +888,12 @@ unsafe fn connect_timeout(
 /// `connect` in [`connect_any_result`] can take. Only ever constructed around a NON-NULL head,
 /// because `freeaddrinfo(NULL)` is not a documented no-op the way `free(NULL)` is.
 struct AddrList {
-    head: *mut libc::addrinfo,
+    head: *mut sock::addrinfo,
 }
 
 impl Drop for AddrList {
     fn drop(&mut self) {
-        unsafe { libc::freeaddrinfo(self.head) };
+        unsafe { sock::freeaddrinfo(self.head) };
     }
 }
 
@@ -984,17 +1003,17 @@ unsafe fn resolve(host: &str, port: c_int) -> Option<AddrList> {
     }
     let node = std::ffi::CString::new(host).ok()?;
     let service = std::ffi::CString::new(port.to_string()).ok()?;
-    let mut hints: libc::addrinfo = std::mem::zeroed();
-    hints.ai_family = libc::AF_UNSPEC;
-    hints.ai_socktype = libc::SOCK_STREAM;
-    hints.ai_flags = libc::AI_NUMERICSERV
+    let mut hints: sock::addrinfo = std::mem::zeroed();
+    hints.ai_family = sock::AF_UNSPEC;
+    hints.ai_socktype = sock::SOCK_STREAM;
+    hints.ai_flags = sock::AI_NUMERICSERV
         | if is_numeric_host(host) {
-            libc::AI_NUMERICHOST
+            sock::AI_NUMERICHOST
         } else {
-            libc::AI_ADDRCONFIG
+            sock::AI_ADDRCONFIG
         };
-    let mut res: *mut libc::addrinfo = std::ptr::null_mut();
-    if libc::getaddrinfo(node.as_ptr(), service.as_ptr(), &hints, &mut res) != 0 || res.is_null() {
+    let mut res: *mut sock::addrinfo = std::ptr::null_mut();
+    if sock::getaddrinfo(node.as_ptr(), service.as_ptr(), &hints, &mut res) != 0 || res.is_null() {
         return None;
     }
     Some(AddrList { head: res })
@@ -1031,7 +1050,7 @@ enum ConnectFailure {
 /// publish is there to give.
 unsafe fn connect_any_result(
     hs: &HttpStream,
-    head: *const libc::addrinfo,
+    head: *const sock::addrinfo,
     budget_ms: c_int,
     pacer: &mut Pacer,
 ) -> Result<c_int, ConnectFailure> {
@@ -1041,7 +1060,7 @@ unsafe fn connect_any_result(
     while !ai.is_null() {
         let a = &*ai;
         ai = a.ai_next;
-        let fd = libc::socket(a.ai_family, a.ai_socktype, a.ai_protocol);
+        let fd = sock::socket(a.ai_family, a.ai_socktype, a.ai_protocol);
         if fd < 0 {
             continue; // a family the kernel will not give us (no IPv6 in this build) — try the next
         }
@@ -1074,32 +1093,32 @@ unsafe fn connect_any_result(
 }
 
 #[cfg(test)]
-unsafe fn connect_any(hs: &HttpStream, head: *const libc::addrinfo, budget_ms: c_int) -> c_int {
+unsafe fn connect_any(hs: &HttpStream, head: *const sock::addrinfo, budget_ms: c_int) -> c_int {
     connect_any_result(hs, head, budget_ms, &mut Pacer::new(&mut NoCheckpoint)).unwrap_or(-1)
 }
 
 unsafe fn set_socket_timeouts(fd: c_int, recv_timeout_ms: c_int, send_timeout_ms: c_int) {
-    let recv = libc::timeval {
-        tv_sec: (recv_timeout_ms.max(1) / 1000) as libc::time_t,
-        tv_usec: ((recv_timeout_ms.max(1) % 1000) * 1000) as libc::suseconds_t,
+    let recv = sock::timeval {
+        tv_sec: (recv_timeout_ms.max(1) / 1000) as sock::time_t,
+        tv_usec: ((recv_timeout_ms.max(1) % 1000) * 1000) as sock::suseconds_t,
     };
-    libc::setsockopt(
+    sock::setsockopt(
         fd,
-        libc::SOL_SOCKET,
-        libc::SO_RCVTIMEO,
+        sock::SOL_SOCKET,
+        sock::SO_RCVTIMEO,
         &recv as *const _ as *const c_void,
-        std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        std::mem::size_of::<sock::timeval>() as sock::socklen_t,
     );
-    let send = libc::timeval {
-        tv_sec: (send_timeout_ms.max(1) / 1000) as libc::time_t,
-        tv_usec: ((send_timeout_ms.max(1) % 1000) * 1000) as libc::suseconds_t,
+    let send = sock::timeval {
+        tv_sec: (send_timeout_ms.max(1) / 1000) as sock::time_t,
+        tv_usec: ((send_timeout_ms.max(1) % 1000) * 1000) as sock::suseconds_t,
     };
-    libc::setsockopt(
+    sock::setsockopt(
         fd,
-        libc::SOL_SOCKET,
-        libc::SO_SNDTIMEO,
+        sock::SOL_SOCKET,
+        sock::SO_SNDTIMEO,
         &send as *const _ as *const c_void,
-        std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        std::mem::size_of::<sock::timeval>() as sock::socklen_t,
     );
 }
 
@@ -1368,10 +1387,10 @@ fn http_open_with_timeouts(
             return Err(HttpOpenError::Aborted);
         }
         let one: c_int = 1;
-        libc::setsockopt(
+        sock::setsockopt(
             fd,
-            libc::IPPROTO_TCP,
-            libc::TCP_NODELAY,
+            sock::IPPROTO_TCP,
+            sock::TCP_NODELAY,
             &one as *const _ as *const c_void,
             4,
         );
@@ -1811,7 +1830,7 @@ unsafe fn close_owned(hs: &HttpStream) {
     let _gate = FD_GATE.lock().unwrap_or_else(|e| e.into_inner());
     let fd = hs.take_fd();
     if fd >= 0 {
-        libc::close(fd);
+        sock::close(fd);
     }
 }
 
@@ -1873,7 +1892,7 @@ pub fn http_body_receipt(hs: *const HttpStream) -> BodyReceipt {
     let buffered = (hs.blen - hs.bpos).max(0) as i64;
     let fd = hs.fd();
     let mut queued: c_int = 0;
-    if fd < 0 || unsafe { libc::ioctl(fd, libc::FIONREAD as _, &mut queued) } < 0 {
+    if fd < 0 || unsafe { sock::ioctl(fd, sock::FIONREAD as _, &mut queued) } < 0 {
         queued = 0;
     }
     let mut ahead = buffered + queued.max(0) as i64;
@@ -1903,12 +1922,12 @@ unsafe fn hs_poll_in(fd: c_int) -> bool {
     if fd < 0 {
         return false;
     }
-    let mut pfd = libc::pollfd {
+    let mut pfd = sock::pollfd {
         fd,
-        events: libc::POLLIN,
+        events: sock::POLLIN,
         revents: 0,
     };
-    libc::poll(&mut pfd, 1, 0) > 0 && pfd.revents & libc::POLLIN != 0
+    sock::poll(&mut pfd, 1, 0) > 0 && pfd.revents & sock::POLLIN != 0
 }
 
 /// `>0` bytes, `0` peer FIN, `-1` transport error, `-2` nothing ready.
@@ -1916,15 +1935,15 @@ unsafe fn hs_recv_dontwait(fd: c_int, dst: &mut [u8]) -> c_int {
     if dst.is_empty() || fd < 0 {
         return -2;
     }
-    let r = libc::recv(
+    let r = sock::recv(
         fd,
         dst.as_mut_ptr() as *mut c_void,
         dst.len(),
-        libc::MSG_DONTWAIT,
+        sock::MSG_DONTWAIT,
     );
     if r < 0 {
         let e = errno();
-        if e == libc::EAGAIN || e == libc::EWOULDBLOCK || e == libc::EINTR {
+        if e == sock::EAGAIN || e == sock::EWOULDBLOCK || e == sock::EINTR {
             return -2;
         }
         return -1;
@@ -2158,7 +2177,7 @@ pub fn http_shutdown(hs: *mut HttpStream) {
         // because the only close is under the same gate.
         let fd = (*hs).fd();
         if fd >= 0 {
-            libc::shutdown(fd, libc::SHUT_RDWR);
+            sock::shutdown(fd, sock::SHUT_RDWR);
         }
     }
 }

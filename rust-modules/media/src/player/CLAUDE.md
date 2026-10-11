@@ -299,11 +299,13 @@ count), `stream.rs`'s socket lifecycle, `route/plan.rs`'s direct-play-vs-transco
 `task.rs`'s `MainThread` token being genuinely `!Send`. Cheap enough that there is no reason to skip
 it before a deploy.
 
-But there is **no host *runtime*** — nothing above decodes a frame or touches Starfish/ACB (`ff.rs`
+But the host SUITE has **no *runtime*** — no test decodes a frame or touches Starfish/ACB (`ff.rs`
 once gated `#[link]` directives out of `cfg(test)` to keep the pure logic host-testable; with
 everything on `dynlib!` those are gone, so a test that actually calls FFmpeg now fails by taking
 `dlopen`'s `None` branch on Darwin rather than by failing to link), and the host is Darwin while the TV is
-Linux, which is why `tools/sockprobe.c` exists. So anything about *playback behaviour* is only
+Linux, which is why `tools/sockprobe.c` exists. The desktop simulator does play, through
+`player::desk` (the bundled FFmpeg's own decoders), so engine-side behaviour (Load/Play/seek, the
+HUD, the queues) can be looked at on a desk; anything about Starfish/ACB or LG's decoder is only
 observable on device: deploy and read `/tmp/plxnative-events.log` (feed stats, bind steps,
 seek/rebase, `RECEIVE_GOOD_VIDEO`). The `tests/` harness drives real playback per case — see the root
 `docs/agent-reference.md` testing section (run as GUEST by default; never run two harness jobs at once).

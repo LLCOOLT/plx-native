@@ -19,15 +19,17 @@ use super::{
 use std::{
     fs::OpenOptions,
     io::Read,
-    os::{
-        fd::AsRawFd,
-        unix::{
-            fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
-            net::UnixStream,
-        },
-    },
     path::{Path, PathBuf},
     time::{Duration, Instant},
+};
+#[cfg(unix)]
+#[allow(unused_imports)]
+use std::os::{
+    fd::AsRawFd,
+    unix::{
+        fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
+        net::UnixStream,
+    },
 };
 
 use wire::failure::{self, Stage};
@@ -517,6 +519,12 @@ fn start_unavailable(error: ClientError) -> ClientError {
 /// Read only a bounded regular file under the same private directory rules as rendezvous.
 /// Consume only records bound to the generation established by a matching Hello.
 /// Before Hello, only a failure echoing the current activation nonce can enrich the observation.
+/// Windows has no storage helper to leave a failure record (`transact` is `Unsupported` off the
+/// television), so there is never one to read.
+#[cfg(windows)]
+fn read_helper_failure(_root: &Path, _generation: Option<&str>, _activation_nonce: Option<&str>) {}
+
+#[cfg(unix)]
 fn read_helper_failure(root: &Path, generation: Option<&str>, activation_nonce: Option<&str>) {
     let Some(generation) = generation else {
         if let Some(detail) = activation_nonce.and_then(|nonce| wire::activation::read_failure(root, nonce)) {
@@ -590,6 +598,7 @@ fn connect(root: &Path) -> Result<(UnixStream, Descriptor), ClientError> {
     Ok((stream, descriptor))
 }
 
+#[cfg(unix)]
 fn read_descriptor(path: &Path) -> Result<Descriptor, ClientError> {
     let mut file = OpenOptions::new()
         .read(true)

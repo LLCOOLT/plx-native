@@ -159,7 +159,10 @@ plx_base::dynlib! {
     /// The seven multi-interface symbols, frozen to webOS's oldest libcurl (7.53.1). See this
     /// module's doc before adding an eighth — `curl_multi_poll`/`curl_multi_wakeup` are absent on
     /// the dev television and present on the Mac.
-    curlmulti: ["libcurl.so.4", "libcurl.so.5", "libcurl.4.dylib"] {
+    curlmulti: [
+        "libcurl.so.4", "libcurl.so.5", "libcurl.4.dylib",
+        "libcurl-4.dll", "libcurl-x64.dll", "libcurl.dll",
+    ] {
     fn curl_multi_init() -> *mut CURLM;
     fn curl_multi_add_handle(multi: *mut CURLM, easy: *mut CURL) -> c_int;
     fn curl_multi_perform(multi: *mut CURLM, running: *mut c_int) -> c_int;
@@ -170,10 +173,16 @@ plx_base::dynlib! {
     fn curl_multi_cleanup(multi: *mut CURLM) -> c_int;
 }}
 
-/// `struct curl_waitfd` — `multi.h`, unchanged since 7.28.0. `curl_socket_t` is `int` on POSIX.
+/// `curl_socket_t`: `int` on POSIX, a Winsock `SOCKET` (`UINT_PTR`) on Windows.
+#[cfg(unix)]
+type curl_socket_t = c_int;
+#[cfg(windows)]
+type curl_socket_t = usize;
+
+/// `struct curl_waitfd` — `multi.h`, unchanged since 7.28.0.
 #[repr(C)]
 pub struct curl_waitfd {
-    fd: c_int,
+    fd: curl_socket_t,
     events: i16,
     revents: i16,
 }
@@ -280,11 +289,46 @@ pub fn media_stall_budget() -> std::time::Duration {
 
 /// A self-pipe: one byte on the write end wakes anything polling the read end. Owns both
 /// descriptors and closes them on drop.
+#[cfg(unix)]
 struct Wake {
     r: c_int,
     w: c_int,
 }
 
+/// The Windows wake: `curl_multi_wait` polls its extra descriptors with Winsock, which cannot poll
+/// a pipe, so the "pipe" is a loopback UDP socket connected to itself. `r` is its raw `SOCKET`
+/// for the `curl_waitfd`; a datagram sent to itself makes it readable, exactly as the byte in the
+/// unix pipe does, and both ends close with the socket.
+#[cfg(windows)]
+struct Wake {
+    sock: std::net::UdpSocket,
+    r: curl_socket_t,
+}
+
+#[cfg(windows)]
+impl Wake {
+    fn new() -> Option<Wake> {
+        use std::os::windows::io::AsRawSocket;
+        let sock = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).ok()?;
+        sock.connect(sock.local_addr().ok()?).ok()?;
+        sock.set_nonblocking(true).ok()?;
+        let r = sock.as_raw_socket() as curl_socket_t;
+        Some(Wake { sock, r })
+    }
+
+    /// As the unix `signal`: non-blocking, and a wake already pending makes a second one moot.
+    fn signal(&self) {
+        let _ = self.sock.send(&[1u8]);
+    }
+
+    /// As the unix `drain`: empty every pending datagram so the next wait blocks again.
+    fn drain(&self) {
+        let mut b = [0u8; 64];
+        while self.sock.recv(&mut b).is_ok() {}
+    }
+}
+
+#[cfg(unix)]
 impl Wake {
     /// `pipe(2)` with **both ends** `O_NONBLOCK | FD_CLOEXEC`.
     ///
@@ -335,6 +379,7 @@ impl Wake {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Wake {
     fn drop(&mut self) {
         for fd in [self.r, self.w] {
@@ -1067,6 +1112,9 @@ impl CurlSource {
                     }
                 }};
             }
+            // Windows: the system certificate store, as `plx_net::net::use_os_roots` explains.
+            #[cfg(windows)]
+            require_setopt!(plx_net::net::use_os_roots(easy), "CURLSSLOPT_NATIVE_CA");
             let xp = &mut *self.xfer as *mut Xfer as *mut c_void;
             plx_net::net::curl_easy_setopt_ptr(easy, CURLOPT_URL, self.hop_url.as_ptr() as *const c_void);
             plx_net::net::curl_easy_setopt_ptr(

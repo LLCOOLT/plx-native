@@ -2022,7 +2022,7 @@ SIM_PRE = mkdir -p $(SIM_DIR); test -n "$(SIM_PMS)" || \
 # names. `APP_FILES` is an explicit list, so none of it can reach an .ipk or a television.
 FFMPEG_HOST_PREFIX = vendor/ffmpeg-prefix-host
 FFMPEG_HOST_INC    = $(FFMPEG_HOST_PREFIX)/include
-FFMPEG_HOST_NAMES  = libavutil-plx.61 libavcodec-plx.63 libavformat-plx.63 libswscale-plx.10
+FFMPEG_HOST_NAMES  = libavutil-plx.61 libswresample-plx.7 libavcodec-plx.63 libavformat-plx.63 libswscale-plx.10
 FFMPEG_HOST_STAGED = $(addprefix pkg/,$(addsuffix .dylib,$(FFMPEG_HOST_NAMES)))
 LIBASS_HOST_NAME = $(if $(filter Darwin,$(shell uname -s)),libass-plx.0.dylib,libass-plx-host.so.0)
 LIBASS_HOST_STAGED = pkg/$(LIBASS_HOST_NAME)
@@ -2213,18 +2213,18 @@ sim-macos-clean:
 # PlxNative.app — the same host build, packaged as a SELF-CONTAINED macOS application you can send
 # to somebody who has none of this installed. `ci/mkmacapp.py` is the whole recipe and its module
 # doc is the account of the three ways it silently ships broken; `docs/macos-app.md` is the design
-# note (what it can and cannot do — chiefly: no video off-device).
+# note. It carries the staged host FFmpeg (with the desktop decoders) and libass beside the fonts.
 #
 # Its own target dir, per this file's rule for feature-set splits: this one is `--release
 # --no-default-features --features hostsim`, which is a fourth configuration, and sharing a dir
 # with `sim` would make each invocation rebuild the crate the other way round.
 MACAPP_TDIR ?= rust-modules/target-macapp
 
-macapp:
+macapp: $(FFMPEG_HOST_STAGED) $(LIBASS_HOST_STAGED) pkg/.ffabi-host-ok
 	MACAPP_TDIR=$(MACAPP_TDIR) ci/mkmacapp.py
 
 # The artifact to actually send: a ditto archive (which preserves the signature) beside the bundle.
-macapp-zip:
+macapp-zip: $(FFMPEG_HOST_STAGED) $(LIBASS_HOST_STAGED) pkg/.ffabi-host-ok
 	MACAPP_TDIR=$(MACAPP_TDIR) ci/mkmacapp.py --zip
 
 # ---------------------------------------------------------------------------------------------
