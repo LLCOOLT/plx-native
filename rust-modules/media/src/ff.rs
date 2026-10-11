@@ -3373,6 +3373,41 @@ fn progressive_aac_frame(raw: &[u8], freq_idx: u8, chan_cfg: u8) -> Vec<u8> {
     framed
 }
 
+/// **When each audio frame the progressive demuxer feeds begins.** MPEG-TS (a Live TV channel)
+/// packs several audio frames into one PES and timestamps only the first frame that starts in it;
+/// FFmpeg's parser splits the PES into frames, and libavformat stamps the rest from the frame
+/// duration only once its running clock is set — before that they arrive with none. Each of
+/// those starts where the frame before it ended — the HLS path resolves the same holes per segment
+/// (`resolve_audio_stamps`); a progressive stream has no segment end to look ahead to, so this
+/// counts forward only. A frame with nothing to count from (joined mid-PES, or after a seek) is
+/// dropped: fed at 0, as it used to be, it lands seconds or hours from its neighbours. MP4 and
+/// Matroska timestamp every frame, so for them this only ever passes the timestamp through.
+#[derive(Default)]
+struct ProgressiveAudioClock {
+    next_ns: Option<i64>,
+}
+
+impl ProgressiveAudioClock {
+    /// The start of a frame whose container timestamp is `raw_ns` and whose length is
+    /// `duration_ns`; `None` when it cannot be known.
+    fn stamp(&mut self, raw_ns: Option<i64>, duration_ns: Option<i64>) -> Option<i64> {
+        let at = raw_ns.or(self.next_ns)?;
+        self.next_ns = duration_ns.and_then(|d| at.checked_add(d));
+        Some(at)
+    }
+
+    /// A seek: the next frame is from somewhere else.
+    fn reset(&mut self) {
+        self.next_ns = None;
+    }
+}
+
+/// An audio frame's length: the packet's own duration when FFmpeg knows it, else its ADTS
+/// header's.
+fn audio_frame_ns(packet_ns: Option<i64>, data: &[u8]) -> Option<i64> {
+    packet_ns.filter(|&d| d > 0).or_else(|| adts_duration_ns(data))
+}
+
 fn packet_has_adts(data: &[u8]) -> bool {
     data.len() >= 7 && data[0] == 0xff && data[1] & 0xf6 == 0xf0
 }
@@ -7700,6 +7735,24 @@ fn open_input_failure_note(r: c_int, lane_aborted: bool) -> String {
     }
 }
 
+/// **A Live TV stream's analysis window.** `avformat_find_stream_info` reads ahead until it has
+/// FFmpeg's default five seconds of stream (or 5 MB) to settle each track's parameters, frame rate
+/// included — and a Tunarr channel arrives in real time, so that is up to five seconds of a tune
+/// spent before the first packet is handed on. The app has already measured what it needs
+/// (`live::probe`: the codecs and the frame rate), and MPEG-TS carries the parameter sets and ADTS
+/// headers in band, so one second is ample. Set by option name (`av_opt_set` on the context's own
+/// AVClass), no struct offset. A refusal leaves FFmpeg's defaults: slower, never wrong.
+#[inline]
+pub(crate) const fn live_analyzeduration_us() -> i64 {
+    1_000_000
+}
+
+unsafe fn live_analysis_limits(fmt: *mut AVFormatContext) {
+    let us = std::ffi::CString::new(live_analyzeduration_us().to_string()).expect("digits");
+    let rc = av_opt_set(fmt as *mut c_void, c"analyzeduration".as_ptr(), us.as_ptr(), 0);
+    crate::player::log(&format!("ff: live analysis window {}ms rc={rc}", live_analyzeduration_us() / 1000));
+}
+
 /// The demux thread body (spawned by `engine::start_bufferfeed`).
 ///
 /// Takes an [`Origin`](plx_plex::plex::Origin) rather than a `(host, port)` pair because **the scheme
@@ -7713,6 +7766,7 @@ pub fn demux(
     origin: plx_plex::plex::Origin,
     path: String,
     acodec: String,
+    live: bool,
     abr: Option<(crate::route::HlsAbrControl, crate::route::WorkerTicket)>,
     auto_original: Option<crate::route::AutoOriginalWatch>,
     aq: SendPtr<AuQueue>,
@@ -7983,6 +8037,9 @@ pub fn demux(
                     free_avio(avio);
                     break;
                 }
+                if live {
+                    live_analysis_limits(fmt);
+                }
                 if avformat_find_stream_info(fmt, std::ptr::null_mut()) < 0 {
                     crate::player::log("ff: find_stream_info failed");
                     avformat_close_input(&mut fmt);
@@ -8062,6 +8119,7 @@ pub fn demux(
                 // AAC needs ADTS framing for LG's decoder (mp4/mkv carry raw AAC). Precompute the
                 // per-frame ADTS fields (freq index + channel config) for the selected audio stream;
                 // None => not AAC (or a non-standard rate) => fed verbatim.
+                let mut audio_clock = ProgressiveAudioClock::default();
                 let aac_adts: Option<(u8, u8)> = if ai >= 0 {
                     let acp = stream_codecpar(*streams.add(ai as usize));
                     if (*acp).codec_id == AV_CODEC_ID_AAC {
@@ -8233,6 +8291,7 @@ pub fn demux(
                         // Fence completed renders from the old position before new packets arrive.
                         crate::player::ass_source::seek(ass_generation);
                         let sr = av_seek_frame(fmt, vi, ts, AVSEEK_FLAG_BACKWARD);
+                        audio_clock.reset();
                         crate::player::log(&format!(
                             "ff: seek {}s rv={sr}",
                             seek_ns / 1_000_000_000
@@ -8305,9 +8364,14 @@ pub fn demux(
                         SHARED.hls_video_tail_ns.store(pts, Ordering::Release);
                     } else if si == ai && FEED_AUDIO.load(Ordering::Relaxed) {
                         let ast = *streams.add(ai as usize);
-                        let pts = pts_ns(pkt, ast);
+                        let raw = std::slice::from_raw_parts((*pkt).data, (*pkt).size.max(0) as usize);
+                        let packet_ns = ((*pkt).duration > 0)
+                            .then(|| av_rescale_q((*pkt).duration, stream_time_base(ast), NS_TB));
+                        let Some(pts) = audio_clock.stamp(pts_ns_opt(pkt, ast), audio_frame_ns(packet_ns, raw)) else {
+                            av_packet_unref(pkt);
+                            continue;
+                        };
                         let pushed = if let Some((freq_idx, chan_cfg)) = aac_adts {
-                            let raw = std::slice::from_raw_parts((*pkt).data, (*pkt).size.max(0) as usize);
                             let framed = progressive_aac_frame(raw, freq_idx, chan_cfg);
                             crate::aq::aq_push_with_drain(
                                 aqa_p,
@@ -8319,7 +8383,6 @@ pub fn demux(
                                 || state.drain_wire(),
                             )
                         } else if dts_audio {
-                            let raw = std::slice::from_raw_parts((*pkt).data, (*pkt).size.max(0) as usize);
                             let Some(core) = dts_core_packet(raw) else {
                                 crate::player::log("ff: DTS packet has no complete supported core; refusing audio feed");
                                 SHARED.demux_failed.store(true, Ordering::Release);

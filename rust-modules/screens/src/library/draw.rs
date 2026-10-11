@@ -166,6 +166,15 @@ impl LibraryScreen {
                 }
                 row.cards.paint(f, self.shelf_painter(f), &self.hub_src(index, f.cx), self.shelf_frame(index));
             }
+            // The shelf just past the window, so a scroll down arrives at artwork already on its
+            // way (`plx_ui::cards::LOOKAHEAD_AHEAD`).
+            let beyond = self.shelf_window().end;
+            if plx_ui::cards::page_on_canvas(self.shelf_painter(f)) {
+                if let Some(row) = self.shelves.get(beyond) {
+                    let index = beyond;
+                    row.cards.prefetch::<H, _>(self.shelf_painter(f), &self.hub_src(index, f.cx), self.shelf_frame(index), true);
+                }
+            }
         });
         self.draw_grid_header(f);
         if self.readout == Readout::Loading {

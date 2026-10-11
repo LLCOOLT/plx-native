@@ -3771,3 +3771,13 @@ fn every_shelf_cards_stop_from_the_real_draw_is_the_placed_rect() {
         assert!(popped.rect.w > CARD_W, "the focused card's stop is its popped rect");
     }
 }
+
+/// Home warms the shelf below the last one on screen — never a shelf already shown, never past
+/// the end.
+#[test]
+fn home_warms_the_shelf_just_below_the_screen() {
+    let row = |shown: &[bool]| shelves_beyond_screen(shown.iter().copied());
+    assert_eq!(row(&[false, true, true, false, false]), Some(3));
+    assert_eq!(row(&[true, true]), None);
+    assert_eq!(row(&[false, false]), None, "nothing on screen: nothing to anchor a lookahead on");
+}

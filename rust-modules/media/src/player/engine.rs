@@ -1305,9 +1305,10 @@ fn start_bufferfeed_inner(
             let acodec = crate::route::stream_acodec(ps);
             let abr = crate::route::hls_abr_control(ps);
             let auto_original = crate::route::auto_original_watch(ps);
+            let live = crate::route::live_stream(ps);
             SHARED.side_subs_owner.store(side_target.is_some(), Ordering::Release);
             stream_th = plx_base::task::spawn_off_frame_keeping("demux", move |off| {
-                crate::ff::demux(off, origin, path, acodec, abr, auto_original, aqp, aqap, hsp)
+                crate::ff::demux(off, origin, path, acodec, live, abr, auto_original, aqp, aqap, hsp)
             });
             if stream_th.is_none() {
                 SHARED.side_subs_owner.store(false, Ordering::Release);
@@ -1486,23 +1487,37 @@ fn first_open_rebases(seek_armed: bool, live: bool) -> bool {
 mod live_prime_tests {
     use super::*;
 
-    /// **The distorted Live TV audio.** A channel's clock used to start on the file depths —
-    /// 700 ms of video and 300 ms of audio — which a real-time stream never grows past, so the
-    /// audio decoder ran a third of a second from starving for the whole viewing. A live channel
-    /// now holds Play until both lanes carry the live cushion.
+    /// A channel's clock used to start on the file depths — 700 ms of video and 300 ms of audio —
+    /// which a real-time stream never grows past. A live channel holds Play until both lanes
+    /// carry the live cushion.
     #[test]
     fn a_live_channel_does_not_start_on_the_file_cushion() {
-        assert!(decoder_ready(PRIME_NS, PRIME_AUDIO_NS, true, false), "a file still starts at once");
-        assert!(!decoder_ready(PRIME_NS, PRIME_AUDIO_NS, true, true), "a channel waits for its cushion");
-        assert!(!decoder_ready(LIVE_PRIME_NS, PRIME_AUDIO_NS, true, true), "audio needs its cushion too");
-        assert!(decoder_ready(LIVE_PRIME_NS, LIVE_PRIME_NS, true, true));
-        assert!(LIVE_PRIME_NS >= 2_000_000_000, "at least two seconds of each lane");
+        assert!(decoder_ready(PRIME_NS, PRIME_AUDIO_NS, true, false, false), "a file still starts at once");
+        assert!(!decoder_ready(PRIME_NS, PRIME_AUDIO_NS, true, true, false), "a channel waits for its cushion");
+        assert!(!decoder_ready(LIVE_PRIME_NS, PRIME_AUDIO_NS, true, true, false), "audio needs its cushion too");
+        assert!(decoder_ready(LIVE_PRIME_NS, LIVE_PRIME_NS, true, true, false));
+        assert!(LIVE_PRIME_NS >= 1_000_000_000, "at least a second of each lane");
     }
 
     #[test]
     fn an_audioless_channel_still_starts_on_video_alone() {
-        assert!(decoder_ready(PRIME_VIDEO_MAX_NS.max(LIVE_PRIME_NS), 0, false, true));
-        assert!(!decoder_ready(PRIME_NS, 0, false, true));
+        assert!(decoder_ready(PRIME_VIDEO_MAX_NS.max(LIVE_PRIME_NS), 0, false, true, false));
+        assert!(!decoder_ready(PRIME_NS, 0, false, true, false));
+    }
+
+    /// **The 4K tune that never started.** A high-bitrate channel fills the pipeline's 8 MB video
+    /// source buffer before the live cushion is in, and the pipeline then takes nothing more until
+    /// it plays. A full video lane starts the channel once the file depths are in; short of them
+    /// it still waits, and a file ignores the signal.
+    #[test]
+    fn a_full_video_lane_starts_a_high_bitrate_channel() {
+        let vbuf = 1_100_000_000; // what 8 MB holds at ~60 Mbit/s
+        assert!(!decoder_ready(vbuf, vbuf, true, true, false), "without the signal it would wait for ever");
+        assert!(decoder_ready(vbuf, vbuf, true, true, true), "a full lane is the cushion the pipeline holds");
+        assert!(!decoder_ready(PRIME_NS / 2, vbuf, true, true, true), "but never short of the file depth");
+        assert!(!decoder_ready(vbuf, PRIME_AUDIO_NS / 2, true, true, true), "nor with too little sound");
+        assert!(decoder_ready(vbuf, 0, false, true, true), "an audioless channel starts on the full lane too");
+        assert!(!decoder_ready(PRIME_NS, 0, true, false, true), "a file is unchanged");
     }
 }
 
@@ -2090,11 +2105,13 @@ const PRIME_VIDEO_MAX_NS: i64 = 2_500_000_000;
 /// **A Live TV channel primes BOTH lanes this deep before Play.** A file arrives faster than it
 /// plays, so whatever the clock starts on grows behind it; a Tunarr channel arrives at exactly the
 /// speed it plays (its encoder reads in real time), so the cushion at Play is the cushion for the
-/// whole viewing. Started on the file depths (700 ms video, 300 ms audio), every network or encoder
-/// hiccup longer than a third of a second starved the audio decoder under Starfish's audio-master
-/// clock — the distorted, warbling sound reported on the first Tunarr build that showed a
-/// picture. 2.5 s rides out ordinary jitter at the cost of tuning that much later.
-const LIVE_PRIME_NS: i64 = 2_500_000_000;
+/// whole viewing. Started on the file depths (700 ms video, 300 ms audio), any network or encoder
+/// hiccup longer than a third of a second would starve the audio decoder under Starfish's
+/// audio-master clock. 1.5 s rides out ordinary jitter at the cost of tuning that much later
+/// (it was 2.5 s while it was mistaken for the audio fix; see below).
+/// (This was first taken for the cause of the distorted Tunarr sound; it was not — that was the
+/// pre-keyframe audio [`feed_audio_lane`] used to stack at time 0.)
+const LIVE_PRIME_NS: i64 = 1_500_000_000;
 
 /// How deep each lane must be before the clock starts: `(video, audio)`.
 fn prime_depth(live: bool) -> (i64, i64) {
@@ -2107,10 +2124,22 @@ fn prime_depth(live: bool) -> (i64, i64) {
 
 /// Whether the decoder may start: both lanes at their [`prime_depth`], or — for a stream proven
 /// audioless — video alone at the video-only escape.
-fn decoder_ready(accepted_vbuf: i64, accepted_abuf: i64, audio_expected: bool, live: bool) -> bool {
-    let (video, audio) = prime_depth(live);
+///
+/// **A live channel also starts on a FULL video lane** (`video_full`: the pipeline's last answer
+/// to a video feed was BufferFull), once the file depths are in. The Load caps the pipeline's
+/// video source buffer at 8 MB (`srcBufferLevelVideo` in [`PAYLOAD_AV`]), and a 4K channel above
+/// ~40 Mbit/s fills that in less than [`LIVE_PRIME_NS`]: the pipeline then accepts nothing more
+/// until it plays, and it does not play until the cushion is in — so the tune hung (owner report
+/// on 4K UHD channels, 2026-10-10). A full lane is as much cushion as the pipeline will hold.
+fn decoder_ready(accepted_vbuf: i64, accepted_abuf: i64, audio_expected: bool, live: bool, video_full: bool) -> bool {
+    let (mut video, mut audio) = prime_depth(live);
+    if live && video_full {
+        (video, audio) = (PRIME_NS, PRIME_AUDIO_NS);
+    }
     if audio_expected {
         accepted_vbuf >= video && accepted_abuf >= audio
+    } else if live && video_full {
+        accepted_vbuf >= video
     } else {
         accepted_vbuf >= PRIME_VIDEO_MAX_NS.max(video)
     }
@@ -2469,9 +2498,16 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine) {
     // demuxer proved audioless may use the video-only escape; `abuf <= 0` alone is starvation, not
     // evidence that no audio exists.
     let audio_expected = SHARED.hls_audio_expected.load(Ordering::Acquire) || playable_abuf > 0;
-    let decoder_ready = decoder_ready(accepted_vbuf, accepted_abuf, audio_expected, eng.live);
+    // The video lane's last feed was refused as BufferFull (`feed_stream`'s state read-out).
+    let video_full = SHARED.dg_feed_state.load(Ordering::Relaxed) == 2;
+    let decoder_ready = decoder_ready(accepted_vbuf, accepted_abuf, audio_expected, eng.live, video_full);
     if decoder_ready && eng.live {
-        log(&format!("live: primed video={}ms audio={}ms", accepted_vbuf / 1_000_000, accepted_abuf / 1_000_000));
+        log(&format!(
+            "live: primed video={}ms audio={}ms{}",
+            accepted_vbuf / 1_000_000,
+            accepted_abuf / 1_000_000,
+            if video_full { " (video lane full)" } else { "" }
+        ));
     }
     let recovery = SHARED.hls_recovery();
     // A downshift has no discretionary trial reserve, yet it can queue candidate AUs while an
@@ -2829,7 +2865,7 @@ fn feed_audio_lane(mt: &MainThread, eng: &mut Engine) {
         }
         let n = eng.pending_audio.as_ref().unwrap().0;
         let (es, _key, pts, len, data) = unsafe { crate::aq::au_fields(n) };
-        let mut fp = pts + shift;
+        let fp = pts + shift;
         // Stale drifted audio from before a seek's reopen: far AHEAD of the freshly-anchored video.
         // Drop it (else it poisons max_fed_audio_pts and stalls the audio clock → playback sticks).
         if eng.max_fed_video_pts > 0 && fp > eng.max_fed_video_pts + AUDIO_STALE_AHEAD_NS {
@@ -2840,8 +2876,13 @@ fn feed_audio_lane(mt: &MainThread, eng: &mut Engine) {
             eng.pending_audio = None; // stale (a big backward jump)
             continue;
         }
+        // Before the anchor the video lane rebased on: audio the picture never shows. Dropped, as
+        // the video lane drops its pre-keyframe AUs. Clamped to 0 instead, a Live TV join (whose
+        // audio runs a second or more ahead of its first keyframe) stacked all of it on one instant,
+        // and the audio-master clock spent the viewing catching up — sped up and stuttering.
         if fp < 0 {
-            fp = 0;
+            eng.pending_audio = None;
+            continue;
         }
         if !eng.prime_play && pres != PRES_NONE && fp - pres > MAX_FEED_AHEAD_NS + AUDIO_SLACK_NS {
             break;
@@ -3562,6 +3603,63 @@ mod prime_livelock_tests {
     /// The test pins the BEHAVIOUR; the visibility pins the dispatch.
     fn tick(mt: &plx_base::task::MainThread, eng: &mut Engine) {
         feed_both_lanes(mt, eng);
+    }
+
+    /// **The distorted Live TV audio.** A channel is joined mid-stream: its audio runs from the
+    /// first byte, its picture only from the first keyframe, which can be a second or more later.
+    /// The video lane rebases on that keyframe and drops what came before it; the audio lane used
+    /// to feed what came before it too, clamped to time 0 — a second of sound stacked on one
+    /// instant at the start of every tune, which an audio-master clock in LIVE mode never sheds.
+    /// Audio from before the anchor is dropped like the video before it.
+    #[test]
+    fn audio_from_before_a_live_join_keyframe_is_dropped_not_stacked_at_zero() {
+        let _serial = plx_base::testlock::serial();
+        // The rebase writes the process-wide shift; every later test feeds through it.
+        struct Restore(i64);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                SHARED.pts_shift.store(self.0, Ordering::Relaxed);
+                crate::player::ffi_host::force_clocksink_for_test(false);
+            }
+        }
+        crate::player::ffi_host::force_clocksink_for_test(true);
+        let _restore = Restore(SHARED.pts_shift.load(Ordering::Relaxed));
+        let mt = unsafe { plx_base::task::MainThread::assume() };
+        SHARED.pres_fed.store(PRES_NONE, Ordering::Relaxed);
+        SHARED.seek_to_ns.store(-1, Ordering::Relaxed);
+
+        let mut eng = engine_after_reload();
+        eng.live = true;
+        eng.rebase_pending = true;
+        // The stream's own clock is hours in; its first keyframe arrives a second after its audio.
+        const JOIN: i64 = 7_200_000_000_000;
+        const KEYFRAME: i64 = JOIN + 1_000_000_000;
+        let au = [0u8; 64];
+        let qa = &mut **eng.aq_audio.as_mut().unwrap() as *mut crate::aq::AuQueue;
+        let mut audio_from_keyframe = 0;
+        for i in 0..AUDIO_AUS {
+            let pts = JOIN + i * A_STEP_NS;
+            audio_from_keyframe += i64::from(pts >= KEYFRAME);
+            crate::aq::aq_push(qa, au.as_ptr(), au.len() as c_int, pts, 1, 2);
+        }
+        let qv = &mut **eng.aq_video.as_mut().unwrap() as *mut crate::aq::AuQueue;
+        for i in 0..VIDEO_AUS {
+            crate::aq::aq_push(qv, au.as_ptr(), au.len() as c_int, KEYFRAME + i * V_STEP_NS, c_int::from(i == 0), 1);
+        }
+
+        let accepted_before = ATOT.load(Ordering::Relaxed);
+        tick(&mt, &mut eng);
+        tick(&mt, &mut eng);
+        let accepted = ATOT.load(Ordering::Relaxed) - accepted_before;
+
+        assert!(!eng.rebase_pending, "PRECONDITION: the keyframe rebased the stream");
+        assert!(accepted > 0, "PRECONDITION: the host feed seam accepted audio");
+        assert_eq!(
+            accepted, audio_from_keyframe,
+            "only the audio from the keyframe on may reach the decoder; the {} frames before it \
+             were fed at time 0",
+            AUDIO_AUS - audio_from_keyframe
+        );
     }
 
     #[test]

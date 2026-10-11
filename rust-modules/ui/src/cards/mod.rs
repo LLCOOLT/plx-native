@@ -265,6 +265,60 @@ pub(crate) fn press_scale<H: Host>(pop: f32, i: usize, pressed: Option<usize>, c
     pop * if pressed == Some(i) { cx.press.dip() } else { 1.0 }
 }
 
+/// **How far past the screen a section reaches for artwork.** A card section used to fetch a
+/// picture only for a card it was drawing, so a scroll always arrived at blank tiles that only
+/// then started their round trip to the server. Each section now also warms (`tex::warm_on`, through
+/// [`crate::widgets::warm_card_art`]) the cards just beyond what it shows — ahead first, then one
+/// behind — and a page warms the shelf just below the screen. A warm is speculation: the image
+/// source runs it only when nothing on screen is waiting (one at a time, so a visible miss always
+/// finds a worker), gives it the lowest LRU age, and never lets one warm take another's slot (the
+/// poster store's `victim`), so a lookahead larger than what is free cannot churn; the frame's
+/// upload budget still applies. The depths are sized to sit beside a full screen of cards inside
+/// the store's 64 slots (Home: four shelves of seven on screen, four ahead and one behind each,
+/// and the next shelf's first eleven).
+pub const LOOKAHEAD_AHEAD: usize = 4;
+/// Cards warmed BEHIND the visible ones (the way the viewer came from, cheaper to be wrong about).
+pub const LOOKAHEAD_BEHIND: usize = 1;
+
+/// The order a strip of `len` cards whose `first..=last` are on screen warms the rest in: the
+/// [`LOOKAHEAD_AHEAD`] after it, then the [`LOOKAHEAD_BEHIND`] before it, nearest first. Pure.
+pub(crate) fn strip_lookahead(first: usize, last: usize, len: usize) -> impl Iterator<Item = usize> {
+    let ahead = (last + 1..len).take(LOOKAHEAD_AHEAD);
+    let behind = (0..first).rev().take(LOOKAHEAD_BEHIND);
+    ahead.chain(behind)
+}
+
+/// The order a grid of `cols` columns whose cards `window` are buffered warms the rest in: the next
+/// row below it, nearest first. Pure.
+pub(crate) fn grid_lookahead(window: Range<usize>, cols: usize, len: usize) -> impl Iterator<Item = usize> {
+    (window.end..len).take(cols.max(1))
+}
+
+/// May a page warm the shelves beyond the screen? Not while it is a held or retained image moved
+/// off the canvas (a page sliding away, covered by the next one) — nothing it warms would be seen.
+pub fn page_on_canvas(p: Painter) -> bool {
+    !p.is_recording() && p.dx().abs() < crate::consts::SCR_W
+}
+
+/// Warm the artwork of `order`'s cards in `src`, in order, until the image source takes one or
+/// refuses one — a frame spends at most one speculative claim per call, and a source that is busy
+/// with what is on screen refuses at once. A card already known to the source (resident, in flight
+/// or failed) costs nothing and the walk goes on. Never from a recording pass.
+pub(crate) fn warm_cards<H: Host, S: CardSource<H>>(p: Painter, src: &S, order: impl IntoIterator<Item = usize>) {
+    // Discovery and the blur source passes replay the page; only the visible pass admits work.
+    if p.is_recording() || plx_gfx::gfx::backdrop::discovering() || plx_gfx::gfx::blur_source_pass() {
+        return;
+    }
+    for i in order {
+        if i >= src.len() || !src.loaded(i) {
+            continue;
+        }
+        if crate::widgets::warm_card_art(&src.art(i)) != crate::tex::Warm::Known {
+            return;
+        }
+    }
+}
+
 /// `r` (screen space) in painter `p`'s space: the painter's own translate undone, so a rect drawn
 /// or registered through `p` lands where `r` says on the screen.
 #[inline]
