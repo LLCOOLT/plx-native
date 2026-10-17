@@ -300,5 +300,17 @@
   "settings.playback.hdr_overlay.full": "100%",
   "settings.playback.hdr_overlay.three_quarters": "75%",
   "settings.playback.hdr_overlay.half": "50%",
-  "settings.playback.hdr_overlay.copy": "Quão brilhantes são os controlos e as legendas do leitor em HDR e Dolby Vision, quando o televisor os mostra muito mais brilhantes. Reduza se encandearem. 100% deixa-os como estão."
+  "settings.playback.hdr_overlay.copy": "Quão brilhantes são os controlos e as legendas do leitor em HDR e Dolby Vision, quando o televisor os mostra muito mais brilhantes. Reduza se encandearem. 100% deixa-os como estão.",
+  "settings.playback.auto_skip": "Saltar genérico e créditos",
+  "settings.playback.auto_skip.off": "Desativado",
+  "settings.playback.auto_skip.intro": "Saltar a introdução",
+  "settings.playback.auto_skip.intro_credits": "Saltar introdução e créditos",
+  "settings.playback.auto_skip.copy": "Salta as introduções e, se escolher, também os créditos, assim que começam. Esquerda ou o botão Retroceder no ecrã volta ao início. Os créditos nunca são saltados enquanto a contagem decrescente leva ao episódio seguinte.",
+  "settings.playback.screensaver": "Protetor de ecrã",
+  "settings.playback.screensaver.off": "Desativado",
+  "settings.playback.screensaver.min2": "Após 2 minutos",
+  "settings.playback.screensaver.min5": "Após 5 minutos",
+  "settings.playback.screensaver.min10": "Após 10 minutos",
+  "settings.playback.screensaver.min20": "Após 20 minutos",
+  "settings.playback.screensaver.copy": "Quando nada é premido durante algum tempo numa página de navegação, o ecrã passa para uma apresentação de imagens da sua biblioteca com as horas. Qualquer botão repõe a página. Nunca arranca durante a reprodução."
 }

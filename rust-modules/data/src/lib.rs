@@ -14,11 +14,15 @@
 
 pub mod browse; // Library browse: per-section paged catalog (sparse store + off-thread page fetches)
 pub mod collection; // collection page model: tag resolution, header metadata and paged members
+pub mod livetv; // Live TV: a Tunarr server's HDHomeRun lineup and XMLTV guide, joined (docs/live-tv-plan.md)
 pub mod metadata; // item detail data layer (detail page): full metadata + seasons/episodes + cast + related
 pub mod person; // person/actor page data layer: the header handed in by the cast row + /library/people/{id}/media
 pub mod pms; // the Home catalog: hubs merged across every source
 pub mod subsearch; // the player's subtitle search & download: agent search, install, install poll
 pub mod search; // Search data layer: /hubs/search fanned out across every source, merged into typed shelves
 pub mod stores; // stores as machines (restructure phase 4): one command vocabulary + one step per data store
+pub mod taste; // recently added in the genres the profile watches most: one source's Home shelf
+pub mod watchlist; // the account's Plex watchlist: Home's shelf of library copies, and its membership
+pub mod vchannel; // virtual channels: Live TV channels the app airs from the viewer's own library
 pub mod viewstate; // watched / unwatched / remove-from-deck: the PMS view-state WRITES, off the SDL thread
 pub mod viewledger; // the publish order of view-state edits, so a read in flight is re-patched on landing

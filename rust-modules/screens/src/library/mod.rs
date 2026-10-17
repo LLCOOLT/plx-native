@@ -892,6 +892,7 @@ impl LibraryScreen {
             Some(2) => Some(LibraryReq::Tab(HomeTab::Shows)),
             Some(3) => Some(LibraryReq::Tab(HomeTab::Search)),
             Some(4) => Some(LibraryReq::Account),
+            Some(5) => Some(LibraryReq::Tab(HomeTab::LiveTv)),
             _ => None,
         };
         if let Some(req) = req { fx.push(Fx::App(AppFx::Library(req))); return Handled::Yes; }
@@ -934,6 +935,7 @@ impl LibraryScreen {
             GridAction::Unwatched { desired } => plx_data::stores::browse::QueryEdit::Unwatched(desired),
             GridAction::Genre { id } => plx_data::stores::browse::QueryEdit::Genre(id),
             GridAction::LibraryType(kind) => plx_data::stores::browse::QueryEdit::LibraryType(kind),
+            GridAction::Filter { field, value } => plx_data::stores::browse::QueryEdit::Filter { field, value },
         }));
         if let Some(target) = selected {
             let query = query.filter(|(address, _)| *address == target).map(|(_, edit)| edit);
@@ -1112,6 +1114,7 @@ impl LibraryScreen {
                     QueryEdit::Unwatched(desired) => GridAction::Unwatched { desired: *desired },
                     QueryEdit::Genre(id) => GridAction::Genre { id: id.clone() },
                     QueryEdit::LibraryType(kind) => GridAction::LibraryType(*kind),
+                    QueryEdit::Filter { field, value } => GridAction::Filter { field: field.clone(), value: value.clone() },
                 };
                 if matches!(&action, GridAction::Unwatched { desired } if *desired == H::listing(cx).unwatched())
                     && self.pending.section().is_none() && self.address(cx) == Some(target)
@@ -1300,6 +1303,16 @@ impl LibraryScreen {
             ScreenEvent::Activate(elem) => return self.activate(*elem, false, cx, fx),
             ScreenEvent::PressHold(_) => {
                 return self.command(LibraryCmd::ItemMenu, cx, fx);
+            }
+            // A desktop card's hover play button (`plx_ui::desk`): the card's item from its resume
+            // point, the request the Continue Watching deck's press makes in Play mode.
+            ScreenEvent::PlayCard(elem) => {
+                let Some(item) = self.focused_item(Some(self.key(*elem)), cx)
+                    .filter(|item| crate::registry::item_plays_directly(item)) else { return Handled::No };
+                fx.push(Fx::App(AppFx::Library(LibraryReq::Play {
+                    sid: item.sid, rk: item.rk.clone(), resume_ns: crate::registry::item_play_resume_ns(item),
+                })));
+                return Handled::Yes;
             }
             ScreenEvent::PressCommit(_) => {
                 return cx.focus.current.map_or(Handled::No, |key| self.activate(key.elem, false, cx, fx));

@@ -46,7 +46,7 @@ fn ring_home(rows: usize, make: fn(u16, usize) -> Shelf) -> (Owner, ServerId) {
     o.state.srcs = vec![source];
     let scope = BrowseScope::standalone();
     let mut srcs = std::mem::take(&mut o.state.srcs);
-    let (build, _) = merge_held(&mut srcs, &scope, o.state.hold);
+    let (build, _) = merge_held(&mut srcs, &scope, o.state.hold, &o.state.extras);
     o.state.srcs = srcs;
     remember_roster(&mut o.state, &scope);
     o.state.seen_facts = facts_key();

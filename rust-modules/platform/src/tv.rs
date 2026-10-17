@@ -10,9 +10,11 @@ pub mod window;
 use std::os::raw::c_void;
 use std::sync::OnceLock;
 
-/// What the platform's settings service said about the locale. i18n owns the parse and the log lines.
-#[cfg_attr(any(feature = "hostsim", test, feature = "test-support"), allow(dead_code))] // Reply/Unavailable: TV arm only
-pub enum LocaleReply { NoPlatform, Unavailable, Reply(String) }
+/// What the platform said about the locale. i18n owns the parse, the normalization and the log
+/// lines. `Reply` is the television's settings-service JSON; `Os` is a desktop's own answer, the
+/// user's first preferred UI language and its regional-format locale, as the OS spells them.
+#[allow(dead_code)] // each port constructs only its own variants
+pub enum LocaleReply { NoPlatform, Unavailable, Reply(String), Os { ui: Option<String>, fmt: Option<String> } }
 
 pub struct Port {
     pub probe_device: fn(),
@@ -22,6 +24,8 @@ pub struct Port {
     pub open: fn(&secure::Sealed) -> Option<Vec<u8>>,
     pub remove: fn(&secure::Backend, &str),
     pub system_locale: fn() -> LocaleReply,
+    /// The set's UTC offset in seconds east, from its system clock service; `None` off the set.
+    pub system_utc_offset_s: fn() -> Option<i32>,
     pub go_home: fn(),
     pub poll_home: fn(),
     pub deliver_toast: fn(&str, toast::Identity) -> toast::Sent,
@@ -46,8 +50,8 @@ pub struct Port {
 
 fn nothing() {}
 
-/// No port installed: host unit tests (nothing calls `plex_run`). Every entry is what today's
-/// `cfg(any(hostsim, test))` arm answered, minus the off-device log lines the other entries would
+/// No port installed: host unit tests (nothing calls `plex_run`). Every entry is what the webOS
+/// modules' `cfg(test)` arms answer, minus the off-device log lines the other entries would
 /// write (`deliver_toast` keeps its one).
 static ABSENT: Port = Port {
     probe_device: nothing,
@@ -57,6 +61,7 @@ static ABSENT: Port = Port {
     open: |_| None,
     remove: |_, _| {},
     system_locale: || LocaleReply::NoPlatform,
+    system_utc_offset_s: || None,
     go_home: nothing,
     poll_home: nothing,
     deliver_toast: toast::deliver_without_port,
@@ -99,3 +104,4 @@ fn absent() -> &'static Port {
 pub fn probe_device() { (port().probe_device)() }
 pub fn start_capability_probe() { (port().start_capability_probe)() }
 pub fn system_locale() -> LocaleReply { (port().system_locale)() }
+pub fn system_utc_offset_s() -> Option<i32> { (port().system_utc_offset_s)() }

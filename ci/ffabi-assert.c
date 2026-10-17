@@ -266,3 +266,29 @@ SAME(AVMEDIA_TYPE_AUDIO, 1, "AVMEDIA_TYPE_AUDIO != 1");
 SAME(AVMEDIA_TYPE_SUBTITLE, 3, "AVMEDIA_TYPE_SUBTITLE != 3");
 
 SAME(AVMEDIA_TYPE_ATTACHMENT, 4, "AVMEDIA_TYPE_ATTACHMENT != 4");
+
+/* --- desktop decode (rust-modules/media/src/player/desk/ffdec.rs). Read only by the desktop build,
+       which is 64-bit only, so only the host table is stated. AVChannelLayout is read by address
+       (handed to swresample) and its `nb_channels` by offset; the frame's colour fields pick the
+       picture's matrix, range and transfer; `hw_device_ctx` is the one AVCodecContext field with no
+       AVOption, written once before avcodec_open2. --- */
+SAME64(offsetof(AVFrame, extended_data), 96, "AVFrame.extended_data moved [host]");
+SAME64(offsetof(AVFrame, nb_samples), 112, "AVFrame.nb_samples moved [host]");
+SAME64(offsetof(AVFrame, sample_aspect_ratio), 124, "AVFrame.sample_aspect_ratio moved [host]");
+SAME64(offsetof(AVFrame, sample_rate), 180, "AVFrame.sample_rate moved [host]");
+SAME64(offsetof(AVFrame, color_range), 280, "AVFrame.color_range moved [host]");
+SAME64(offsetof(AVFrame, color_trc), 288, "AVFrame.color_trc moved [host]");
+SAME64(offsetof(AVFrame, colorspace), 292, "AVFrame.colorspace moved [host]");
+SAME64(offsetof(AVFrame, best_effort_timestamp), 304, "AVFrame.best_effort_timestamp moved [host]");
+SAME64(offsetof(AVFrame, ch_layout), 384, "AVFrame.ch_layout moved [host]");
+SAME(offsetof(AVChannelLayout, nb_channels), 4, "AVChannelLayout.nb_channels moved");
+SAME64(sizeof(AVChannelLayout), 24, "sizeof(AVChannelLayout) grew past ffdec.rs's 64-byte buffer? [host]");
+SAME64(offsetof(AVCodecContext, hw_device_ctx), 560, "AVCodecContext.hw_device_ctx moved [host]");
+SAME(AVCOL_RANGE_JPEG, 2, "AVCOL_RANGE_JPEG != 2");
+SAME(AVCOL_TRC_SMPTE2084, 16, "AVCOL_TRC_SMPTE2084 != 16");
+SAME(AVCOL_TRC_ARIB_STD_B67, 18, "AVCOL_TRC_ARIB_STD_B67 != 18");
+SAME(AVCOL_SPC_BT709, 1, "AVCOL_SPC_BT709 != 1");
+SAME(AVCOL_SPC_BT470BG, 5, "AVCOL_SPC_BT470BG != 5");
+SAME(AVCOL_SPC_SMPTE170M, 6, "AVCOL_SPC_SMPTE170M != 6");
+SAME(AVCOL_SPC_BT2020_NCL, 9, "AVCOL_SPC_BT2020_NCL != 9");
+SAME(AVCOL_SPC_BT2020_CL, 10, "AVCOL_SPC_BT2020_CL != 10");

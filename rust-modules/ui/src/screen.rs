@@ -729,6 +729,20 @@ pub enum Activate {
     Press,
     Immediate,
     Direct,
+    /// **The desktop pointer chrome's three** (`ui::desk`): a button drawn ON a card whose stop is
+    /// keyed by that CARD's element and says what the click means for it. None of them is ever
+    /// registered on a television, and none activates the card the way a press would.
+    ///
+    /// `Focus`: move focus to the element and nothing else — a shelf's paging arrow, keyed by the
+    /// card a page away, whose section then reveals it exactly as a D-pad move would.
+    Focus,
+    /// A hold on the element, delivered at once: the card's overflow button. It is the remote's
+    /// press-and-hold to the screen (`PressHold`), so every page's own item-menu path answers it.
+    Hold,
+    /// Play the element directly — the card's play button (`ScreenEvent::PlayCard`). A screen with
+    /// no direct play for it declines, and its card draws no such button
+    /// (`cards::CardSource::playable`).
+    Play,
 }
 
 /// One draw-pass snapshot of navigation presentation. Screens do not read a live nav singleton.
@@ -739,11 +753,14 @@ pub struct NavPresentation {
     pub chrome_alpha: f32,
     pub view_tab: Option<u32>,
     pub blur_amount: f32,
+    /// The desktop pointer chrome's pointer (`ui::desk`): not live on a television, nor while keys
+    /// drive a desktop. Set by the dispatcher, never by a rig.
+    pub pointer: crate::desk::PointerChrome,
 }
 
 impl Default for NavPresentation {
     fn default() -> Self {
-        Self { page_alpha: 1.0, chrome_alpha: 1.0, view_tab: None, blur_amount: 0.0 }
+        Self { page_alpha: 1.0, chrome_alpha: 1.0, view_tab: None, blur_amount: 0.0, pointer: Default::default() }
     }
 }
 
@@ -768,6 +785,9 @@ pub struct DrawFrame<'a, 'views, H: Host> {
     /// reads this field instead, so it survives that overwrite. Never mutated after
     /// construction — the one write is `with_navigation`.
     pub nav_page_alpha: f32,
+    /// The desktop pointer chrome's pointer (`ui::desk::PointerChrome`): a desktop-only button
+    /// draws (and registers its stop) only while this is live, so the television never sees one.
+    pub pointer: crate::desk::PointerChrome,
     pub press: PressRead<H::Elem>,
     /// **The page under this surface, as the container latched it** — the `ModalStack`'s one
     /// underlay field (`containers::modal::ModalUnderlay`), which a popover panel's ground is drawn
@@ -830,6 +850,7 @@ impl<'a, 'views, H: Host> DrawFrame<'a, 'views, H> {
             view_tab: nav.view_tab,
             blur_amount: nav.blur_amount,
             nav_page_alpha: nav.page_alpha,
+            pointer: nav.pointer,
             press: cx.press,
             underlay: None,
             lifted: None,
@@ -851,6 +872,7 @@ impl<'a, 'views, H: Host> DrawFrame<'a, 'views, H> {
             chrome_alpha: self.chrome_alpha,
             view_tab: self.view_tab,
             blur_amount: self.blur_amount,
+            pointer: self.pointer,
         }
     }
 
@@ -1153,6 +1175,7 @@ mod draw_frame_tests {
             chrome_alpha: 1.0,
             view_tab: None,
             blur_amount: 0.0,
+            pointer: Default::default(),
         };
         let mut f = DrawFrame::with_navigation(&cx, Painter::root(), navigation);
         assert_eq!(f.nav_page_alpha, 0.42);

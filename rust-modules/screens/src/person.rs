@@ -350,6 +350,12 @@ impl<H: ContentLike> CardSource<H> for ShelfCards<'_> {
     fn progress(&self, i: usize) -> Option<f32> {
         self.person.shelf(self.kind).get(i).and_then(|m| m.resume_frac())
     }
+    fn has_menu(&self, i: usize) -> bool {
+        self.person.shelf(self.kind).get(i).is_some_and(crate::registry::item_has_menu)
+    }
+    fn playable(&self, i: usize) -> bool {
+        self.person.shelf(self.kind).get(i).is_some_and(crate::registry::item_plays_from_page)
+    }
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1284,6 +1290,19 @@ impl<H: ContentLike + PersonLike> Machine<H> for PersonScreen {
                     return Handled::Yes;
                 }
                 Handled::No
+            }
+            // A desktop card's hover play button (`plx_ui::desk`): the title, from its resume point.
+            ScreenEvent::PlayCard(elem) => {
+                let key = plx_machine::machine::FocusKey { entry: self.page.entry, elem: *elem };
+                let Some(item) = self.focused_item(Some(key), cx).filter(|m| crate::registry::item_plays_from_page(m)) else {
+                    return Handled::No;
+                };
+                fx.push(plx_machine::machine::Fx::App(AppFx::Content(ContentReq::Play {
+                    play: crate::registry::PlayIntent::Movie(item.clone()),
+                    resume_ns: crate::registry::item_play_resume_ns(item),
+                })));
+                fx.invalidate(Provenance::Input);
+                Handled::Yes
             }
             ScreenEvent::Input(InputEvent {
                 kind:

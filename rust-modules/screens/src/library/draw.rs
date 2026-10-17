@@ -166,6 +166,15 @@ impl LibraryScreen {
                 }
                 row.cards.paint(f, self.shelf_painter(f), &self.hub_src(index, f.cx), self.shelf_frame(index));
             }
+            // The shelf just past the window, so a scroll down arrives at artwork already on its
+            // way (`plx_ui::cards::LOOKAHEAD_AHEAD`).
+            let beyond = self.shelf_window().end;
+            if plx_ui::cards::page_on_canvas(self.shelf_painter(f)) {
+                if let Some(row) = self.shelves.get(beyond) {
+                    let index = beyond;
+                    row.cards.prefetch::<H, _>(self.shelf_painter(f), &self.hub_src(index, f.cx), self.shelf_frame(index), true);
+                }
+            }
         });
         self.draw_grid_header(f);
         if self.readout == Readout::Loading {
@@ -322,6 +331,8 @@ impl<H: Host<Elem = u32>> CardSource<H> for HubSrc<'_> {
     fn progress(&self, i: usize) -> Option<f32> {
         self.shelf.filter(|shelf| !shelf.landscape).and_then(|_| self.item(i)).and_then(|item| item.resume_frac())
     }
+    fn has_menu(&self, i: usize) -> bool { self.item(i).is_some_and(crate::registry::item_has_menu) }
+    fn playable(&self, i: usize) -> bool { self.item(i).is_some_and(crate::registry::item_plays_directly) }
     /// A landscape shelf's episode still carries its show line, and the Continue Watching deck its
     /// play mark when a press plays.
     fn overlay(&self, p: plx_ui::Painter, i: usize, tile: &Tile, measure: &dyn Measure) {

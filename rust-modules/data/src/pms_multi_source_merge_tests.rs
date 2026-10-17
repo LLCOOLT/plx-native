@@ -907,7 +907,7 @@ fn an_unpinned_library_publishes_nothing() {
         sections_gen: 0,
         pins: vec![(sid(0), 1, true), (sid(1), 1, false)],
     };
-    let (items, hubs, _) = merge_with_scope(&srcs, &scope);
+    let (items, hubs, _) = merge_with_scope(&srcs, &scope, &HomeExtras::default());
     assert!(hubs.iter().all(|h| h.source.is_empty()), "nothing of the unpinned library is drawn");
     assert_eq!((hubs.len(), items.len()), (200, 200 * 12));
 }
@@ -919,7 +919,7 @@ fn two_sources_publish_every_shelf() {
         src(0, "", HubState::Ready, Some(built(0, &[], shelves_in(0, 1, 300, 12)))),
         src(1, "friend", HubState::Ready, Some(built(1, &[], shelves_in(1, 1, 300, 12)))),
     ];
-    let (items, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone());
+    let (items, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone(), &HomeExtras::default());
     assert_eq!((hubs.len(), items.len()), (600, 600 * 12));
     assert!(hubs[..300].iter().all(|h| h.source.is_empty()) && hubs[300..].iter().all(|h| h.source == "friend"));
 }

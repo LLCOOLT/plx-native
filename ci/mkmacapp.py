@@ -5,8 +5,9 @@ This is the `hostsim` build (`rust-modules/src/bin/sim.rs`): the same UI, the sa
 and the same event loop the television runs, wrapped in a bundle that carries its own SDL, its own
 fonts and its own copy of every non-system library it links, so it starts on a Mac that has none of
 this repo's build environment installed. What it is NOT is a television — there is no video
-pipeline off-device (`player/ffi_host.rs`), so Play lands on the app's real failure read-out.
-`docs/macos-app.md` is the full account of what is and is not in it.
+pipeline off-device, so the bundle carries the desktop's own: the host FFmpeg with its decoders
+(`player/desk`, VideoToolbox where the Mac has it). `docs/macos-app.md` is the full account of what
+is and is not in it.
 
 Three things here are load-bearing, and each is a way this ships broken while working perfectly on
 the machine that built it:
@@ -48,6 +49,8 @@ SYSTEM_PREFIXES = ("/usr/lib/", "/System/")
 # Paths that are already bundle-relative — either we rewrote them, or the library was built that
 # way. Nothing to do, but they must not be mistaken for a leak in the verification pass.
 RELATIVE_PREFIXES = ("@rpath/", "@loader_path/", "@executable_path/")
+# The host FFmpeg `make` stages into pkg/ (the Makefile's FFMPEG_HOST_NAMES), in load order.
+FFMPEG_LIBS = ("libavutil-plx.61", "libswresample-plx.7", "libavcodec-plx.63", "libavformat-plx.63", "libswscale-plx.10")
 
 
 def run(*cmd, **kw):
@@ -134,10 +137,12 @@ def build_binary(tdir: Path) -> Path:
 
 
 def write_icon(res: Path):
-    """`.icns` from the 1254px master — macOS wants a 512@2x rung, and upscaling `pkg/icon320.png`
-    into it is visible in the Dock."""
+    """`.icns` from the macOS app icon `tools/make-app-icons.py` generates: the logo on Apple's inset
+    rounded tile, at 1024 px — macOS wants a 512@2x rung, and upscaling `pkg/icon320.png` into it is
+    visible in the Dock. (The bundle used the full-bleed master square until the desktop icons
+    were drawn, which read as an unfinished icon beside every other one in the Dock.)"""
     print("==> icon")
-    master = REPO / "assets/logo-master.png"
+    master = REPO / "assets/app-icon/plxnative-1024.png"
     with tempfile.TemporaryDirectory() as tmp:
         iconset = Path(tmp) / "AppIcon.iconset"
         iconset.mkdir()
@@ -282,6 +287,15 @@ def main():
         shutil.copy2(REPO / "pkg" / f, res / f)
     # The subtitle faces (tools/cut-noto-subs.py): paths::app_dir/fonts/subs, read by player::ass::fonts.
     shutil.copytree(REPO / "pkg" / "fonts" / "subs", res / "fonts" / "subs")
+    # The bundled FFmpeg, staged by `make` with loader-relative names (ci/stage-host-ffmpeg.sh) and
+    # dlopened from here by absolute path. swscale is the dev capture stream's alone, so optional.
+    for name in FFMPEG_LIBS:
+        src = REPO / "pkg" / f"{name}.dylib"
+        if not src.exists():
+            if name.startswith("libswscale"):
+                continue
+            sys.exit(f"mkmacapp: {src} is not staged — run `make macapp`, which stages it first")
+        shutil.copy2(src, res / src.name)
     shutil.copy2(REPO / "LICENSE", res / "LICENSE.txt")
     shutil.copy2(REPO / "LICENSING.md", res / "LICENSING.md")
     shutil.copytree(REPO / "licenses", res / "licenses")

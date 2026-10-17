@@ -32,7 +32,8 @@ crate::dynlib! {
     /// ONE symbol. See this module's doc before adding a second: every name added here is a name
     /// that can empty the table on some firmware, and the cost of an empty table is that
     /// diagnostics travel uncompressed rather than that anything fails.
-    z: ["libz.so.1", "libz.so", "libz.1.dylib", "libz.dylib"] {
+    // `zlib1.dll` is the name zlib's own Windows build and MSYS2 ship, for the Windows desktop build.
+    z: ["libz.so.1", "libz.so", "libz.1.dylib", "libz.dylib", "zlib1.dll"] {
         fn compress2(dest: *mut u8, dest_len: *mut c_ulong, src: *const u8, src_len: c_ulong,
                      level: c_int) -> c_int;
     }

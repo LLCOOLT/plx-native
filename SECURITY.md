@@ -78,12 +78,15 @@ looking at:
   It is encrypted with the firmware's authenticated Key Manager where
   `com.webos.service.keymanager3` is available and permitted, with a 0600 plaintext compatibility
   fallback otherwise. The legacy `com.palm.keymanager` AES-CFB interface is not used because it
-  provides no authenticated-encryption operation. The file is always created 0600 through
-  `open(2)`'s own mode argument. A downgrade of an existing encrypted file, a way to read it from
+  provides no authenticated-encryption operation. On the television the file is always created 0600 through
+  `open(2)`'s own mode argument; the desktop apps keep the secret in the macOS Keychain or Windows
+  DPAPI instead. A downgrade of an existing encrypted file, a way to read it from
   another process, or a way to make the app write it somewhere world-readable is in scope.
-- **The bundled FFmpeg.** Built from unmodified FFmpeg 9.0 with demuxers, parsers and subtitle
-  decoders only — it is fed untrusted bytes from the network, so parser bugs reachable through
-  `ff.rs` are in scope. Report FFmpeg's own bugs upstream as well.
+- **The bundled FFmpeg.** Built from unmodified FFmpeg 9.0. The television's carries demuxers,
+  parsers and subtitle decoders only; the macOS and Windows apps' adds the H.264, HEVC, AC-3,
+  E-AC-3, AAC and DTS decoders, libswresample and the OS hardware decoder. It is fed untrusted bytes
+  from the network, so parser and decoder bugs reachable through `ff.rs` and `player::desk` are in
+  scope. Report FFmpeg's own bugs upstream as well.
 
 ## What is not in scope
 

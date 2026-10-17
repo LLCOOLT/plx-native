@@ -87,11 +87,12 @@ fn refresh_chrome(
     chrome: &mut super::chrome::ChromeSnapshot,
     measure: &dyn Measure,
     directory: plx_data::stores::browse::DirectoryView<'_>,
+    livetv: bool,
     captured: Option<(&plx_plex::plex::session::CurrentProfile, &plx_plex::plex::session::Session)>,
 ) {
     match captured {
-        Some(captured) => chrome.refresh_with_profile(measure, directory, Some(captured)),
-        None => chrome.refresh(measure, directory),
+        Some(captured) => chrome.refresh_with_profile(measure, directory, livetv, Some(captured)),
+        None => chrome.refresh(measure, directory, livetv),
     }
 }
 
@@ -111,6 +112,8 @@ pub(crate) struct AppViews<'a> {
     pub(crate) metadata: plx_data::metadata::MetadataView<'a>,
     /// The player's subtitle search (`plx_data::subsearch`).
     pub(crate) subtitle_search: plx_data::subsearch::SubSearchView<'a>,
+    /// Live TV: the configured Tunarr server's lineup and guide (`plx_data::livetv`).
+    pub(crate) livetv: plx_data::livetv::LiveTvView<'a>,
     /// **The playback session, as this frame's publication** (spec §2.3, phase 9). The Player
     /// machine (`App.player`) owns the value; `Split` can only lend what the RIG owns, so the loop
     /// copies the decisions in once per frame ([`plx_media::route::PlaybackSession::publication`]) and
@@ -132,7 +135,7 @@ impl Bridge {
         AppViews { auth: self.session.read(), hubs: self.hubs.view(), listing: self.listing.view(),
             directory: self.directory.view(), section_hubs: self.section_hubs.view(),
             search: self.search.view(), metadata: self.stores.metadata_view(),
-            person: self.stores.person_view(), collection: self.stores.collection_view(), subtitle_search: self.stores.subtitle_search_view(), session }
+            person: self.stores.person_view(), collection: self.stores.collection_view(), subtitle_search: self.stores.subtitle_search_view(), livetv: self.stores.livetv_view(), session }
     }
 }
 
@@ -230,6 +233,10 @@ impl plx_screens::registry::SearchLike for AppHost {
     fn search<'a>(cx: &Cx<'a, Self>) -> plx_data::search::view::SearchView<'a> { cx.views.search }
 }
 
+impl plx_screens::registry::LiveTvLike for AppHost {
+    fn livetv<'a>(cx: &Cx<'a, Self>) -> plx_data::livetv::LiveTvView<'a> { cx.views.livetv }
+}
+
 impl plx_screens::registry::LibraryLike for AppHost {
     fn listing<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::ListingView<'a> { cx.views.listing }
     fn directory<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::DirectoryView<'a> { cx.views.directory }
@@ -244,6 +251,9 @@ impl plx_screens::registry::MetadataLike for AppHost {
     fn metadata<'a>(cx: &Cx<'a, Self>) -> plx_data::metadata::MetadataView<'a> { cx.views.metadata }
     fn subtitle_search<'a>(cx: &Cx<'a, Self>) -> Option<plx_data::subsearch::SubSearchView<'a>> {
         Some(cx.views.subtitle_search)
+    }
+    fn on_watchlist(cx: &Cx<'_, Self>, guid: &str) -> Option<bool> {
+        cx.views.hubs.on_watchlist(guid)
     }
 }
 
@@ -400,6 +410,13 @@ pub(crate) struct Bridge {
     /// `update_home_chrome` is called from.
     strip: plx_ui::widgets::StripRender,
     home_commands: std::collections::VecDeque<HomeCmd>,
+    /// Settings > Live TV asked for the Live TV page's setup face; delivered to that page once it
+    /// is on top and owns input (`deliver_livetv_setup`).
+    livetv_setup: bool,
+    /// The Live TV page's channel studio is owed, on this card (`deliver_livetv_setup`, likewise).
+    livetv_studio: Option<String>,
+    /// The channel studio is owed, making a channel from this recipe ("Make a Channel").
+    livetv_make: Option<(plx_data::vchannel::recipe::Recipe, String)>,
     library_commands: std::collections::VecDeque<plx_screens::registry::LibraryCmd>,
     consent: ConsentMachine,
     /// Requests the owned screens made of the loop this frame (§14), drained by [`frame`]'s caller.
@@ -408,6 +425,7 @@ pub(crate) struct Bridge {
     home_reqs: Vec<(MachineId, HomeReq, ReturnState<u32, PageMemory>)>,
     library_reqs: Vec<(MachineId, LibraryReq, ReturnState<u32, PageMemory>)>,
     search_reqs: Vec<(MachineId, plx_screens::registry::SearchReq, ReturnState<u32, PageMemory>)>,
+    livetv_reqs: Vec<(MachineId, plx_screens::registry::LiveTvReq, ReturnState<u32, PageMemory>)>,
     /// What the player's overlay surfaces asked of the loop this frame (§14) — drained by
     /// `playback::player_requests`, which holds the `MainThread` token they cannot.
     player_reqs: Vec<plx_screens::registry::PlayerReq>,
@@ -612,6 +630,9 @@ impl Bridge {
             chrome_selection: 0,
             strip: plx_ui::widgets::StripRender::new(),
             home_commands: std::collections::VecDeque::new(),
+            livetv_setup: false,
+            livetv_studio: None,
+            livetv_make: None,
             library_commands: std::collections::VecDeque::new(),
             consent: ConsentMachine::from_initial(consent),
             reqs: Vec::new(),
@@ -619,6 +640,7 @@ impl Bridge {
             home_reqs: Vec::new(),
             library_reqs: Vec::new(),
             search_reqs: Vec::new(),
+            livetv_reqs: Vec::new(),
             player_reqs: Vec::new(),
             item_menu_reqs: Vec::new(),
             #[cfg(test)]
@@ -688,6 +710,23 @@ impl Bridge {
         std::mem::take(&mut self.search_reqs)
     }
 
+    pub(crate) fn take_livetv_reqs(&mut self) -> Vec<(MachineId, plx_screens::registry::LiveTvReq, ReturnState<u32, PageMemory>)> {
+        std::mem::take(&mut self.livetv_reqs)
+    }
+
+    /// The Live TV store's view, for the loop (the tuner reads the lineup a request indexes into).
+    pub(crate) fn livetv_view(&self) -> plx_data::livetv::LiveTvView<'_> {
+        self.stores.livetv_view()
+    }
+
+    pub(crate) fn livetv_run(&mut self, cmd: plx_data::livetv::LiveTvCmd) -> bool {
+        self.stores.livetv_run(cmd)
+    }
+
+    pub(crate) fn livetv_pump(&mut self) -> bool {
+        self.stores.livetv_pump()
+    }
+
     pub(crate) fn search_selection(&self, d: &Dispatcher<AppHost>, entry: EntryId, focus: Option<FocusKey<u32>>)
         -> Option<(plx_data::search::Item, plx_ui::popover::Opener)> {
         let e = d.nav.entry(entry).filter(|e| e.arg == AppArg::Search)?;
@@ -704,6 +743,7 @@ impl Bridge {
         match tab {
             HomeTab::Movies => self.directory.view().preferred(plx_data::browse::SecKind::Movie).is_some(),
             HomeTab::Shows => self.directory.view().preferred(plx_data::browse::SecKind::Show).is_some(),
+            HomeTab::LiveTv => self.stores.livetv_view().configured(),
             _ => true,
         }
     }
@@ -777,6 +817,11 @@ impl Bridge {
         let Some(page) = entry.inst.as_ref().and_then(|instance| instance.screen.as_any())
             .and_then(|page| page.downcast_ref::<plx_screens::library::LibraryScreen>()) else { return false };
         matches!(page.probe_viewport(d.input.engine.current(InputOwner::Entry(entry.id))).0, "grid" | "shelf")
+    }
+
+    /// The library kind the Library page was last entered for, if any.
+    pub(crate) fn library_kind(&self) -> Option<plx_data::browse::SecKind> {
+        self.mounter.library_kind
     }
 
     pub(crate) fn enter_library(&mut self, kind: plx_data::browse::SecKind) {
@@ -912,17 +957,25 @@ impl Bridge {
         let route = d.top_or_mounting_arg().cloned().unwrap_or(AppArg::Home);
         let route = &route;
         let search = *route == AppArg::Search;
-        if matches!(route, AppArg::Home | AppArg::Library) || search {
-            d.nav.tabs.strip_fallback = Some(if search { plx_ui::dispatch::STRIP_BASE + 3 } else { plx_screens::home::STRIP_HOME_ELEM });
+        let livetv_page = *route == AppArg::LiveTv;
+        if matches!(route, AppArg::Home | AppArg::Library) || search || livetv_page {
+            d.nav.tabs.strip_fallback = Some(if search {
+                plx_ui::dispatch::STRIP_BASE + 3
+            } else if livetv_page {
+                plx_screens::home::STRIP_LIVETV_ELEM
+            } else {
+                plx_screens::home::STRIP_HOME_ELEM
+            });
+            let livetv = self.stores.livetv_view().configured();
             if let Some(io) = &self.home_io {
-                refresh_chrome(&mut self.chrome, &self.measure, self.directory.view(),
+                refresh_chrome(&mut self.chrome, &self.measure, self.directory.view(), livetv,
                     Some((&io.profile, &io.preferences)));
             } else {
-                refresh_chrome(&mut self.chrome, &self.measure, self.directory.view(), None);
+                refresh_chrome(&mut self.chrome, &self.measure, self.directory.view(), livetv, None);
             }
             self.chrome_selection = if *route == AppArg::Library {
                 self.directory.view().current().map(|i| self.chrome.library_selection(self.directory.view().sections()[i].kind)).unwrap_or(0)
-            } else if search { self.chrome.search_selection() } else { 0 };
+            } else if search { self.chrome.search_selection() } else if livetv_page { self.chrome.livetv_selection() } else { 0 };
             let selected = self.navigation_presentation().view_tab.unwrap_or(self.chrome_selection) as i32;
             self.chrome.members(selected, Self::home_focus(d), self.strip.scroll_pos(), &mut d.nav.tabs.strip);
         } else {
@@ -982,6 +1035,40 @@ impl Bridge {
         true
     }
 
+    /// Ask the Live TV page for its setup face (Settings > Live TV).
+    pub(crate) fn request_livetv_setup(&mut self) {
+        self.livetv_setup = true;
+    }
+
+    /// Ask the Live TV page for its channel studio, on the card `want` (a Home Suggested Channels
+    /// card).
+    pub(crate) fn request_livetv_studio(&mut self, want: String) {
+        self.livetv_studio = Some(want);
+    }
+
+    /// Ask the Live TV page's channel studio to make a channel from `recipe` (a card's "Make a
+    /// Channel").
+    pub(crate) fn request_livetv_make(&mut self, recipe: plx_data::vchannel::recipe::Recipe, why: String) {
+        self.livetv_make = Some((recipe, why));
+    }
+
+    fn deliver_livetv_setup(&mut self, d: &mut Dispatcher<AppHost>) {
+        if !self.livetv_setup && self.livetv_studio.is_none() && self.livetv_make.is_none() { return; }
+        let Some(entry) = d.nav.top_page() else { return };
+        if !matches!(entry.arg, AppArg::LiveTv)
+            || d.nav.input_owner() != Some(InputOwner::Entry(entry.id)) { return; }
+        let Some(instance) = entry.inst.as_ref().map(|instance| instance.id) else { return };
+        let msg = if let Some((recipe, why)) = self.livetv_make.take() {
+            AppMsg::LiveTvMake { recipe: Box::new(recipe), why }
+        } else if let Some(want) = self.livetv_studio.take() {
+            AppMsg::LiveTvStudio(want)
+        } else {
+            AppMsg::LiveTvSetup
+        };
+        self.livetv_setup = false;
+        d.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(instance), Delivery::Screen(ScreenEvent::App(msg))));
+    }
+
     fn deliver_home_commands(&mut self, d: &mut Dispatcher<AppHost>) {
         let Some(entry) = d.nav.top_page() else { return };
         if !matches!(entry.arg, AppArg::Home)
@@ -1033,6 +1120,9 @@ impl Bridge {
             let sid = match &e.arg { AppArg::Content(ContentArg::Detail { sid, .. }) => *sid, _ => return None };
             let rect = page.focused_rect::<AppHost>(ret.focus, &cx, At::Drawn);
             let meta = <AppHost as plx_screens::registry::MetadataLike>::metadata(&cx);
+            if let Some((rk, labels, current)) = page.focused_versions(ret.focus, meta) {
+                return Some(strip_menu_arg(sid, &rk, ItemMenuKind::Versions { labels, current }, entry, ret.focus, rect));
+            }
             if let Some((rk, show_rk, index, mark)) = page.focused_season(ret.focus, meta) {
                 // the season's address rides on the menu: the strip's item is no catalog row, so
                 // the write's scope cannot be read off one (`apply_item_action`)
@@ -1360,6 +1450,12 @@ impl Bridge {
         self.stores.hubs.source_settled(sid)
     }
 
+    /// Has a Home hub fetch not landed yet? The deck schedule waits for it rather than issuing a
+    /// second request beside it (`app::deck_refresh`).
+    pub(crate) fn hubs_in_flight(&self) -> bool {
+        self.stores.hubs.in_flight()
+    }
+
     /// Synchronous addressed Hubs command against this owner's retained Browse directory. Used by
     /// callers outside the per-frame dispatch (server activation, boot).
     pub(crate) fn hubs_run(&mut self, cmd: plx_data::stores::hubs::HubsCmd) -> plx_data::stores::StoreOutcome {
@@ -1550,7 +1646,7 @@ impl Bridge {
     /// have been surfaces since phase 10, so the page UNDER one is the top page and answers for
     /// itself. `route_wears_tab_bar`'s old `page_of` resolution — "which page is this popover
     /// route over" — has nothing left to resolve and went with the routes in D1.
-    fn draws_chrome_for(arg: &AppArg) -> bool {
+    pub(crate) fn draws_chrome_for(arg: &AppArg) -> bool {
         use plx_ui::screen::ScreenArg;
         arg.chrome() == plx_machine::machine::Chrome::TabBar
     }
@@ -1579,6 +1675,30 @@ impl Bridge {
             self.playback_live = false;
         }
     }
+}
+
+/// Before this the set's clock has not been set (it boots at its epoch until the network answers),
+/// and a clock reading 1970 is worse than none.
+pub(crate) const CLOCK_SET_AFTER_MS: i64 = 1_577_836_800_000; // 2020-01-01
+
+/// The top bar's clock (`widgets::top_clock`).
+fn draw_top_clock(p: plx_ui::Painter) {
+    let now = plx_base::wallclock::now_ms();
+    if now < CLOCK_SET_AFTER_MS {
+        return;
+    }
+    if let Ok(text) = std::ffi::CString::new(plx_ui::fmt::wall_time(now)) {
+        plx_ui::widgets::top_clock(p, &text);
+    }
+}
+
+/// Whether the clock's minute moved since `last` (both `now_ms() / 60 000`) — the one repaint the
+/// top bar asks for on its own.
+pub(crate) fn clock_minute_moved(last: &mut i64, now_ms: i64) -> bool {
+    let minute = now_ms.div_euclid(60_000);
+    let moved = minute != *last;
+    *last = minute;
+    moved
 }
 
 impl Bridge {
@@ -1617,7 +1737,7 @@ impl Bridge {
             let publication = self.session.publication();
             let cx = parts.cx::<AppHost>(AppViews { auth: publication.read(),
                 hubs: self.hubs.view(), listing: self.listing.view(), directory: self.directory.view(),
-                section_hubs: self.section_hubs.view(), search: self.search.view(), metadata: self.stores.metadata_view(), person: self.stores.person_view(), collection: self.stores.collection_view(), subtitle_search: self.stores.subtitle_search_view(), session: &self.playback,
+                section_hubs: self.section_hubs.view(), search: self.search.view(), metadata: self.stores.metadata_view(), person: self.stores.person_view(), collection: self.stores.collection_view(), subtitle_search: self.stores.subtitle_search_view(), livetv: self.stores.livetv_view(), session: &self.playback,
             }, &self.measure);
             let handled = self.session.step(event, &cx, fx);
             // #132: the owner logs nothing, and the Profiles screen cannot see a read-out that
@@ -1687,6 +1807,10 @@ impl Bridge {
             }
             AppMsg::Store(StoreCmd::SubtitleSearch(command)) => {
                 self.stores.subtitle_search_run(command.clone());
+                return Handled::Yes;
+            }
+            AppMsg::Store(StoreCmd::LiveTv(command)) => {
+                self.stores.livetv_run(command.clone());
                 return Handled::Yes;
             }
             AppMsg::Store(StoreCmd::ViewState(command)) => {
@@ -1760,6 +1884,7 @@ impl Rig<AppHost> for Bridge {
             chrome.chip_expand,
             glass.tab_face(),
         );
+        draw_top_clock(p);
     }
     /// See [`plx_ui::dispatch::Rig::scrim_chrome_read`] — the account menu's chip lift borrows
     /// the SAME captured profile, labels and unfurl [`Bridge::draw_chrome`] used. The dispatcher
@@ -1774,6 +1899,8 @@ impl Rig<AppHost> for Bridge {
             chrome_alpha: plx_ui::nav::chrome_alpha(),
             view_tab: u32::try_from(plx_ui::nav::view_tab(-1)).ok(),
             blur_amount: plx_ui::nav::blur_amount(),
+            // the dispatcher's to fill (`Dispatcher::draw_with`): a rig does not know the pointer
+            pointer: Default::default(),
         }
     }
     fn surface_scope(&mut self) -> Option<plx_ui::popover::host::Live> {
@@ -1786,7 +1913,7 @@ impl Rig<AppHost> for Bridge {
                 hubs: self.hubs.view(),
                 listing: self.listing.view(),
                 directory: self.directory.view(),
-                section_hubs: self.section_hubs.view(), search: self.search.view(), metadata: self.stores.metadata_view(), person: self.stores.person_view(), collection: self.stores.collection_view(), subtitle_search: self.stores.subtitle_search_view(), session: &self.playback,
+                section_hubs: self.section_hubs.view(), search: self.search.view(), metadata: self.stores.metadata_view(), person: self.stores.person_view(), collection: self.stores.collection_view(), subtitle_search: self.stores.subtitle_search_view(), livetv: self.stores.livetv_view(), session: &self.playback,
             },
             measure: &self.measure,
         }
@@ -1884,6 +2011,7 @@ impl Bridge {
             AppFx::Home(req) => self.home_reqs.push((from, req, self.effect_return.clone())),
             AppFx::Library(req) => self.library_reqs.push((from, req, self.effect_return.clone())),
             AppFx::Search(req) => self.search_reqs.push((from, req, self.effect_return.clone())),
+            AppFx::LiveTv(req) => self.livetv_reqs.push((from, req, self.effect_return.clone())),
             AppFx::Player(req) => self.player_reqs.push(req),
             AppFx::ItemMenu(req) => self.item_menu_reqs.push(req),
         }
@@ -2006,6 +2134,7 @@ fn step_store(cmd: &StoreCmd, _cx: &Cx<'_, AppHost>, _fx: &mut Effects<'_, AppHo
         StoreCmd::Collection(_) => unreachable!("Collection is stepped by Bridge's owned store"),
         StoreCmd::ViewState(_) => unreachable!("ViewState is stepped by Bridge with its Browse owner"),
         StoreCmd::SubtitleSearch(_) => unreachable!("SubtitleSearch is stepped by Bridge's owned store"),
+        StoreCmd::LiveTv(_) => unreachable!("LiveTv is stepped by Bridge's owned store"),
     }
 }
 
@@ -2186,6 +2315,7 @@ fn frame_ingest(
     rig.capture_chrome(d);
     rig.deliver_home_commands(d);
     rig.deliver_library_commands(d);
+    rig.deliver_livetv_setup(d);
     let mut search_notified = false;
     let mut browse_notified = false;
     let mut hubs_notified = false;
@@ -2243,7 +2373,7 @@ fn frame_ingest(
     // settled test, the navblur prototype). One writer, immediately after the container's own
     // frame, from the container's own transition — see `ui::nav`'s module doc.
     let tab = d.nav.tabs.stack.pending_dest()
-        .and_then(|arg| pill_of_arg(arg, rig.directory.view()));
+        .and_then(|arg| pill_of_arg(arg, rig.directory.view(), rig.stores.livetv_view().configured()));
     plx_ui::nav::publish(d.nav.tabs.stack.page_alpha(), d.nav.tabs.stack.chrome_alpha(), tab);
     // **The heartbeat's `route=` word IS the top page's own name** (§15.2). It used to be
     // `route_word(app.route)` with this line asserting the two agreed every frame; there is one
@@ -2646,6 +2776,21 @@ pub(crate) fn player_diagnostics_visible(d: &Dispatcher<AppHost>) -> bool {
 }
 
 /// Dismiss every player panel — the exit ritual's half of `close_player_overlays`.
+/// Close the Settings surface (Settings > Live TV leaves it for the Live TV page).
+pub(crate) fn dismiss_settings(d: &mut Dispatcher<AppHost>) {
+    let ids: Vec<EntryId> = d
+        .nav
+        .modals
+        .surfaces
+        .iter()
+        .filter(|s| matches!(s.entry.arg, AppArg::Settings(_)))
+        .map(|s| s.entry.id)
+        .collect();
+    for id in ids {
+        d.request(MachineId::Nav, NavOp::Dismiss(id));
+    }
+}
+
 pub(crate) fn dismiss_player_overlays(d: &mut Dispatcher<AppHost>) {
     let ids: Vec<EntryId> = d
         .nav
@@ -2981,6 +3126,8 @@ pub(crate) fn follow_auth_landing(pages: &mut Dispatcher<AppHost>, bridge: &mut 
         // (`SeatWatch`, at the `PublishProfile` that precedes this `Ready`).
         let saved = plx_plex::plex::session::peek();
         plx_media::route::restore_install_rows(&saved);
+        plx_media::route::restore_auto_skip(saved.auto_skip());
+        plx_media::route::restore_screensaver(saved.screensaver());
         let endpoints = super::boot::install_pms_owned(bridge, &c.origin,
             &c.address, &c.token, c.tier, c.pin.as_ref(), &c.install);
         execute_endpoint_outcomes(pages, endpoints);
@@ -3113,14 +3260,15 @@ pub(crate) fn nav_push_with_return(
 /// The Library's pill is its TYPE, and the argument carries none (which library the grid shows is
 /// the `browse` store's business): the answer is the section the store is pointing at, which
 /// `nav_tab`'s `LibraryCmd::Enter` has already aimed.
-fn pill_of_arg(arg: &AppArg, directory: plx_data::stores::browse::DirectoryView<'_>) -> Option<usize> {
+fn pill_of_arg(arg: &AppArg, directory: plx_data::stores::browse::DirectoryView<'_>, livetv: bool) -> Option<usize> {
     use crate::app::chrome::{pill_of, Pill};
     match arg {
-        AppArg::Home => pill_of(directory, Pill::Home),
-        AppArg::Search => pill_of(directory, Pill::Search),
+        AppArg::Home => pill_of(directory, livetv, Pill::Home),
+        AppArg::Search => pill_of(directory, livetv, Pill::Search),
+        AppArg::LiveTv => pill_of(directory, livetv, Pill::LiveTv),
         AppArg::Library => {
             let kind = directory.current().map(|i| directory.sections()[i].kind)?;
-            pill_of(directory, Pill::Section(kind))
+            pill_of(directory, livetv, Pill::Section(kind))
         }
         _ => None,
     }
@@ -3151,10 +3299,12 @@ pub(crate) fn nav_tab(
             // Keep the pill the user was standing on under focus. An IDENTITY, not an index: a
             // pill can appear or disappear while the dip runs, and `HomeCmd::FocusStrip` is
             // delivered when Home MOUNTS, not now.
-            if let Some(pill) = focus_pill.filter(|pill| crate::app::chrome::pill_of(rig.directory.view(), *pill).is_some()) {
+            let livetv = rig.stores.livetv_view().configured();
+            if let Some(pill) = focus_pill.filter(|pill| crate::app::chrome::pill_of(rig.directory.view(), livetv, *pill).is_some()) {
                 let want = match pill {
                     Pill::Home => HomeTab::Home,
                     Pill::Search => HomeTab::Search,
+                    Pill::LiveTv => HomeTab::LiveTv,
                     Pill::Section(plx_data::browse::SecKind::Movie) => HomeTab::Movies,
                     Pill::Section(plx_data::browse::SecKind::Show) => HomeTab::Shows,
                 };
@@ -3169,6 +3319,7 @@ pub(crate) fn nav_tab(
             AppArg::Library
         }
         HomeTab::Search => AppArg::Search,
+        HomeTab::LiveTv => AppArg::LiveTv,
     };
     nav_peer(d, arg, ret);
 }

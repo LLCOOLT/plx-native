@@ -14,26 +14,6 @@ const KEY: &str = "tv.config.supportDolbyHDRContents";
 
 static STARTED: OnceLock<()> = OnceLock::new();
 
-plx_base::devtrig::latched_flag!(
-    /// `/tmp/plxnative-dvcaps0` — force the boot's platform answer to unsupported.
-    pub fn forced_unsupported = "dvcaps0";
-);
-
-plx_base::devtrig::latched_flag!(
-    /// `/tmp/plxnative-dvcaps1` — force the boot's platform answer to supported.
-    pub fn forced_supported = "dvcaps1";
-);
-
-fn override_capability(zero: bool, one: bool) -> Option<(DvCapability, bool)> {
-    if zero {
-        Some((DvCapability::Unsupported, one))
-    } else if one {
-        Some((DvCapability::Supported, false))
-    } else {
-        None
-    }
-}
-
 fn publish(probe: DvProbe, started: Instant, code: Option<i64>, detail: Option<&str>) {
     crate::devcaps::dv::publish(probe);
     let elapsed = started.elapsed().as_millis();
@@ -79,9 +59,7 @@ pub fn start_probe() {
 
 fn run_probe() {
     let started = Instant::now();
-    if let Some((capability, conflict)) =
-        override_capability(forced_unsupported(), forced_supported())
-    {
+    if let Some((capability, conflict)) = crate::devcaps::dv::forced() {
         if conflict {
             plx_base::eventlog::log("webos-caps: dvcaps0 and dvcaps1 both armed; dvcaps0 wins");
         }
@@ -107,7 +85,6 @@ fn run_probe() {
 #[cfg(all(
     target_arch = "arm",
     target_os = "linux",
-    not(feature = "hostsim"),
     not(any(test, feature = "test-support"))
 ))]
 fn run_transport(started: Instant) {
@@ -194,7 +171,6 @@ fn run_transport(started: Instant) {
 #[cfg(not(all(
     target_arch = "arm",
     target_os = "linux",
-    not(feature = "hostsim"),
     not(any(test, feature = "test-support"))
 )))]
 fn run_transport(started: Instant) {
@@ -213,7 +189,6 @@ fn run_transport(started: Instant) {
 #[cfg(all(
     target_arch = "arm",
     target_os = "linux",
-    not(feature = "hostsim"),
     not(any(test, feature = "test-support"))
 ))]
 fn reply_error_code(reply: &str) -> Option<i64> {
@@ -227,7 +202,7 @@ fn reply_error_code(reply: &str) -> Option<i64> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg(any(
     test,
-    all(target_arch = "arm", target_os = "linux", not(feature = "hostsim"))
+    all(target_arch = "arm", target_os = "linux")
 ))]
 enum ProbeFailure {
     Json,
@@ -239,13 +214,12 @@ enum ProbeFailure {
 
 #[cfg(any(
     test,
-    all(target_arch = "arm", target_os = "linux", not(feature = "hostsim"))
+    all(target_arch = "arm", target_os = "linux")
 ))]
 impl ProbeFailure {
     #[cfg(all(
         target_arch = "arm",
         target_os = "linux",
-        not(feature = "hostsim"),
         not(any(test, feature = "test-support"))
     ))]
     const fn stage(self) -> &'static str {
@@ -269,7 +243,7 @@ impl ProbeFailure {
 /// gets. `major == 0` is an unknown version and keeps configd's answer; webOS 4+ is untouched.
 #[cfg(any(
     test,
-    all(target_arch = "arm", target_os = "linux", not(feature = "hostsim"))
+    all(target_arch = "arm", target_os = "linux")
 ))]
 fn platform_gate(probe: DvProbe, webos_major: u32) -> DvProbe {
     if probe.capability == DvCapability::Supported && (1..=3).contains(&webos_major) {
@@ -287,7 +261,7 @@ fn platform_gate(probe: DvProbe, webos_major: u32) -> DvProbe {
 /// by a boolean elsewhere in the object.
 #[cfg(any(
     test,
-    all(target_arch = "arm", target_os = "linux", not(feature = "hostsim"))
+    all(target_arch = "arm", target_os = "linux")
 ))]
 fn parse_dv_reply(reply: &str) -> Result<DvCapability, ProbeFailure> {
     let value: serde_json::Value = serde_json::from_str(reply).map_err(|_| ProbeFailure::Json)?;
@@ -321,7 +295,7 @@ fn parse_dv_reply(reply: &str) -> Result<DvCapability, ProbeFailure> {
 
 #[cfg(test)]
 mod tests {
-    use super::{override_capability, parse_dv_reply, platform_gate, DvCapability, ProbeFailure};
+    use super::{parse_dv_reply, platform_gate, DvCapability, ProbeFailure};
     use crate::devcaps::dv::{DvProbe, ProbeSource};
 
     fn configd(capability: DvCapability) -> DvProbe {
@@ -364,23 +338,6 @@ mod tests {
         assert_eq!(
             platform_gate(configd(DvCapability::Unknown), 3),
             configd(DvCapability::Unknown)
-        );
-    }
-
-    #[test]
-    fn dv_caps_override_precedence() {
-        assert_eq!(override_capability(false, false), None);
-        assert_eq!(
-            override_capability(true, false),
-            Some((DvCapability::Unsupported, false))
-        );
-        assert_eq!(
-            override_capability(false, true),
-            Some((DvCapability::Supported, false))
-        );
-        assert_eq!(
-            override_capability(true, true),
-            Some((DvCapability::Unsupported, true))
         );
     }
 

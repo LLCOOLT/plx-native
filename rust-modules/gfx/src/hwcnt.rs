@@ -8,6 +8,11 @@
 //! The target contract is intentionally narrow and fails closed: UK 10.2, reader API 1, hardware
 //! layout 5, 1280-byte dumps, and a 16-buffer mapping.  A different driver must be identified and
 //! decoded before its words receive T82x names.
+//!
+//! The reader is unix-only; on Windows `init`/`sample` report that no driver exists, and the ABI
+//! declarations the reader would use are left compiled (hence the allowances there) so
+//! the decoder half stays one file.
+#![cfg_attr(windows, allow(dead_code, unused_imports))]
 
 use libc::{c_int, c_ulong, c_void};
 use std::cell::RefCell;
@@ -111,6 +116,7 @@ struct Reader {
     mapping: *const u8,
 }
 
+#[cfg(unix)]
 impl Drop for Reader {
     fn drop(&mut self) {
         if !self.mapping.is_null() {
@@ -148,6 +154,7 @@ fn os_error(what: &str) -> String {
     format!("{what}: {}", std::io::Error::last_os_error())
 }
 
+#[cfg(unix)]
 unsafe fn call_ioctl<T>(
     fd: c_int,
     request: c_ulong,
@@ -168,6 +175,7 @@ unsafe fn call_ioctl<T>(
     }
 }
 
+#[cfg(unix)]
 impl Reader {
     fn open() -> Result<(Self, Info), String> {
         let mali_fd = unsafe {
@@ -368,6 +376,7 @@ impl Reader {
     }
 }
 
+#[cfg(unix)]
 pub fn init() -> Result<Info, String> {
     let (reader, info) = Reader::open()?;
     READER.with(|slot| *slot.borrow_mut() = Some(reader));
@@ -379,6 +388,7 @@ pub fn init() -> Result<Info, String> {
 /// shader cores and L2 powered up for counting. A profiler that disabled itself on an error but
 /// stayed attached would go on perturbing the very numbers the next leg collects, so every path
 /// that gives up on profiling must come through here.
+#[cfg(unix)]
 pub fn shutdown() {
     READER.with(|slot| *slot.borrow_mut() = None);
 }
@@ -393,6 +403,7 @@ pub fn block_enables(sample: &Sample) -> [u32; 5] {
     std::array::from_fn(|block| sample.words[block * BLOCK_WORDS + 2])
 }
 
+#[cfg(unix)]
 pub fn sample() -> Result<Sample, String> {
     READER.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -400,6 +411,21 @@ pub fn sample() -> Result<Sample, String> {
             .ok_or_else(|| "HWCNT reader is not initialized".to_string())?
             .sample()
     })
+}
+
+/// Windows has no Mali kernel driver to read: the reader is compiled out and the profiler's
+/// counter leg reports that it cannot start, exactly as it does on a set without `/dev/mali0`.
+#[cfg(windows)]
+pub fn init() -> Result<Info, String> {
+    Err("HWCNT: /dev/mali0 does not exist on Windows".to_string())
+}
+
+#[cfg(windows)]
+pub fn shutdown() {}
+
+#[cfg(windows)]
+pub fn sample() -> Result<Sample, String> {
+    Err("HWCNT reader is not initialized".to_string())
 }
 
 // Hardware layout v5 on this MP2 target is five 64-word blocks: JM, tiler, one MMU/L2 slice,

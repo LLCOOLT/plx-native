@@ -274,5 +274,17 @@
   "browse.clock.notice_year": "O relógio do televisor parece errado ({year}). Ligado com a chave memorizada.",
   "browse.clock.notice": "O relógio do televisor parece errado. Ligado com a chave memorizada.",
   "browse.clock.no_key": "O relógio deste televisor parece errado. Ligue o televisor à Internet uma vez e tente novamente.",
-  "browse.clock.key_changed": "A chave do seu servidor mudou. Ligue o televisor à Internet uma vez para que a app a possa verificar novamente."
+  "browse.clock.key_changed": "A chave do seu servidor mudou. Ligue o televisor à Internet uma vez para que a app a possa verificar novamente.",
+  "browse.menu.shuffle": "Reprodução aleatória",
+  "browse.detail.version": "Versão",
+  "browse.home.watchlist": "Lista de visualização",
+  "browse.home.on_now": "A emitir agora",
+  "browse.home.your_genres": "Adicionados recentemente nos seus géneros",
+  "browse.menu.watchlist_add": "Adicionar à lista de visualização",
+  "browse.menu.watchlist_remove": "Remover da lista de visualização",
+  "browse.home.playlists": "Listas de reprodução",
+  "browse.home.channels": "Canais sugeridos",
+  "browse.home.surprise_title": "Surpreenda-me",
+  "browse.home.surprise_why": "Um canal em que talvez não pensasse",
+  "browse.menu.make_channel": "Criar um canal"
 }

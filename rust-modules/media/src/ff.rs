@@ -341,9 +341,11 @@ plx_base::dynlib! {
         // The ELF the app SHIPS, and the Mach-O the desktop simulator builds beside it
         // (`HOST=1 ci/build-ffmpeg.sh` — same version, same component list). A candidate
         // LIST rather than a `cfg`: `dynlib!` already tries each name and reports the ones
-        // it could not open, and only one of these two can ever exist in an app directory.
+        // it could not open, and only one of these can ever exist in an app directory. The
+        // third is the Windows DLL FFmpeg names `<name><suffix>-<major>.dll` on MinGW.
         "libavformat-plx.so.63",
         "libavformat-plx.63.dylib",
+        "avformat-plx-63.dll",
     ] {
     // Declared beside libavformat's other entry points because that is the library that DEFINES
     // it. Under `#[link]` the final link resolved every name against every library at once and
@@ -398,9 +400,11 @@ plx_base::dynlib! {
         // The ELF the app SHIPS, and the Mach-O the desktop simulator builds beside it
         // (`HOST=1 ci/build-ffmpeg.sh` — same version, same component list). A candidate
         // LIST rather than a `cfg`: `dynlib!` already tries each name and reports the ones
-        // it could not open, and only one of these two can ever exist in an app directory.
+        // it could not open, and only one of these can ever exist in an app directory. The
+        // third is the Windows DLL FFmpeg names `<name><suffix>-<major>.dll` on MinGW.
         "libavcodec-plx.so.63",
         "libavcodec-plx.63.dylib",
+        "avcodec-plx-63.dll",
     ] {
     fn avcodec_version() -> c_uint;
     fn av_packet_alloc() -> *mut AVPacket;
@@ -444,9 +448,11 @@ plx_base::dynlib! {
         // The ELF the app SHIPS, and the Mach-O the desktop simulator builds beside it
         // (`HOST=1 ci/build-ffmpeg.sh` — same version, same component list). A candidate
         // LIST rather than a `cfg`: `dynlib!` already tries each name and reports the ones
-        // it could not open, and only one of these two can ever exist in an app directory.
+        // it could not open, and only one of these can ever exist in an app directory. The
+        // third is the Windows DLL FFmpeg names `<name><suffix>-<major>.dll` on MinGW.
         "libavutil-plx.so.61",
         "libavutil-plx.61.dylib",
+        "avutil-plx-61.dll",
     ] {
     fn avutil_version() -> c_uint;
     fn av_malloc(size: usize) -> *mut c_void;
@@ -473,9 +479,11 @@ plx_base::dynlib! {
         // The ELF the app SHIPS, and the Mach-O the desktop simulator builds beside it
         // (`HOST=1 ci/build-ffmpeg.sh` — same version, same component list). A candidate
         // LIST rather than a `cfg`: `dynlib!` already tries each name and reports the ones
-        // it could not open, and only one of these two can ever exist in an app directory.
+        // it could not open, and only one of these can ever exist in an app directory. The
+        // third is the Windows DLL FFmpeg names `<name><suffix>-<major>.dll` on MinGW.
         "libswscale-plx.so.10",
         "libswscale-plx.10.dylib",
+        "swscale-plx-10.dll",
     ] {
     fn sws_getContext(
         src_w: c_int, src_h: c_int, src_fmt: c_int,
@@ -2143,6 +2151,37 @@ struct AvioState {
     /// stream is somewhere else and `read_cb` must answer the clean end itself. Any other read at
     /// the end still asks the transport, which is how a failure there stays an error.
     parked_at_end: bool,
+    /// When the current transport stall began on a progressive part, and how many times it has
+    /// been reconnected since — see [`progressive_patience`]. `None` while bytes flow.
+    stalled_since: Option<std::time::Instant>,
+    reconnects: u32,
+}
+
+/// **How long a progressive (direct-play or remux) stream is given to come back** after its
+/// transport failed — the socket's 15 s `SO_RCVTIMEO` or curl's 30 s low-speed limit fired, or the
+/// connection dropped. Within it the part is reopened at the byte the demuxer was reading, with a
+/// pause between attempts, and playback continues from there; only a stall that outlasts it is a
+/// failure. The pipeline holds several seconds of decoded reserve and the HUD shows buffering in
+/// the meantime, so a server that stalls for a minute (a disk spinning up, a NAS under a scrub, a
+/// congested Wi-Fi link on a high-bitrate file) costs a pause instead of the playback.
+///
+/// HLS candidates and the ABR cursor keep their own reserve-funded clocks (`transport_watchdog`,
+/// `acquisition`): this patience applies only where neither is armed.
+pub const PROGRESSIVE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
+/// The pause between two reconnects of a stalled progressive part.
+const PROGRESSIVE_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Does a transport failure on this source get [`PROGRESSIVE_PATIENCE`]? A progressive part whose
+/// size is known (so a byte `Range` can resume it exactly), with no HLS clock armed.
+/// Only a stream that has already delivered body bytes is resumed: a part that never answered is
+/// a refused route (the failure read-out's business), not a stall.
+fn progressive_patience(size: i64, hls_clocked: bool, body_bytes: u64) -> bool {
+    size > 0 && !hls_clocked && body_bytes > 0
+}
+
+/// Whether a stall that began at `since` may still be retried at `now`.
+fn within_patience(since: std::time::Instant, now: std::time::Instant) -> bool {
+    now.saturating_duration_since(since) < PROGRESSIVE_PATIENCE
 }
 
 // TEST ONLY: a deterministic stand-in for the two `Instant::elapsed()` calls that measure
@@ -2578,7 +2617,15 @@ extern "C" fn read_cb(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
                     }
                 }
                 // Teardown was handled above through the AU flag and remains EOF. A negative
-                // result here is therefore a real transport/range failure.
+                // result here is therefore a real transport/range failure — which a progressive
+                // part survives for a while by reconnecting where it was (`PROGRESSIVE_PATIENCE`).
+                let hls_clocked = s.transport_watchdog.is_some() || s.acquisition.is_some();
+                // A failure at or past the known size has no byte left to resume at: `seek_cb` parks
+                // there and would answer the reconnect as a clean end, hiding the failure.
+                let resumable = s.size < 0 || s.off < s.size;
+                if resumable && progressive_patience(s.size, hls_clocked, s.body_bytes) && resume_stalled_progressive(op, s) {
+                    continue;
+                }
                 s.io_failed = true;
                 return AVERROR_IO;
             }
@@ -2590,6 +2637,9 @@ extern "C" fn read_cb(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
             }
             if let Some(watchdog) = &mut s.transport_watchdog {
                 watchdog.reset();
+            }
+            if s.stalled_since.take().is_some() {
+                crate::player::log(&format!("ff: stalled stream recovered after {} reconnect(s)", s.reconnects));
             }
             s.body_active_us = s
                 .body_active_us
@@ -2603,6 +2653,44 @@ extern "C" fn read_cb(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
             return r;
         }
     }
+}
+
+/// Reconnect a progressive part whose transport just failed, at the byte the demuxer was reading,
+/// pausing between attempts until it answers or [`PROGRESSIVE_PATIENCE`] runs out. `true` when it
+/// is reading again (the caller retries the read); `false` on teardown or when the patience is
+/// spent (the caller reports the failure).
+unsafe fn resume_stalled_progressive(op: *mut c_void, s: &mut AvioState) -> bool {
+    let since = *s.stalled_since.get_or_insert_with(std::time::Instant::now);
+    while within_patience(since, std::time::Instant::now()) {
+        // Pause first: the failure just happened, and reconnecting into the same outage at once
+        // only burns an attempt. Sliced so a teardown is never held for the whole pause.
+        let pause_until = std::time::Instant::now() + PROGRESSIVE_RETRY_PAUSE;
+        while std::time::Instant::now() < pause_until {
+            if crate::aq::aq_is_aborted(s.aq) {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if crate::aq::aq_is_aborted(s.aq) {
+            return false;
+        }
+        s.reconnects = s.reconnects.saturating_add(1);
+        let at = s.off;
+        crate::player::log(&format!(
+            "ff: stalled stream reconnecting at off={at} attempt={} stalled_ms={}",
+            s.reconnects,
+            since.elapsed().as_millis()
+        ));
+        if seek_cb(op, at, SEEK_SET) == at {
+            return true;
+        }
+    }
+    crate::player::log(&format!(
+        "ff: stalled stream gave up after {} s and {} reconnect(s)",
+        PROGRESSIVE_PATIENCE.as_secs(),
+        s.reconnects
+    ));
+    false
 }
 
 extern "C" fn seek_cb(op: *mut c_void, offset: i64, whence: c_int) -> i64 {
@@ -3468,8 +3556,11 @@ fn adts_header(freq_idx: u8, chan_cfg: u8, payload_len: usize) -> [u8; 7] {
     ]
 }
 
+/// The parameter sets an Annex-B stream has carried in band, each with its 4-byte start code,
+/// kept to put in front of a keyframe that arrives without them. `vps` is HEVC's only.
 #[derive(Default)]
 struct H264ParamSets {
+    vps: Vec<u8>,
     sps: Vec<u8>,
     pps: Vec<u8>,
 }
@@ -3496,9 +3587,21 @@ fn ts_h264_access_unit(
     params: &mut H264ParamSets,
     out: &mut Vec<u8>,
 ) -> Result<bool, &'static str> {
+    annexb_access_unit(data, false, params, out)
+}
+
+/// [`ts_h264_access_unit`] for either codec: H.264 (SPS 7, PPS 8, IDR 5) or HEVC (VPS 32, SPS 33,
+/// PPS 34, IRAP 16..=23). The packet is fed as it came; only the missing parameter sets of a
+/// keyframe are put in front, from what earlier packets (or the extradata) carried.
+fn annexb_access_unit(
+    data: &[u8],
+    is_hevc: bool,
+    params: &mut H264ParamSets,
+    out: &mut Vec<u8>,
+) -> Result<bool, &'static str> {
     out.clear();
     let Some((first, _)) = annexb_start(data, 0) else {
-        return Err("H.264 packet is not Annex-B");
+        return Err(if is_hevc { "HEVC packet is not Annex-B" } else { "H.264 packet is not Annex-B" });
     };
     if first != 0 {
         return Err("bytes precede the first Annex-B start code");
@@ -3506,30 +3609,33 @@ fn ts_h264_access_unit(
 
     let mut cursor = 0;
     let mut is_key = false;
-    let mut has_sps = false;
-    let mut has_pps = false;
+    let (mut has_vps, mut has_sps, mut has_pps) = (false, false, false);
     while let Some((start, prefix)) = annexb_start(data, cursor) {
         let payload = start + prefix;
         if payload >= data.len() {
             return Err("empty Annex-B NAL");
         }
         let end = annexb_start(data, payload).map_or(data.len(), |(next, _)| next);
-        let nal_type = data[payload] & 0x1f;
-        match nal_type {
-            5 => is_key = true,
-            7 => {
-                params.sps.clear();
-                params.sps.extend_from_slice(&[0, 0, 0, 1]);
-                params.sps.extend_from_slice(&data[payload..end]);
-                has_sps = true;
+        let keep = |slot: &mut Vec<u8>| {
+            slot.clear();
+            slot.extend_from_slice(&[0, 0, 0, 1]);
+            slot.extend_from_slice(&data[payload..end]);
+        };
+        if is_hevc {
+            match (data[payload] >> 1) & 0x3f {
+                16..=23 => is_key = true,
+                32 => { keep(&mut params.vps); has_vps = true; }
+                33 => { keep(&mut params.sps); has_sps = true; }
+                34 => { keep(&mut params.pps); has_pps = true; }
+                _ => {}
             }
-            8 => {
-                params.pps.clear();
-                params.pps.extend_from_slice(&[0, 0, 0, 1]);
-                params.pps.extend_from_slice(&data[payload..end]);
-                has_pps = true;
+        } else {
+            match data[payload] & 0x1f {
+                5 => is_key = true,
+                7 => { keep(&mut params.sps); has_sps = true; }
+                8 => { keep(&mut params.pps); has_pps = true; }
+                _ => {}
             }
-            _ => {}
         }
         cursor = end;
         if cursor >= data.len() {
@@ -3538,21 +3644,176 @@ fn ts_h264_access_unit(
     }
 
     if is_key {
+        if is_hevc && !has_vps {
+            if params.vps.is_empty() {
+                return Err("IRAP has no in-band or cached VPS");
+            }
+            out.extend_from_slice(&params.vps);
+        }
         if !has_sps {
             if params.sps.is_empty() {
-                return Err("IDR has no in-band or cached SPS");
+                return Err(if is_hevc { "IRAP has no in-band or cached SPS" } else { "IDR has no in-band or cached SPS" });
             }
             out.extend_from_slice(&params.sps);
         }
         if !has_pps {
             if params.pps.is_empty() {
-                return Err("IDR has no in-band or cached PPS");
+                return Err(if is_hevc { "IRAP has no in-band or cached PPS" } else { "IDR has no in-band or cached PPS" });
             }
             out.extend_from_slice(&params.pps);
         }
     }
     out.extend_from_slice(data);
     Ok(is_key)
+}
+
+/// **The progressive demuxer's video access-unit builder**: one packet in, one Starfish AU out
+/// (Annex-B with the parameter sets in front of every keyframe).
+///
+/// MP4 and Matroska carry length-prefixed NALs and an avcC/hvcC record; [`packet_to_annexb`]
+/// rewrites those. An MPEG-TS source — a Live TV channel from Tunarr, a `.ts` recording — already
+/// carries Annex-B with its parameter sets in band, and running it through the AVCC rewrite reads
+/// its first `00 00 00 01` as a NAL length of one: every AU reached the decoder as one byte and
+/// the channel sat on Buffering. Which framing a source uses is read from its extradata (an
+/// avcC/hvcC record starts with version byte 1, Annex-B parameter sets with a start code), or,
+/// when there is none, from the first packet.
+struct ProgressiveVideo {
+    is_hevc: bool,
+    framing: Option<AuFraming>,
+}
+
+/// How one source's packets become access units (the container decides, [`VideoFraming`] names the codec).
+enum AuFraming {
+    LengthPrefixed { params: Vec<u8>, nal_len: usize },
+    AnnexB(H264ParamSets),
+    Av1 { cfg: Vec<u8>, framing: Av1Framing },
+    Vp9,
+}
+
+impl ProgressiveVideo {
+    fn new(extradata: &[u8], is_hevc: bool) -> Self {
+        let framing = if extradata.first() == Some(&1) && extradata.len() >= 7 {
+            let (params, nal_len) = unsafe { parse_extradata(extradata.as_ptr(), extradata.len(), is_hevc) };
+            Some(AuFraming::LengthPrefixed { params, nal_len })
+        } else if annexb_start(extradata, 0).is_some_and(|(at, _)| at == 0) {
+            // The extradata IS the parameter sets, in band form: cache them for the first IDR.
+            let mut sets = H264ParamSets::default();
+            let _ = annexb_access_unit(extradata, is_hevc, &mut sets, &mut Vec::new());
+            Some(AuFraming::AnnexB(sets))
+        } else if extradata.is_empty() {
+            None
+        } else {
+            let (params, nal_len) = unsafe { parse_extradata(extradata.as_ptr(), extradata.len(), is_hevc) };
+            Some(AuFraming::LengthPrefixed { params, nal_len })
+        };
+        Self { is_hevc, framing }
+    }
+
+    /// An AV1 stream: Section-5 temporal units, the av1C configuration (parsed from `extradata`)
+    /// in-band on keyframes (`av1_packet_to_tu`).
+    fn av1(extradata: &[u8], framing: Av1Framing) -> Self {
+        let cfg = parse_av1c(extradata);
+        Self { is_hevc: false, framing: Some(AuFraming::Av1 { cfg, framing }) }
+    }
+
+    /// A VP9 stream: the packet unchanged (`vp9_packet_to_frame`).
+    fn vp9() -> Self {
+        Self { is_hevc: false, framing: Some(AuFraming::Vp9) }
+    }
+
+    /// Build the AU for one packet into `out`: `Ok(is_key)`, or why the packet cannot be fed.
+    fn access_unit(&mut self, data: &[u8], out: &mut Vec<u8>) -> Result<bool, &'static str> {
+        self.packet(data, false, out)
+    }
+
+    /// As [`access_unit`](Self::access_unit), with the container's keyframe flag, which the AV1 and
+    /// VP9 framings take from the packet (the Annex-B ones read it from the bitstream).
+    fn packet(&mut self, data: &[u8], key: bool, out: &mut Vec<u8>) -> Result<bool, &'static str> {
+        let is_hevc = self.is_hevc;
+        let framing = self.framing.get_or_insert_with(|| {
+            // No extradata: a 4-byte start code at byte 0 is Annex-B (as an AVCC length it would
+            // announce a one-byte NAL, which no stream carries); anything else is length-prefixed.
+            if data.starts_with(&[0, 0, 0, 1]) {
+                AuFraming::AnnexB(H264ParamSets::default())
+            } else {
+                AuFraming::LengthPrefixed { params: Vec::new(), nal_len: 4 }
+            }
+        });
+        match framing {
+            AuFraming::LengthPrefixed { params, nal_len } => {
+                Ok(unsafe { packet_to_annexb(data.as_ptr(), data.len(), *nal_len, is_hevc, params, out) })
+            }
+            AuFraming::AnnexB(sets) => annexb_access_unit(data, is_hevc, sets, out),
+            AuFraming::Av1 { cfg, framing } => Ok(av1_packet_to_tu(data, key, cfg, *framing, out)),
+            AuFraming::Vp9 => Ok(vp9_packet_to_frame(data, key, out)),
+        }
+    }
+
+    /// The `ff: video framing …` log line's fields.
+    fn describe(&self) -> String {
+        match &self.framing {
+            Some(AuFraming::LengthPrefixed { params, nal_len }) => {
+                format!("param_sets={} bytes nal_len={nal_len} is_hevc={}", params.len(), self.is_hevc)
+            }
+            Some(AuFraming::AnnexB(sets)) => format!(
+                "annexb param_sets={} bytes is_hevc={}",
+                sets.vps.len() + sets.sps.len() + sets.pps.len(),
+                self.is_hevc
+            ),
+            Some(AuFraming::Av1 { cfg, .. }) => format!("av1 av1_cfg={}B", cfg.len()),
+            Some(AuFraming::Vp9) => "vp9".to_string(),
+            None => format!("framing from the first packet is_hevc={}", self.is_hevc),
+        }
+    }
+}
+
+/// The AAC frame the progressive demuxer feeds for one packet: LG's decoder wants ADTS. MP4 and
+/// Matroska carry raw AAC, so the 7-byte header is prepended; MPEG-TS AAC is ADTS already and goes
+/// as it came (a raw AAC frame cannot begin with the 0xFFF sync: its first element would be
+/// ID_END). The HLS path makes the same decision.
+fn progressive_aac_frame(raw: &[u8], freq_idx: u8, chan_cfg: u8) -> Vec<u8> {
+    if packet_has_adts(raw) {
+        return raw.to_vec();
+    }
+    let mut framed = Vec::with_capacity(7 + raw.len());
+    framed.extend_from_slice(&adts_header(freq_idx, chan_cfg, raw.len()));
+    framed.extend_from_slice(raw);
+    framed
+}
+
+/// **When each audio frame the progressive demuxer feeds begins.** MPEG-TS (a Live TV channel)
+/// packs several audio frames into one PES and timestamps only the first frame that starts in it;
+/// FFmpeg's parser splits the PES into frames, and libavformat stamps the rest from the frame
+/// duration only once its running clock is set — before that they arrive with none. Each of
+/// those starts where the frame before it ended — the HLS path resolves the same holes per segment
+/// (`resolve_audio_stamps`); a progressive stream has no segment end to look ahead to, so this
+/// counts forward only. A frame with nothing to count from (joined mid-PES, or after a seek) is
+/// dropped: fed at 0, as it used to be, it lands seconds or hours from its neighbours. MP4 and
+/// Matroska timestamp every frame, so for them this only ever passes the timestamp through.
+#[derive(Default)]
+struct ProgressiveAudioClock {
+    next_ns: Option<i64>,
+}
+
+impl ProgressiveAudioClock {
+    /// The start of a frame whose container timestamp is `raw_ns` and whose length is
+    /// `duration_ns`; `None` when it cannot be known.
+    fn stamp(&mut self, raw_ns: Option<i64>, duration_ns: Option<i64>) -> Option<i64> {
+        let at = raw_ns.or(self.next_ns)?;
+        self.next_ns = duration_ns.and_then(|d| at.checked_add(d));
+        Some(at)
+    }
+
+    /// A seek: the next frame is from somewhere else.
+    fn reset(&mut self) {
+        self.next_ns = None;
+    }
+}
+
+/// An audio frame's length: the packet's own duration when FFmpeg knows it, else its ADTS
+/// header's.
+fn audio_frame_ns(packet_ns: Option<i64>, data: &[u8]) -> Option<i64> {
+    packet_ns.filter(|&d| d > 0).or_else(|| adts_duration_ns(data))
 }
 
 fn packet_has_adts(data: &[u8]) -> bool {
@@ -4201,6 +4462,8 @@ unsafe fn hls_input(
             bounce: Vec::new(),
             bounce_pos: 0,
             parked_at_end: false,
+            stalled_since: None,
+            reconnects: 0,
         }),
         avio: std::ptr::null_mut(),
         fmt: std::ptr::null_mut(),
@@ -8203,6 +8466,24 @@ mod pre_audio_headroom_tests {
     }
 }
 
+/// **A Live TV stream's analysis window.** `avformat_find_stream_info` reads ahead until it has
+/// FFmpeg's default five seconds of stream (or 5 MB) to settle each track's parameters, frame rate
+/// included — and a Tunarr channel arrives in real time, so that is up to five seconds of a tune
+/// spent before the first packet is handed on. The app has already measured what it needs
+/// (`live::probe`: the codecs and the frame rate), and MPEG-TS carries the parameter sets and ADTS
+/// headers in band, so one second is ample. Set by option name (`av_opt_set` on the context's own
+/// AVClass), no struct offset. A refusal leaves FFmpeg's defaults: slower, never wrong.
+#[inline]
+pub(crate) const fn live_analyzeduration_us() -> i64 {
+    1_000_000
+}
+
+unsafe fn live_analysis_limits(fmt: *mut AVFormatContext) {
+    let us = std::ffi::CString::new(live_analyzeduration_us().to_string()).expect("digits");
+    let rc = av_opt_set(fmt as *mut c_void, c"analyzeduration".as_ptr(), us.as_ptr(), 0);
+    crate::player::log(&format!("ff: live analysis window {}ms rc={rc}", live_analyzeduration_us() / 1000));
+}
+
 /// The demux thread body (spawned by `engine::start_bufferfeed`).
 ///
 /// Takes an [`Origin`](plx_plex::plex::Origin) rather than a `(host, port)` pair because **the scheme
@@ -8216,6 +8497,7 @@ pub fn demux(
     origin: plx_plex::plex::Origin,
     path: String,
     acodec: String,
+    live: bool,
     abr: Option<(crate::route::HlsAbrControl, crate::route::WorkerTicket)>,
     auto_original: Option<crate::route::AutoOriginalWatch>,
     aq: SendPtr<AuQueue>,
@@ -8450,6 +8732,8 @@ pub fn demux(
                     bounce: Vec::new(),
                     bounce_pos: 0,
                     parked_at_end: false,
+                    stalled_since: None,
+                    reconnects: 0,
                 });
                 let buf = av_malloc(65536) as *mut u8;
                 if buf.is_null() {
@@ -8487,6 +8771,9 @@ pub fn demux(
                     crate::player::log(&open_input_failure_note(r, crate::aq::aq_is_aborted(aq_p)));
                     free_avio(avio);
                     break;
+                }
+                if live {
+                    live_analysis_limits(fmt);
                 }
                 if avformat_find_stream_info(fmt, std::ptr::null_mut()) < 0 {
                     crate::player::log("ff: find_stream_info failed");
@@ -8567,6 +8854,7 @@ pub fn demux(
                 // AAC needs ADTS framing for LG's decoder (mp4/mkv carry raw AAC). Precompute the
                 // per-frame ADTS fields (freq index + channel config) for the selected audio stream;
                 // None => not AAC (or a non-standard rate) => fed verbatim.
+                let mut audio_clock = ProgressiveAudioClock::default();
                 let aac_adts: Option<(u8, u8)> = if ai >= 0 {
                     let acp = stream_codecpar(*streams.add(ai as usize));
                     if (*acp).codec_id == AV_CODEC_ID_AAC {
@@ -8695,53 +8983,37 @@ pub fn demux(
                 // format Starfish decodes). FFmpeg's hevc_mp4toannexb does NOT reliably prepend the
                 // parameter sets on this 3.3 build (it leaves the keyframe starting with SEI), so we
                 // build the AU from the codecpar extradata; libavformat still owns demux + seeking.
-                // AV1 is framed by av1_packet_to_tu as Section-5 temporal units with the av1C config
-                // in-band on keyframes, because the TV pipeline is given no codec_data for AV1.
-                let is_hevc = framing == VideoFraming::AnnexB { hevc: true };
-                let is_av1 = framing == VideoFraming::Av1;
-                let is_vp9 = framing == VideoFraming::Vp9;
-                let (param_blob, nal_len_size) = if is_av1 || is_vp9 {
-                    (Vec::new(), 0)
-                } else {
-                    parse_extradata(
-                        (*vcp).extradata,
-                        (*vcp).extradata_size.max(0) as usize,
-                        is_hevc,
-                    )
-                };
-                let av1_ed: &[u8] = if (*vcp).extradata.is_null() || (*vcp).extradata_size <= 0 {
+                let extradata: &[u8] = if (*vcp).extradata.is_null() || (*vcp).extradata_size <= 0 {
                     &[]
                 } else {
                     std::slice::from_raw_parts((*vcp).extradata, (*vcp).extradata_size as usize)
                 };
-                let av1_cfg = if is_av1 { parse_av1c(av1_ed) } else { Vec::new() };
-                let av1_framing = if is_av1 {
-                    Av1Framing::from_trigger(plx_base::devtrig::read("av1obu").as_deref())
-                } else {
-                    Av1Framing::DEFAULT
-                };
-                #[cfg(feature = "devtriggers")]
-                {
-                    if is_av1 && av1_framing != Av1Framing::DEFAULT {
-                        crate::player::log(&format!(
-                            "ff: av1obu trigger: td={} seq={} raw={}",
-                            av1_framing.td, av1_framing.seq, av1_framing.raw
-                        ));
+                // AV1 is framed as Section-5 temporal units with the av1C config in-band on
+                // keyframes, because the TV pipeline is given no codec_data for AV1.
+                let mut video_au = match framing {
+                    VideoFraming::Av1 => {
+                        let av1_framing = Av1Framing::from_trigger(plx_base::devtrig::read("av1obu").as_deref());
+                        #[cfg(feature = "devtriggers")]
+                        {
+                            if av1_framing != Av1Framing::DEFAULT {
+                                crate::player::log(&format!(
+                                    "ff: av1obu trigger: td={} seq={} raw={}",
+                                    av1_framing.td, av1_framing.seq, av1_framing.raw
+                                ));
+                            }
+                        }
+                        ProgressiveVideo::av1(extradata, av1_framing)
                     }
-                }
+                    VideoFraming::Vp9 => ProgressiveVideo::vp9(),
+                    VideoFraming::AnnexB { hevc } => ProgressiveVideo::new(extradata, hevc),
+                };
                 // A VP9 stream's PQ is in the container only; hand it to the pump, which writes it into
                 // the sourceInfo envelope ACB is sent. Always replaced, so a previous stream's colour
                 // cannot outlive it.
-                *SHARED.container_hdr.lock().unwrap() = if is_vp9 { Some(container_hdr(vcp)) } else { None };
-                crate::player::log(&format!(
-                    "ff: param_sets={} bytes nal_len={} is_hevc={} is_av1={} is_vp9={} av1_cfg={}B",
-                    param_blob.len(),
-                    nal_len_size,
-                    is_hevc,
-                    is_av1,
-                    is_vp9,
-                    av1_cfg.len()
-                ));
+                *SHARED.container_hdr.lock().unwrap() =
+                    if framing == VideoFraming::Vp9 { Some(container_hdr(vcp)) } else { None };
+                crate::player::log(&format!("ff: {}", video_au.describe()));
+                let mut rejected_aus = 0u32;
                 let mut aubuf: Vec<u8> = Vec::with_capacity(4 * 1024 * 1024);
 
                 let pkt = av_packet_alloc();
@@ -8811,6 +9083,7 @@ pub fn demux(
                         crate::player::log(&format!("ff: seek begin {}s", seek_ns / 1_000_000_000));
                         let seek_began = std::time::Instant::now();
                         let sr = av_seek_frame(fmt, vi, ts, AVSEEK_FLAG_BACKWARD);
+                        audio_clock.reset();
                         crate::player::log(&format!(
                             "ff: seek {}s rv={sr} ms={}",
                             seek_ns / 1_000_000_000,
@@ -8836,35 +9109,23 @@ pub fn demux(
                             *SHARED.side_anchor.lock().unwrap_or_else(|e| e.into_inner()) =
                                 Some(subside::Anchor::of(pts_ns(pkt, vst), raw));
                         }
-                        let is_key = if is_av1 {
-                            let pkt_bytes: &[u8] = if (*pkt).data.is_null() {
-                                &[]
-                            } else {
-                                std::slice::from_raw_parts((*pkt).data, (*pkt).size.max(0) as usize)
-                            };
-                            av1_packet_to_tu(
-                                pkt_bytes,
-                                (*pkt).flags & AV_PKT_FLAG_KEY != 0,
-                                &av1_cfg,
-                                av1_framing,
-                                &mut aubuf,
-                            )
-                        } else if is_vp9 {
-                            let pkt_bytes: &[u8] = if (*pkt).data.is_null() {
-                                &[]
-                            } else {
-                                std::slice::from_raw_parts((*pkt).data, (*pkt).size.max(0) as usize)
-                            };
-                            vp9_packet_to_frame(pkt_bytes, (*pkt).flags & AV_PKT_FLAG_KEY != 0, &mut aubuf)
+                        let raw = if (*pkt).data.is_null() {
+                            &[][..]
                         } else {
-                            packet_to_annexb(
-                                (*pkt).data,
-                                (*pkt).size.max(0) as usize,
-                                nal_len_size,
-                                is_hevc,
-                                &param_blob,
-                                &mut aubuf,
-                            )
+                            std::slice::from_raw_parts((*pkt).data, (*pkt).size.max(0) as usize)
+                        };
+                        let is_key = match video_au.packet(raw, (*pkt).flags & AV_PKT_FLAG_KEY != 0, &mut aubuf) {
+                            Ok(key) => key,
+                            Err(why) => {
+                                // One unusable packet (a broken NAL, an IDR before any parameter
+                                // set) is dropped, not the stream: the next keyframe recovers it.
+                                rejected_aus += 1;
+                                if rejected_aus <= 3 || rejected_aus % 500 == 0 {
+                                    crate::player::log(&format!("ff: video packet dropped #{rejected_aus}: {why}"));
+                                }
+                                av_packet_unref(pkt);
+                                continue;
+                            }
                         };
                         let pts = pts_ns(pkt, vst);
                         if DIAG_FIRST.swap(false, Ordering::Relaxed) {
@@ -8934,18 +9195,20 @@ pub fn demux(
                         SHARED.hls_video_tail_ns.store(pts, Ordering::Release);
                     } else if si == ai && FEED_AUDIO.load(Ordering::Relaxed) {
                         let ast = *streams.add(ai as usize);
-                        let pts = pts_ns(pkt, ast);
+                        let raw = std::slice::from_raw_parts((*pkt).data, (*pkt).size.max(0) as usize);
+                        let packet_ns = ((*pkt).duration > 0)
+                            .then(|| av_rescale_q((*pkt).duration, stream_time_base(ast), NS_TB));
+                        let Some(pts) = audio_clock.stamp(pts_ns_opt(pkt, ast), audio_frame_ns(packet_ns, raw)) else {
+                            av_packet_unref(pkt);
+                            continue;
+                        };
                         if headroom.first_audio_ns.is_none() {
                             // Before the push, so the feed thread that pops this AU sees it: the
                             // audio lane feeds a late-starting track's first AU on this mark.
                             SHARED.first_audio_pts.store(pts, Ordering::Release);
                         }
                         let pushed = if let Some((freq_idx, chan_cfg)) = aac_adts {
-                            // prepend a 7-byte ADTS header so LG's decoder can frame the raw AAC
-                            let plen = (*pkt).size as usize;
-                            let mut framed = Vec::with_capacity(7 + plen);
-                            framed.extend_from_slice(&adts_header(freq_idx, chan_cfg, plen));
-                            framed.extend_from_slice(std::slice::from_raw_parts((*pkt).data, plen));
+                            let framed = progressive_aac_frame(raw, freq_idx, chan_cfg);
                             crate::aq::aq_push_with_drain(
                                 aqa_p,
                                 framed.as_ptr(),
@@ -8956,7 +9219,6 @@ pub fn demux(
                                 || state.drain_wire(),
                             )
                         } else if dts_audio {
-                            let raw = std::slice::from_raw_parts((*pkt).data, (*pkt).size.max(0) as usize);
                             let Some(core) = dts_core_packet(raw) else {
                                 crate::player::log("ff: DTS packet has no complete supported core; refusing audio feed");
                                 SHARED.demux_failed.store(true, Ordering::Release);
@@ -9206,12 +9468,38 @@ mod packet_framing_tests;
 mod aac_timestamp_tests;
 
 #[cfg(test)]
+#[path = "ff_live_ts_tests.rs"]
+mod live_ts_tests;
+
+#[cfg(test)]
 #[path = "ff_source_teardown_tests.rs"]
 mod source_teardown_tests;
 
 #[cfg(test)]
 #[path = "ff_hls_reserve_tests.rs"]
 mod hls_reserve_tests;
+
+#[cfg(test)]
+mod progressive_patience_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_sized_unclocked_stream_that_has_played_is_resumed() {
+        assert!(progressive_patience(1 << 30, false, 4096), "a direct-play part mid-stream");
+        assert!(!progressive_patience(-1, false, 4096), "a progressive transcode has no byte to resume at");
+        assert!(!progressive_patience(1 << 30, true, 4096), "HLS keeps its reserve-funded clocks");
+        assert!(!progressive_patience(1 << 30, false, 0), "a part that never answered is a refusal, not a stall");
+    }
+
+    #[test]
+    fn the_patience_is_two_minutes_from_the_first_failure() {
+        let since = std::time::Instant::now();
+        assert!(within_patience(since, since));
+        assert!(within_patience(since, since + PROGRESSIVE_PATIENCE - std::time::Duration::from_millis(1)));
+        assert!(!within_patience(since, since + PROGRESSIVE_PATIENCE));
+        assert!(PROGRESSIVE_PATIENCE >= std::time::Duration::from_secs(60), "much more lenient than the 15 s socket timeout");
+    }
+}
 
 #[cfg(test)]
 #[path = "ff_stall_guard_tests.rs"]

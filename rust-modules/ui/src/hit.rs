@@ -68,6 +68,9 @@ pub struct HitMap<K> {
     pub dpad_mode: bool,
     dpad_at: (f32, f32),
     last: (f32, f32),
+    /// A pointer event has resolved at least once. Until then `last` is a made-up origin, not a
+    /// place a cursor ever was — a session driven only by keys never sets it.
+    seen: bool,
     /// A fading surface below the threshold: no hover, no click. **Nothing outside this module's
     /// tests sets this yet** — see the module doc; it is honoured by [`Self::resolve`] but never
     /// raised, so it is a mechanism waiting for its caller rather than a live gate.
@@ -88,6 +91,7 @@ impl<K: Copy + Eq> HitMap<K> {
             dpad_mode: false,
             dpad_at: (0.0, 0.0),
             last: (0.0, 0.0),
+            seen: false,
             suppressed: false,
         }
     }
@@ -119,10 +123,18 @@ impl<K: Copy + Eq> HitMap<K> {
         self.dpad_at = self.last;
     }
 
+    /// Where the pointer is, while it is the live input: it has moved at least once and no D-pad
+    /// press has taken over since (the same `dpad_mode` gate that suppresses hover). `None` is a
+    /// session driven by keys — what the desktop pointer chrome (`ui::desk`) reads to stay hidden.
+    pub fn pointer_at(&self) -> Option<(f32, f32)> {
+        (self.seen && !self.dpad_mode).then_some(self.last)
+    }
+
     /// Resolve only the current input owner's stops. Covered entries may still be drawn, but
     /// neither their controls nor a stale presented map may impersonate the active surface.
     pub fn resolve(&mut self, owner: Option<EntryId>, kind: PointerKind, x: f32, y: f32, focused: Option<FocusKey<K>>) -> Resolution<K> {
         self.last = (x, y);
+        self.seen = true;
         if self.dpad_mode {
             let (dx, dy) = (x - self.dpad_at.0, y - self.dpad_at.1);
             if (dx * dx + dy * dy).sqrt() >= DPAD_TRAVEL_PX {

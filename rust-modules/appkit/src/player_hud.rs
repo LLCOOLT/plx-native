@@ -465,12 +465,12 @@ impl SubtitleBitmaps {
 // ---- HUD geometry (shared by draw_hud + the pointer hit-tests in app.rs) ----
 // scrubber (and title, and the bottom tab pills) left margin — the app's own, not a second copy of
 // it: this was a literal 90 and so stayed put when `MARGIN_X` moved to the overscan-safe 96
-const SB_X: f32 = plx_ui::consts::MARGIN_X;
+pub(crate) const SB_X: f32 = plx_ui::consts::MARGIN_X;
 pub const fn sb_w() -> f32 {
     SCR_W - 2.0 * SB_X
 }
-const SB_Y: f32 = SCR_H - 198.0;
-const SB_H: f32 = 8.0;
+pub(crate) const SB_Y: f32 = SCR_H - 198.0;
+pub(crate) const SB_H: f32 = 8.0;
 const BTN_S: f32 = 64.0; // right-side control button size (mockup ≈ 68)
 const BTN_GAP: f32 = 22.0;
 const BTN_Y: f32 = HUD_CONTROLS_TOP_Y;
@@ -819,6 +819,31 @@ pub fn slot(ps: &plx_media::route::PlaybackSession, meta: plx_data::metadata::Me
     slot_for(m, has_next, mode)
 }
 
+/// PURE: the offer the loop should perform WITHOUT a press, given this frame's occupant and the
+/// Skip intro & credits setting — `Some` only for a [`ControlSlot::Skip`] whose kind the setting
+/// names ([`crate::skip_pill::auto_skips`]). An Up Next tile is never auto-skipped: it is the
+/// better offer, and taking it silently would start the next episode behind the viewer's back.
+///
+/// The loop asks this only on the FRESH edge of an offer (`app::run`'s `last_offer` latch), so a
+/// segment is auto-skipped at most once per playback; `metadata::mark_skipped` then retires it, so
+/// a viewer who seeks back into it watches it rather than being thrown out again.
+pub fn auto_skip_for(slot: ControlSlot, mode: plx_plex::plex::session::AutoSkip) -> Option<crate::skip_pill::Prompt> {
+    match slot {
+        ControlSlot::Skip(pr) if crate::skip_pill::auto_skips(pr, mode) => Some(pr),
+        _ => None,
+    }
+}
+
+/// PURE: the row's occupant once a still-open automatic-skip undo is taken into account. The
+/// "Skipped intro · Back" pill ([`crate::skip_pill::undo_prompt`]) stands in for the DISCS only —
+/// a real segment beginning inside the window keeps its own offer.
+pub fn with_undo(base: ControlSlot, undo: Option<crate::skip_pill::AutoSkipUndo>, now: u32) -> ControlSlot {
+    match (base, undo) {
+        (ControlSlot::Discs, Some(u)) if u.live(now) => ControlSlot::Skip(crate::skip_pill::undo_prompt(u.marker)),
+        _ => base,
+    }
+}
+
 /// PURE edge: has a stand-in just vanished OUT FROM UNDER the focus ring, so the ring has to go
 /// back to the scrubber? `focused` is whether the control row currently holds focus. `was_standin`
 /// is the occupant on the last OVERLAY-FREE frame, not simply the last frame — the caller only
@@ -951,9 +976,10 @@ pub fn busy(ps: &plx_media::route::PlaybackSession) -> Busy {
 
 // ---- the transport STATE READ-OUT (the glyph slot just past the elapsed clock) ---------------
 //
-// One slot, one glyph, four states. It is a READ-OUT and not an action toggle — there is no
-// transport button row in this app and a standing owner decision forbids adding one, so nothing
-// here is focusable, hit-tested or in `BTN_N`. The glyphs are the design system's transport
+// One slot, one glyph, four states. It is a READ-OUT and not an action toggle — on the television
+// there is no transport button row and a standing owner decision forbids adding one, so nothing
+// here is focusable, hit-tested or in `BTN_N`. (The desktop's own row, `DeskCtl` below, is drawn
+// only while the pointer is live, which webOS never makes it, and is not a `BTN_N` entry.) The glyphs are the design system's transport
 // family (`Icon::Rewind` / `Icon::Pause` / `Icon::FastForward`, all in one 14-unit band, with
 // `Icon::Play` swapping in for `Pause`), which is what keeps the slot from shifting optical
 // weight as the state flips under a running clock.
@@ -1295,6 +1321,179 @@ pub const ELEM_TAB_BASE: u32 = 20;
 pub const ELEM_FAILURE_BASE: u32 = 30;
 /// One past the failure row's last possible element.
 pub const ELEM_FAILURE_END: u32 = ELEM_FAILURE_BASE + plx_ui::widgets::STATUS_ROW_MAX as u32;
+
+// ---- The DESKTOP pointer transport (`plx_ui::desk`) ----------------------------------------------
+//
+// A television's remote carries play/pause, the skip keys, BACK and the volume rocker; a desktop
+// mouse has none of them, so on a desktop with the pointer live the transport grows faces for
+// them: a back arrow in the top-left corner (where every pushed page's desktop BACK sits), volume
+// and fullscreen in the top-right (where the pages' Search and Settings sit), and a centred row —
+// skip back, play/pause, skip forward, and next episode when there is one. The product idiom's
+// "state glyph, not a transport row" verdict (`ui/src/CLAUDE.md`, rule 3) is the TELEVISION's, and
+// stands there unchanged: none of this is drawn or registered unless `DrawFrame::pointer` is live,
+// which webOS never makes it. Every face drives a path a remote key already drives — the skip hop,
+// `PlayerReq::Transport`, `PlayerReq::Exit` — or one only a desktop has (volume, the window).
+
+/// `+ DeskCtl::index` — the desktop pointer transport's controls, after every TV element.
+pub const ELEM_DESK_BASE: u32 = 50;
+const _: () = assert!(ELEM_DESK_BASE >= ELEM_FAILURE_END);
+
+/// One control of the desktop pointer transport.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeskCtl {
+    Back,
+    SkipBack,
+    PlayPause,
+    SkipForward,
+    Next,
+    Volume,
+    /// The volume slider's track — drawn while the pointer is over the speaker or the track.
+    VolumeBar,
+    Fullscreen,
+}
+
+impl DeskCtl {
+    pub const ALL: [DeskCtl; 8] = [
+        DeskCtl::Back, DeskCtl::SkipBack, DeskCtl::PlayPause, DeskCtl::SkipForward,
+        DeskCtl::Next, DeskCtl::Volume, DeskCtl::VolumeBar, DeskCtl::Fullscreen,
+    ];
+
+    pub fn elem(self) -> u32 {
+        ELEM_DESK_BASE + Self::ALL.iter().position(|c| *c == self).unwrap_or(0) as u32
+    }
+
+    pub fn of_elem(elem: u32) -> Option<DeskCtl> {
+        elem.checked_sub(ELEM_DESK_BASE).and_then(|i| Self::ALL.get(i as usize)).copied()
+    }
+}
+
+/// What the desktop transport draws from, read once per frame by the player.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DeskFacts {
+    pub paused: bool,
+    /// An episode follows this one (`route::up_next`): the next-episode face is drawn.
+    pub has_next: bool,
+    /// The slider's position, 0 to 1, and whether the speaker is silent (`player::volume`).
+    pub level: f32,
+    pub silent: bool,
+    pub fullscreen: bool,
+    /// The pointer is over the speaker or its track: the track is out.
+    pub slider_open: bool,
+}
+
+/// The centred row's discs: play/pause larger than the skips either side of it.
+const DESK_MAIN: f32 = 96.0;
+const DESK_SIDE: f32 = 72.0;
+const DESK_ROW_GAP: f32 = 40.0;
+/// The ramp behind the corner faces: the top of the canvas, down past the discs.
+const DESK_TOP_SCRIM_H: f32 = 200.0;
+/// The plate behind the centred row reaches this far past its discs.
+const DESK_PLATE_PAD: f32 = 20.0;
+/// The volume track's length, and its gap to the speaker it opens from.
+const DESK_BAR_W: f32 = 200.0;
+const DESK_BAR_GAP: f32 = 16.0;
+
+/// Where each drawn control sits, in canvas space. The ONE geometry the paint and the stops read.
+pub fn desk_layout(facts: &DeskFacts) -> Vec<(DeskCtl, Rect)> {
+    use plx_ui::desk::{place, DeskAction, DISC};
+    let mut out = vec![(DeskCtl::Back, place(DeskAction::Back))];
+    let (cx, cy) = (SCR_W * 0.5, SCR_H * 0.5);
+    let main = Rect::new(cx - DESK_MAIN * 0.5, cy - DESK_MAIN * 0.5, DESK_MAIN, DESK_MAIN);
+    let side = |x: f32| Rect::new(x, cy - DESK_SIDE * 0.5, DESK_SIDE, DESK_SIDE);
+    out.push((DeskCtl::SkipBack, side(main.x - DESK_ROW_GAP - DESK_SIDE)));
+    out.push((DeskCtl::PlayPause, main));
+    let forward = side(main.x + main.w + DESK_ROW_GAP);
+    out.push((DeskCtl::SkipForward, forward));
+    if facts.has_next {
+        out.push((DeskCtl::Next, side(forward.x + forward.w + DESK_ROW_GAP)));
+    }
+    // the top-right pair stands exactly where a page's Search and Settings stand
+    let full = place(DeskAction::Settings);
+    let volume = place(DeskAction::Search);
+    out.push((DeskCtl::Volume, volume));
+    if facts.slider_open {
+        // The track's HIT rect runs on across the gap to the speaker, so a pointer travelling from
+        // one to the other never crosses a strip that is neither (which would close the track
+        // under it); the capsule itself stops short of the gap (`draw_desk_volume`).
+        out.push((DeskCtl::VolumeBar,
+            Rect::new(volume.x - DESK_BAR_GAP - DESK_BAR_W, volume.y, DESK_BAR_W + DESK_BAR_GAP, DISC)));
+    }
+    out.push((DeskCtl::Fullscreen, full));
+    out
+}
+
+/// The drawn capsule of the volume track whose hit rect is `bar` (see `desk_layout`).
+fn desk_bar_capsule(bar: Rect) -> Rect {
+    Rect::new(bar.x, bar.y, bar.w - DESK_BAR_GAP, bar.h)
+}
+
+/// Inset of the track's line inside its capsule.
+const DESK_BAR_PAD: f32 = 20.0;
+
+/// The volume a pointer at `x` over the track (hit rect `bar`) asks for, 0 to 1.
+pub fn desk_volume_at(bar: Rect, x: f32) -> f32 {
+    let cap = desk_bar_capsule(bar);
+    ((x - cap.x - DESK_BAR_PAD) / (cap.w - 2.0 * DESK_BAR_PAD)).clamp(0.0, 1.0)
+}
+
+/// Paint the desktop pointer transport: every control `desk_layout` places, its hover state
+/// where `pointer` is over it. Over the video plane, so on the unkeyed ground.
+pub fn draw_desk(p: Painter, facts: &DeskFacts, pointer: plx_ui::desk::PointerChrome) {
+    use plx_ui::icons::Icon;
+    use plx_ui::widgets::ControlGround;
+    // The unkeyed faces are a light film whose contrast comes from a dark ground under them — the
+    // bottom transport stands on `draw_scrim`'s ramp. The corner faces get that ramp mirrored at
+    // the top, and the centred row a soft plate of the same ink, or over a bright frame (a white
+    // sky, a title card) a white glyph on a white film is simply not there.
+    p.rect(Rect::new(0.0, 0.0, SCR_W, DESK_TOP_SCRIM_H), 0.0, theme::scrim_black(0.7), theme::scrim_black(0.0), 0.0);
+    let laid = desk_layout(facts);
+    let row = laid.iter().filter(|(c, _)| matches!(c, DeskCtl::SkipBack | DeskCtl::PlayPause | DeskCtl::SkipForward | DeskCtl::Next))
+        .fold(None::<Rect>, |acc, (_, r)| Some(acc.map_or(*r, |a| a.union(*r))));
+    if let Some(row) = row {
+        let plate = Rect::new(row.x - DESK_PLATE_PAD, row.y - DESK_PLATE_PAD, row.w + 2.0 * DESK_PLATE_PAD, row.h + 2.0 * DESK_PLATE_PAD);
+        p.rect(plate, plate.h * 0.5, theme::scrim_black(0.4), theme::scrim_black(0.4), 0.0);
+    }
+    for (ctl, r) in laid {
+        let icon = match ctl {
+            DeskCtl::Back => Icon::ChevronLeft,
+            DeskCtl::SkipBack => Icon::Rewind,
+            DeskCtl::PlayPause if facts.paused => Icon::Play,
+            DeskCtl::PlayPause => Icon::Pause,
+            DeskCtl::SkipForward => Icon::FastForward,
+            DeskCtl::Next => Icon::SkipNext,
+            DeskCtl::Volume if facts.silent => Icon::VolumeMute,
+            DeskCtl::Volume => Icon::Volume,
+            DeskCtl::Fullscreen if facts.fullscreen => Icon::FullscreenExit,
+            DeskCtl::Fullscreen => Icon::Fullscreen,
+            DeskCtl::VolumeBar => {
+                draw_desk_volume(p, r, facts.level, facts.silent);
+                continue;
+            }
+        };
+        plx_ui::desk::draw_button(p, r, icon, pointer.over(r), ControlGround::Unkeyed);
+    }
+}
+
+/// The volume track: the scrubber's own materials (`draw_playbar`) on a capsule of the unkeyed
+/// control film, so it reads over a bright frame as the discs beside it do.
+fn draw_desk_volume(p: Painter, bar: Rect, level: f32, silent: bool) {
+    const H: f32 = 6.0;
+    const KNOB: f32 = 18.0;
+    let bar = desk_bar_capsule(bar);
+    let film = theme::CONTROL_IDLE_FILL_UNKEYED;
+    p.rect(bar, bar.h * 0.5, film, film, 0.0);
+    let track = Rect::new(bar.x + DESK_BAR_PAD, bar.y + (bar.h - H) * 0.5, bar.w - 2.0 * DESK_BAR_PAD, H);
+    p.rect(track, H * 0.5, theme::RAIL_TRACK, theme::RAIL_TRACK, 0.0);
+    let shown = if silent { 0.0 } else { level };
+    let fw = track.w * shown;
+    if fw > 0.0 {
+        p.rrect(Rect::new(track.x, track.y, fw, H), (fw * 0.5).min(H * 0.5), 0.0, theme::TEXT_PRIMARY);
+    }
+    let kx = track.x + fw;
+    let ky = track.y + H * 0.5;
+    p.rect(Rect::new(kx - KNOB * 0.5, ky - KNOB * 0.5, KNOB, KNOB), KNOB * 0.5,
+        theme::TEXT_PRIMARY, theme::TEXT_PRIMARY, 0.0);
+}
 
 /// The scrubber's GRAB band — deliberately much taller than the bar itself, because it is a
 /// pointer grab zone. Placed by `PlayerScreen::place` and registered from it as the LOWEST stop, so
@@ -2073,6 +2272,72 @@ pub fn overscan_rects(out: &mut Vec<(&'static str, Rect)>) {
 }
 
 #[cfg(test)]
+mod desk_tests {
+    use super::*;
+
+    fn ctls(facts: &DeskFacts) -> Vec<DeskCtl> {
+        desk_layout(facts).into_iter().map(|(c, _)| c).collect()
+    }
+
+    #[test]
+    fn every_desk_control_round_trips_through_its_element_and_clears_the_tv_ones() {
+        for c in DeskCtl::ALL {
+            assert_eq!(DeskCtl::of_elem(c.elem()), Some(c));
+            assert!(c.elem() >= ELEM_FAILURE_END, "{c:?} would collide with a television element");
+        }
+        assert_eq!(DeskCtl::of_elem(ELEM_SCRUB), None);
+        assert_eq!(DeskCtl::of_elem(ELEM_DESK_BASE + DeskCtl::ALL.len() as u32), None);
+    }
+
+    /// The next-episode face exists only with a successor, and the volume track only while it is out.
+    #[test]
+    fn the_layout_draws_only_what_this_moment_offers() {
+        let base = DeskFacts::default();
+        let c = ctls(&base);
+        assert!(!c.contains(&DeskCtl::Next) && !c.contains(&DeskCtl::VolumeBar));
+        assert!(ctls(&DeskFacts { has_next: true, ..base }).contains(&DeskCtl::Next));
+        assert!(ctls(&DeskFacts { slider_open: true, ..base }).contains(&DeskCtl::VolumeBar));
+    }
+
+    /// The track's hit rect meets the speaker's edge, so the pointer never crosses a dead strip.
+    #[test]
+    fn the_volume_tracks_hit_rect_reaches_the_speaker() {
+        let laid = desk_layout(&DeskFacts { slider_open: true, ..Default::default() });
+        let at = |c: DeskCtl| laid.iter().find(|(x, _)| *x == c).unwrap().1;
+        let (bar, speaker) = (at(DeskCtl::VolumeBar), at(DeskCtl::Volume));
+        assert_eq!(bar.x + bar.w, speaker.x);
+    }
+
+    /// Every face is on the canvas, none overlaps another, and the centred row stays clear of the
+    /// HUD's own control row and scrubber below it.
+    #[test]
+    fn the_faces_are_on_screen_and_apart() {
+        let facts = DeskFacts { has_next: true, slider_open: true, ..Default::default() };
+        let laid = desk_layout(&facts);
+        for (i, (a, ra)) in laid.iter().enumerate() {
+            assert!(ra.x >= 0.0 && ra.y >= 0.0 && ra.x + ra.w <= SCR_W && ra.y + ra.h <= SCR_H, "{a:?} {ra:?}");
+            for (b, rb) in &laid[i + 1..] {
+                let o = ra.intersect(*rb);
+                assert!(o.w <= 0.0 || o.h <= 0.0, "{a:?} overlaps {b:?}");
+            }
+            assert!(ra.y + ra.h <= BTN_Y && ra.y + ra.h <= SB_Y, "{a:?} reaches the HUD's rows");
+        }
+    }
+
+    /// The track maps its own length to 0..1, clamped past either end.
+    #[test]
+    fn the_volume_track_maps_the_pointer_to_a_level() {
+        let bar = desk_layout(&DeskFacts { slider_open: true, ..Default::default() })
+            .into_iter().find(|(c, _)| *c == DeskCtl::VolumeBar).unwrap().1;
+        assert_eq!(desk_volume_at(bar, bar.x - 50.0), 0.0);
+        assert_eq!(desk_volume_at(bar, bar.x + bar.w + 50.0), 1.0);
+        let cap = desk_bar_capsule(bar);
+        let mid = desk_volume_at(bar, cap.x + cap.w * 0.5);
+        assert!((mid - 0.5).abs() < 0.01, "{mid}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn a_hold_doubles_its_scrub_speed_every_step_up_to_the_cap() {
@@ -2398,6 +2663,70 @@ mod tests {
             slot_for(Some(marker(MarkerKind::Credits, true)), true, NextEpisodeMode::Countdown),
             ControlSlot::UpNext(_)
         ));
+    }
+
+    /// **Skip intro & credits: which offers the player takes by itself.** Off takes none (today's
+    /// pill); Intro takes only intros; Intro & credits takes credits too — a mid-item segment as a
+    /// seek, and a final one on the LAST item as a finish. A final credits segment WITH a
+    /// successor is never taken: under Countdown it is the Up Next tile (the better offer), and
+    /// under After credits / Off it is no offer at all, so nothing starts the next episode silently.
+    #[test]
+    fn auto_skip_takes_only_the_offers_its_setting_names() {
+        use plx_plex::plex::session::AutoSkip;
+        let intro = slot_for(Some(marker(MarkerKind::Intro, false)), true, NextEpisodeMode::Countdown);
+        let mid_credits = slot_for(Some(marker(MarkerKind::Credits, false)), true, NextEpisodeMode::Countdown);
+        let last_credits = slot_for(Some(marker(MarkerKind::Credits, true)), false, NextEpisodeMode::Countdown);
+
+        for slot in [intro, mid_credits, last_credits] {
+            assert!(auto_skip_for(slot, AutoSkip::Off).is_none(), "Off keeps the pill");
+        }
+        assert!(matches!(auto_skip_for(intro, AutoSkip::Intro), Some(p) if p.action == SkipAction::Seek(2_000 * 1_000_000)));
+        assert!(auto_skip_for(mid_credits, AutoSkip::Intro).is_none(), "Intro leaves credits alone");
+        assert!(auto_skip_for(last_credits, AutoSkip::Intro).is_none());
+
+        assert!(auto_skip_for(intro, AutoSkip::IntroAndCredits).is_some());
+        assert!(matches!(auto_skip_for(mid_credits, AutoSkip::IntroAndCredits),
+            Some(p) if p.action == SkipAction::Seek(2_000 * 1_000_000)));
+        assert!(matches!(auto_skip_for(last_credits, AutoSkip::IntroAndCredits),
+            Some(p) if p.action == SkipAction::Finish), "the last item's final credits finish it");
+
+        // final credits with a successor: never auto-skipped, in any Next-episode mode
+        for mode in [NextEpisodeMode::Countdown, NextEpisodeMode::AfterCredits, NextEpisodeMode::Off] {
+            let with_next = slot_for(Some(marker(MarkerKind::Credits, true)), true, mode);
+            assert!(auto_skip_for(with_next, AutoSkip::IntroAndCredits).is_none(), "{mode:?}");
+        }
+        assert!(auto_skip_for(ControlSlot::Discs, AutoSkip::IntroAndCredits).is_none());
+    }
+
+    /// **The undo window.** For [`crate::skip_pill::UNDO_MS`] after an automatic skip the discs
+    /// give way to the "Skipped … · Back" pill, whose action rewinds to the segment's START and
+    /// whose offer identity is the original segment's (so it never re-raises the HUD or counts as
+    /// a fresh offer — and is never itself auto-skipped). A real offer beginning inside the window
+    /// keeps its own occupant; once the window closes the discs return.
+    #[test]
+    fn an_automatic_skip_offers_a_way_back_for_five_seconds() {
+        use crate::skip_pill::{AutoSkipUndo, UNDO_MS};
+        use plx_plex::plex::session::AutoSkip;
+        let m = marker(MarkerKind::Intro, false);
+        let undo = AutoSkipUndo::at(m, 10_000);
+        assert_eq!(undo.back_ns(), 1_000 * 1_000_000, "back is the segment's start");
+        let up = with_undo(ControlSlot::Discs, Some(undo), 10_000 + UNDO_MS - 1);
+        match up {
+            ControlSlot::Skip(p) => {
+                assert_eq!(p.action, SkipAction::Rewind(1_000 * 1_000_000));
+                assert_eq!(p.kind, MarkerKind::Intro);
+            }
+            _ => panic!("the undo pill stands in for the discs"),
+        }
+        assert_eq!(up.offer(), Some((MarkerKind::Intro, 1_000)), "same identity as the skipped offer");
+        assert!(auto_skip_for(up, AutoSkip::IntroAndCredits).is_none(), "the undo pill is never auto-taken");
+        assert!(with_undo(ControlSlot::Discs, Some(undo), 10_000 + UNDO_MS).is_discs(), "the window closes");
+        assert!(with_undo(ControlSlot::Discs, None, 10_000).is_discs());
+        let credits = slot_for(Some(marker(MarkerKind::Credits, false)), false, NextEpisodeMode::Countdown);
+        assert!(with_undo(credits, Some(undo), 10_001) == credits, "a real offer keeps the row");
+        // wrapping frame clock: a window opened just before the wrap is still live after it
+        let wrap = AutoSkipUndo::at(m, u32::MAX - 100);
+        assert!(wrap.live(50) && !wrap.live(UNDO_MS));
     }
 
     /// A `final` credits segment runs to the end of the item, so skipping it FINISHES rather than

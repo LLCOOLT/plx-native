@@ -1986,6 +1986,8 @@ fn avio_state_for(
         bounce: Vec::new(),
         bounce_pos: 0,
         parked_at_end: false,
+        stalled_since: None,
+        reconnects: 0,
     }
 }
 

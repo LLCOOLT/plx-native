@@ -114,6 +114,8 @@ impl Initial {
             hold: (0, super::HOLD_ROWS - 1),
             staged_gen: 0,
             publish_memo: None,
+            extras: super::HomeExtras::default(),
+            watchlist: Default::default(),
         };
         let adapter = super::PmsAdapter {
             next_request: AtomicU32::new(self.next_request),
@@ -125,7 +127,7 @@ impl Initial {
     #[cfg(any(test, feature = "test-support"))]
     pub fn capture(state: &PmsState, adapter: &PmsAdapter) -> Self {
         let sources = state.srcs.iter().map(|s| {
-            let Src { sid, client, token_gen, handle, state, fetching, seq, retry_s, retry_n, last, page, deferred: _, abandoned: _, adoptable: _, stalled: _, ledger: _, stamp: _, staged: _, quiet: _, quiet_owed: _, quiet_after: _, quiet_fails: _ } = s;
+            let Src { sid, client, token_gen, handle, state, fetching, seq, retry_s, retry_n, last, page, deferred: _, abandoned: _, adoptable: _, stalled: _, ledger: _, stamp: _, staged: _, quiet: _, quiet_owed: _, quiet_after: _, quiet_fails: _, genres_at_ms: _ } = s;
             Source { sid: *sid, client: client.map(|c| c.instance_gen()), token_gen: *token_gen,
                 handle: handle.clone(), state: match state { HubState::Loading => 0, HubState::Ready => 1, HubState::Failed => 2 },
                 fetching: *fetching, seq: *seq, retry_bits: retry_s.to_bits(), retry_n: *retry_n, last: last.clone(), page: page.clone() }
@@ -171,7 +173,7 @@ impl Initial {
 }
 
 fn source_build(b: &SourceBuild, w: &mut impl Sink) {
-    let SourceBuild { cw, shelves, .. } = b;
+    let SourceBuild { cw, shelves, genres, playlists, .. } = b;
     w.u64(cw.len() as u64);
     for item in cw { let CwItem { last_viewed_at, m, .. } = item; w.u64(*last_viewed_at as u64); movie(m, w); }
     w.u64(shelves.len() as u64);
@@ -184,6 +186,10 @@ fn source_build(b: &SourceBuild, w: &mut impl Sink) {
         w.u64(positions.len() as u64); for position in positions { w.u64(*position as u64); }
         w.u64(*total as u64); w.u64(*offset as u64); w.u64(*end as u64); w.boolean(*more);
     }
+    w.boolean(genres.is_some());
+    if let Some(genres) = genres { movies(genres, w); }
+    w.boolean(playlists.is_some());
+    if let Some(playlists) = playlists { movies(playlists, w); }
 }
 
 fn movies(items: &[Arc<PmsMovie>], w: &mut impl Sink) {
@@ -194,7 +200,7 @@ fn movies(items: &[Arc<PmsMovie>], w: &mut impl Sink) {
 fn movie(m: &PmsMovie, w: &mut impl Sink) {
     let PmsMovie { sid, sec, title, year, rating, dur_ns, part, thumb, still, art, summary, rk,
         vcodec, acodec, blur, has_blur, kind, resume_ms, show_rk, season_index, show_title,
-        ep_index, unwatched, watched, aired, child_count } = m;
+        ep_index, unwatched, watched, aired, child_count, guid } = m;
     w.u32(sid.raw().into()); w.u64(*sec as u64); w.text(title); w.u32(*year as u32);
     w.text(rating); w.u64(*dur_ns as u64);
     for text in [part, thumb, still, art, summary, rk, vcodec, acodec] { w.text(text); }
@@ -202,6 +208,7 @@ fn movie(m: &PmsMovie, w: &mut impl Sink) {
     w.boolean(*has_blur); w.u32(*kind as u32); w.u64(*resume_ms as u64); w.text(show_rk);
     w.u32(*season_index as u32); w.text(show_title); w.u32(*ep_index as u32);
     w.boolean(*unwatched); w.boolean(*watched); w.text(aired); w.u64(*child_count as u64);
+    w.text(guid);
 }
 
 #[cfg(test)]

@@ -95,7 +95,9 @@ the pinned Sentry Native cross-build), and `sshpass` (Homebrew; deploy/run use y
   table per firmware; bundling collapsed that into a single equality (`ffabi-assert.c` opens by
   asserting `LIBAVFORMAT_VERSION_MAJOR == 63`), and the vendored trees are gone.
   **Since 2026-08-28 there ARE two tables again, and the axis is POINTER WIDTH rather than
-  version.** `make sim-macos` builds the same FFmpeg 9.0 from the same component list for this Mac
+  version.** `make sim-macos` builds the same FFmpeg 9.0 from the same demux component list for this Mac (plus
+  the desktop's decode set — h264/hevc/ac3/eac3/aac/dca, libswresample, the OS hardware decoder —
+  which only the host build carries)
   (`HOST=1 ci/build-ffmpeg.sh` → `vendor/ffmpeg-prefix-host`, staged into `pkg/` as
   `libavformat-plx.63.dylib`) so the simulator can demux at all, and `ffabi-assert.c` `#if`s on
   `__SIZEOF_POINTER__`, each half compiled against its own build's headers. That is not the old
@@ -707,12 +709,20 @@ the pinned Sentry Native cross-build), and `sshpass` (Homebrew; deploy/run use y
   application**, for sending to somebody who has none of this installed. Same `hostsim` core the
   simulator runs, built `--release --no-default-features` (so no dev counter, no `/tmp` trigger
   surface, no FIFO, no capture listener), with every non-system dylib copied in and rewritten to
-  `@rpath`, ad-hoc codesigned. It signs in with the real QR flow and browses a real server; **it
-  cannot play video** — the Starfish/ACB seam does not exist off-device, so Play lands on the app's
-  failure read-out, exactly as in the simulator. Apple Silicon only, LAN only. `ci/mkmacapp.py` is
+  `@rpath`, ad-hoc codesigned. It signs in with the real QR flow, browses a real server and **plays**:
+  `player::desk` decodes behind `ffi_host::HostSink` with the bundled host FFmpeg's desktop decoders
+  (VideoToolbox where present), with the sound card as the clock. None of that says anything about
+  LG's decoder, so the heartbeat still carries `sim=1`. CI (`.github/workflows/desktop.yml`) builds
+  it for `arm64` and `x86_64`, and the Windows folder beside it (`ci/mkwinapp.py`). `ci/mkmacapp.py` is
   the recipe (its module doc names the three ways a Mac bundle silently ships broken);
   `docs/macos-app.md` is the design note, and `docs/macos-app-readme.md` is what ships beside the
-  zip for the recipient.
+  zip for the recipient. The desktop apps' icons are generated from `assets/logo-master.png` by
+  `tools/make-app-icons.py` and COMMITTED under `assets/app-icon/` (the Mac tile `mkmacapp.py`
+  turns into `AppIcon.icns`, the `.ico` `rust-modules/build.rs` embeds in the Windows executable
+  through MinGW's `windres` — `mkwinapp.py` refuses an executable without it — and the PNG the
+  running window carries); re-run it only when the logo changes. Their pointer controls (back,
+  Search, Settings, shelf arrows, card ▶/⋯, the player's transport, volume and fullscreen) are the
+  desktop pointer chrome, `rust-modules/ui/src/CLAUDE.md` "The desktop pointer chrome".
 - **`FLAVOR`** selects **WHICH INSTALL** every TV-facing target talks to. Three builds live on one
   television: `stable` (`com.beb.plxnative` — the app users install, the id in every release,
   manifest and channel listing), `debug` (`com.beb.plxnative.debug` — the day-to-day developer
@@ -1819,7 +1829,7 @@ from; unset it and everything resolves to `/tmp` exactly as before). It answers 
 navigation, every screen, and the whole Plex data layer.
 **On macOS, since 2026-08-28 it STREAMS — real HTTP, real demux, real HLS, the real adaptive
 controller.** `make sim-macos` builds a HOST copy of the same bundled FFmpeg 9.0 from the same
-`ci/build-ffmpeg.sh` component list (`HOST=1`, into `vendor/ffmpeg-prefix-host`, staged into
+`ci/build-ffmpeg.sh` demux component list, plus the desktop's decoders (`HOST=1`, into `vendor/ffmpeg-prefix-host`, staged into
 `pkg/` as `libavformat-plx.63.dylib` beside the ARM `.so.63`), and `ff.rs` carries a second ABI
 table selected on `target_pointer_width` with `ci/ffabi-assert.c` holding both. Arm
 `plxnative-clocksink` (`player/ffi_host.rs` — AUs accepted and discarded, a presentation clock
@@ -1836,9 +1846,11 @@ GPU — every simulator heartbeat carries **`sim=1`** so a pasted log cannot be 
 device measurement), text rasterization, the cached modal ground (its frame cache is off —
 `frame cache: … cache off`), or anything about **LG's decoder** — resource-allocation
 refusals, the ACB video-plane bind, the Load payload's Dolby declaration, `SOUND_ERROR_019`, frame
-pacing, which codecs the panel takes. Nothing decodes: the clock sink throws every AU away, and a
-Mac decodes things that television will not and the reverse. Without the trigger, Play still lands
-on the real failure read-out, which is what the UI work wants to see.
+pacing, which codecs the panel takes. With the clock sink armed nothing decodes: it throws every AU
+away. Without it, a host FFmpeg carrying the desktop decoders plays for real (`player::desk`), and a
+Mac decodes things that television will not and the reverse. The failure read-out is reached only
+by a build without those decoders (`sim-linux`/`sim-wsl`, or a host prefix built before
+2026-10-10).
 Bugs it has already found in DEVICE code: the glyph upload
 ignored `SDL_Surface::pitch` (`text.rs`), `dev`/`remote`/`log` all hardcoded `/tmp`, and — from
 deriving the ABI table at a second pointer width — `AVSubtitleRect` was modelled with `flags`
@@ -1855,8 +1867,8 @@ an inline `char[32]`, and the shim dereferences it. No Rust panic, no log line, 
 gone. The remote FIFO's key and `ck:` tokens are safe because every field they set is a scalar; see
 `docs/search.md` §3.
 
-**Tier 2 — the device, which is still the real gate.** Nothing on the host decodes a frame or talks
-to Starfish/ACB, so playback correctness — and every pixel-level and perf question — is only
+**Tier 2 — the device, which is still the real gate.** Nothing on the host talks to Starfish/ACB, and
+the desktop decoder says nothing about LG's, so playback correctness — and every pixel-level and perf question — is only
 observable as behavior on the TV. **Wake the TV first** (`wake-tv` skill) — asleep, every assertion
 fails as "no line found", which reads exactly like a total regression. **The panel rule (the
 owner's standing directive, restated 2026-09-07):** the television's PANEL is **OFF and the sound

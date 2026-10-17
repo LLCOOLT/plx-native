@@ -366,7 +366,9 @@ jobs:
       # The PRODUCTION telemetry endpoints, compiled in from `vars` rather than `secrets`
       # DELIBERATELY — see build-package.yml's own comment on the point. Only SENTRY_AUTH_TOKEN,
       # passed as a secret below, can read or delete the project.
-      telemetry: production
+      # A fork with no telemetry backend sets the repository variable PLX_RELEASE_TELEMETRY to
+      # `none`; build-package.yml refuses that value in GLinnik21/plx-native itself.
+      telemetry: ${{ vars.PLX_RELEASE_TELEMETRY || 'production' }}
       artifact: release-assets
       homebrew-manifest: true
       source-asset: true
@@ -601,6 +603,41 @@ jobs:
             echo "The Channel compares versions by plain **string equality**, not semver — any"
             echo "change to the version string reads as an update."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # THE DESKTOP APPS (`desktop.yml`) build from the same tag beside the .ipk and are attached to the
+  # release AFTER it is published, by a job of their own: a Mac or Windows build that fails leaves the
+  # television release out and intact, and its red job here is the notice (re-run the failed jobs).
+  desktop:
+    name: build the desktop apps
+    needs: [guard, legal-gate]
+    if: always() && needs.guard.result == 'success' && needs['legal-gate'].result == 'success'
+    uses: ./.github/workflows/desktop.yml
+    with:
+      ref: ${{ needs.guard.outputs.tag }}
+      release: true
+
+  desktop-assets:
+    name: attach the desktop apps to the release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [guard, publish, desktop]
+    if: always() && needs.publish.result == 'success' && needs.desktop.result == 'success'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: desktop
+      - name: Upload the zips
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.guard.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ls -l desktop
+          gh release upload "$TAG" desktop/PlxNative-*.zip --clobber --repo "$GITHUB_REPOSITORY"
 
   # THE SITE'S DEMO FILM REFRESHES AFTER A STABLE RELEASE (and after nothing else: rc.yml and nightly.yml have no
   # such job). This job only DISPATCHES `site-video.yml`, which is its own run: it renders the release's tree for

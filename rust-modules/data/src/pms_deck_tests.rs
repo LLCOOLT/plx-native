@@ -1,5 +1,7 @@
 //! The Continue Watching row through the Home store: servers' lanes merged into one row that pages
-//! past its preview, a server that fails, and the edits the deck takes locally.
+//! past its preview, a server that fails, and the edits the deck takes locally. It also keeps only
+//! what can be continued (`spent_deck_entry`), and the in-flight read the deck's refetch schedule
+//! asks (`in_flight`).
 
 use super::*;
 use super::test_support::*;
@@ -379,4 +381,85 @@ fn every_landing_of_a_deck_read_publishes_so_the_row_needs_no_epoch_of_its_own()
     }
     assert!(moves >= 4, "the walk took {moves} moves");
     plx_plex::plex::reset_servers_for_test();
+}
+
+fn deck(body: &str) -> plx_plex::plex::MediaContainer {
+    let wrapped = format!(r#"{{"MediaContainer":{{"Hub":[{{"type":"mixed","hubIdentifier":"home.continue","Metadata":[{body}]}}]}}}}"#);
+    serde_json::from_str::<plx_plex::plex::Envelope>(&wrapped).expect("the deck parses").media_container
+}
+
+fn kept(body: &str) -> Vec<String> {
+    let build = project(&plx_plex::plex::MediaContainer::default(), &deck(body), sid(0));
+    build.cw.iter().map(|c| c.m.rk.clone()).collect()
+}
+
+const POSTER: &str = r#""thumb":"/t.jpg","art":"/a.jpg""#;
+
+#[test]
+fn a_finished_movie_the_server_still_lists_leaves_the_deck() {
+    let body = format!(
+        r#"{{"ratingKey":"1","type":"movie","title":"done","viewCount":1,"duration":6000,{POSTER}}},
+           {{"ratingKey":"2","type":"movie","title":"to the end","viewCount":2,"viewOffset":6000,"duration":6000,{POSTER}}},
+           {{"ratingKey":"3","type":"movie","title":"half","viewOffset":3000,"duration":6000,{POSTER}}},
+           {{"ratingKey":"4","type":"movie","title":"rewatching","viewCount":1,"viewOffset":3000,"duration":6000,{POSTER}}}"#
+    );
+    assert_eq!(kept(&body), ["3", "4"], "only what has a resume point left stays");
+}
+
+#[test]
+fn a_next_episode_stays_even_on_a_rewatch_but_an_unavailable_one_goes() {
+    let body = format!(
+        r#"{{"ratingKey":"10","type":"episode","title":"next","{POSTER_KEY}":"/p.jpg",{POSTER}}},
+           {{"ratingKey":"11","type":"episode","title":"rewatch next","viewCount":1,{POSTER}}},
+           {{"ratingKey":"12","type":"episode","title":"missing file","Media":[{{"Part":[{{"id":5}}]}}],{POSTER}}},
+           {{"ratingKey":"13","type":"episode","title":"no parts","Media":[{{"Part":[]}}],{POSTER}}},
+           {{"ratingKey":"14","type":"episode","title":"playable","Media":[{{"Part":[{{"key":"/library/parts/1/1/f.mkv"}}]}}],{POSTER}}}"#,
+        POSTER_KEY = "grandparentThumb"
+    );
+    assert_eq!(kept(&body), ["10", "11", "14"]);
+}
+
+#[test]
+fn a_show_with_every_episode_watched_has_no_next_episode() {
+    let body = format!(
+        r#"{{"ratingKey":"20","type":"show","title":"all seen","leafCount":8,"viewedLeafCount":8,{POSTER}}},
+           {{"ratingKey":"21","type":"show","title":"part seen","leafCount":8,"viewedLeafCount":3,{POSTER}}},
+           {{"ratingKey":"22","type":"season","title":"season seen","leafCount":4,"viewedLeafCount":4,{POSTER}}}"#
+    );
+    assert_eq!(kept(&body), ["21"]);
+}
+
+#[test]
+fn in_flight_is_the_single_flight_latch_of_any_source() {
+    let _g = plx_base::testlock::serial();
+    let (mut state, adapter) = (PmsState::default(), Arc::new(PmsAdapter::default()));
+    seed_for_test(&mut state, &adapter, 3, HubState::Ready);
+    assert!(!in_flight(&state), "a settled source asks nothing");
+    state.srcs[0].fetching = true;
+    assert!(in_flight(&state), "its fetch is out");
+}
+
+/// **Continue Watching's order after finishing an episode.** The server lists the show's next
+/// episode first, but an unstarted next episode carries no `lastViewedAt`; merging by each row's
+/// raw timestamp put it last. One server's deck must keep the server's order.
+#[test]
+fn a_next_up_episode_keeps_the_place_the_server_gave_it() {
+    let body = format!(
+        r#"{{"ratingKey":"30","type":"episode","title":"next up, just finished the one before",{POSTER}}},
+           {{"ratingKey":"31","type":"movie","title":"half a film","viewOffset":3000,"duration":6000,"lastViewedAt":1700000500,{POSTER}}},
+           {{"ratingKey":"32","type":"episode","title":"another show's next","lastViewedAt":0,{POSTER}}},
+           {{"ratingKey":"33","type":"episode","title":"older","viewOffset":10,"duration":6000,"lastViewedAt":1700000100,{POSTER}}}"#
+    );
+    let build = project(&plx_plex::plex::MediaContainer::default(), &deck(&body), sid(0));
+    let mut rows: Vec<&CwItem> = build.cw.iter().collect();
+    // The merge's own ordering rule.
+    rows.sort_by(|a, b| b.last_viewed_at.cmp(&a.last_viewed_at));
+    let order: Vec<&str> = rows.iter().map(|c| c.m.rk.as_str()).collect();
+    assert_eq!(order, ["30", "31", "32", "33"]);
+}
+
+#[test]
+fn deck_recency_carries_the_row_above_down() {
+    assert_eq!(deck_recency(&[0, 500, 0, 100, 900]), [i64::MAX, 500, 500, 100, 100]);
+    assert!(deck_recency(&[]).is_empty());
 }

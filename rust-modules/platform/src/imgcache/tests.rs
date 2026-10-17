@@ -519,3 +519,14 @@ fn a_root_that_is_not_private_keeps_the_mode_it_has() {
     assert!(probe_dir(&dir.0, false));
     assert_eq!(fs::metadata(&dir.0).unwrap().mode() & 0o7777, 0o755);
 }
+
+#[test]
+fn an_url_key_names_the_url_and_the_box_and_refuses_anything_else() {
+    let a = classify_url("http://192.0.2.20:8000/images/logo.png", 128, 128).unwrap();
+    assert_eq!(a, classify_url("http://192.0.2.20:8000/images/logo.png", 128, 128).unwrap());
+    assert_ne!(a, classify_url("http://192.0.2.20:8000/images/logo.png", 256, 256).unwrap());
+    assert_ne!(a, classify_url("http://192.0.2.20:8000/images/other.png", 128, 128).unwrap());
+    assert!(classify_url("file:///etc/passwd", 128, 128).is_none());
+    assert!(classify_url("/images/logo.png", 128, 128).is_none());
+    assert!(classify_url("http://192.0.2.20/x.png", 0, 128).is_none());
+}

@@ -962,6 +962,9 @@ pub(super) fn apply_deferred_capture(rec: &mut super::recorder::Recplay,
 /// harness is `controlled`.
 pub(super) fn restore_player_preferences(session: &plx_plex::plex::session::Session, controlled: bool) {
     plx_media::route::restore_install_rows(session);
+    // The install-wide cells outside `LIVE_ROWS` (`AutoSkipPref` / `ScreensaverPref` are `Install` rows).
+    plx_media::route::restore_auto_skip(session.auto_skip());
+    plx_media::route::restore_screensaver(session.screensaver());
     plx_media::route::restore_profile_rows(session, &plx_plex::plex::session::Seat::Unseated,
         plx_media::route::Overrides {
             quality: if controlled { None } else { crate::dev::playback_quality_override() },
@@ -1082,6 +1085,8 @@ pub(crate) unsafe fn construct(
         log("CreateWindow failed");
         return Err(1);
     }
+    #[cfg(feature = "hostsim")]
+    super::desktop_window::configure(win);
     let ctx = SDL_GL_CreateContext(win);
     if ctx.is_null() {
         log("GL ctx failed");
@@ -1314,6 +1319,12 @@ pub(crate) unsafe fn construct(
     }
     #[cfg(not(test))]
     plx_platform::i18n::initialize(session.language, controlled);
+    // The set's own zone, for the clock and the guide when `localtime` reads UTC
+    // (`plx_base::wallclock`). Not on a controlled replay, which asks no bus anything.
+    #[cfg(not(test))]
+    if !controlled {
+        plx_base::wallclock::set_system_offset(plx_platform::tv::system_utc_offset_s());
+    }
     let forced_login = !controlled && crate::dev::scenarios::login_forced();
     let dev_primary = (!forced_login && !dev_token.is_empty()).then(|| {
         let origin = crate::dev::scenarios::pms_origin()
@@ -1340,7 +1351,15 @@ pub(crate) unsafe fn construct(
     let mut pages = plx_ui::dispatch::Dispatcher::with_transition(Box::new(
         plx_ui::containers::transition::PageDip::new(),
     ));
+    // The desktop builds (the simulator, the Mac and Windows apps) draw the pointer chrome a mouse
+    // needs (`plx_ui::desk`); the television, which has a remote, never enables it.
+    #[cfg(feature = "hostsim")]
+    pages.desk.enable();
     restore_player_preferences(&session, controlled);
+    // Live TV's Tunarr server is an install-wide preference too: adopted now, loaded only when the
+    // Live TV page asks (`LiveTvCmd::Restore` starts no worker).
+    let origin = crate::dev::scenarios::livetv_origin().unwrap_or_else(|| session.livetv_source().to_owned());
+    bridge.livetv_run(plx_data::livetv::LiveTvCmd::Restore { origin });
     // dev: /tmp/plxnative-audioenh=off|boost|loudness — force the enhancement preference right after
     // the restore. Nobody is seated yet, so this sets the live cell alone (the door refuses to save
     // for nobody), which is all a dev-token boot, which never seats, gets. A boot that seats a
@@ -1800,9 +1819,10 @@ pub(crate) unsafe fn construct(
     // `route = Route::Account { over: BarHost::Home }`. The menu is a `ModalStack` surface since
     // phase 10 and the container does not exist yet at this point in the boot, so the trigger is
     // an ordinary per-frame arm — `dev::scenarios::acct_arm`, beside `itemmenu_arm`.)
-    // Home is the product landing after the credential gates; its Hero / Continue Watching
-    // rows own resume. Never override this route from an old last-page bookmark. The cleanup is
-    // intentionally unconditional so automated and ordinary upgrades retire the same state.
+    // Home is the product landing after the credential gates. The old last-page bookmark never
+    // overrides it; `resume_place::begin` (end of boot) may navigate onward from Home to a fresh
+    // place of the same profile. The cleanup is intentionally unconditional so automated and
+    // ordinary upgrades retire the same state.
     crate::coldstart::retire();
     // (`play_from`, the BACK trail and `nav_pending` were three run-loop locals here — the page
     // the live session returns to, the pages behind the one on screen, and the route change a fade
@@ -1896,9 +1916,15 @@ pub(crate) unsafe fn construct(
         last_route_reported,
         ptr,
         menu_play_await: None,
+        livetv: Default::default(),
+        resume: Default::default(),
+        ambient: Default::default(),
         prev,
         refresh_hubs,
         return_hold: Default::default(),
+        deck_refresh: super::deck_refresh::DeckRefresh::new(t0),
+        on_now: Default::default(),
+        clock_minute: 0,
         plaintext_upgrade: Default::default(),
         reread: Default::default(),
         ev,
@@ -2064,6 +2090,7 @@ pub(crate) unsafe fn construct(
     // mirror, so the boot says what it wants once, here, the moment the tree exists. A `Root` on
     // an empty stack mints the first entry, which is what makes this a hard CUT — there is no
     // outgoing screen to dip.
+    let lands_home = route == AppArg::Home;
     if controlled {
         app.pages.emit(plx_machine::machine::MachineId::Nav,
             plx_machine::machine::Fx::Nav(plx_machine::machine::NavOp::Root(route)));
@@ -2086,6 +2113,11 @@ pub(crate) unsafe fn construct(
         } else {
             maybe_ask_consent(&mut app.pages);
         }
+    }
+    // A launch that lands on Home may go back to where the last one left off (`resume_place`):
+    // never a controlled replay, and never over the first-run consent question.
+    if !controlled && lands_home && !owes_consent_question {
+        super::resume_place::begin(&mut app);
     }
     Ok(app)
 }

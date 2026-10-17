@@ -76,14 +76,16 @@
 use crate::plex::{CredentialPolicy, Origin, Scheme, ResolvePin};
 pub use plx_net::net::StreamEnd;
 
-/// The verb. Three, because three is what the Plex control plane uses: reads, the body-less
-/// `PUT /library/parts/{id}` that selects a track server-side, and the POSTs whose params ride the
-/// query string (`/:/timeline`, `/playQueues`).
+/// The verb. Four, because four is what the Plex control plane uses: reads, the body-less
+/// `PUT /library/parts/{id}` that selects a track server-side, the POSTs whose params ride the
+/// query string (`/:/timeline`, `/playQueues`), and the body-less `DELETE /playlists/{id}` that
+/// removes a virtual channel's playlist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Get,
     Put,
     Post,
+    Delete,
 }
 
 impl Method {
@@ -93,6 +95,7 @@ impl Method {
             Method::Get => "GET",
             Method::Put => "PUT",
             Method::Post => "POST",
+            Method::Delete => "DELETE",
         }
     }
 }

@@ -26,19 +26,19 @@ const SIM_TAG: &str = if cfg!(feature = "hostsim") {
 
 /// OPENGL | FULLSCREEN on the television, which owns the whole panel.
 ///
-/// The desktop asks for OPENGL | ALLOW_HIGHDPI — no fullscreen grab (hostile on a laptop) and
-/// **not RESIZABLE**: `surface::probe` reads the drawable once, at boot, so a dragged edge would
-/// leave the viewport describing a window that no longer exists, and the interface would sit in a
-/// 1920x1080-shaped corner of the new one with every pointer hit landing somewhere else. The window
-/// opens at an exact divisor of the canvas instead — see `desktop_window_size`.
+/// The desktop asks for OPENGL | RESIZABLE | ALLOW_HIGHDPI and opens windowed (a fullscreen grab
+/// at launch is hostile on a laptop; `desktop_window` toggles it on request). Resizing is safe
+/// because the canvas is drawn offscreen at a fixed size and only scaled into the window
+/// (`surface::probe`), so a dragged edge never changes what the renderer sized. The window opens at
+/// an exact divisor of the canvas — see `desktop_window_size`.
 ///
 /// ALLOW_HIGHDPI is what makes that divisor land on a **1:1 surface** on the Mac people actually
 /// have: without it a Retina display gives a drawable equal to the window in POINTS, which the
 /// compositor then doubles, so the whole interface is an upscale of a half-size render. With it,
-/// the 960x540-point window `desktop_window_size` picks on a laptop has a 1920x1080 drawable —
-/// `surface::scale() == 1.0`, the same 1:1 texel contract the television gets.
+/// the 960x540-point window `desktop_window_size` picks on a laptop has a 1920x1080 drawable, and
+/// the 1920x1080 canvas is copied into it texel for texel.
 const SDL_WINDOW_FLAGS: u32 = if cfg!(feature = "hostsim") {
-    0x2 | 0x2000
+    0x2 | 0x20 | 0x2000
 } else {
     0x2 | 0x1
 };
@@ -117,9 +117,16 @@ pub(crate) mod clock;
 mod clock_notice;
 mod recorder;
 mod window_activity;
+#[cfg(feature = "hostsim")]
+mod desktop_window;
 pub(crate) mod events;
 pub(crate) mod lifecycle;
 pub(crate) mod playback;
+pub(crate) mod livetv;
+pub(crate) mod ambient;
+pub(crate) mod resume_place;
+pub(crate) mod deck_refresh;
+pub(crate) mod on_now;
 mod preferences;
 pub(crate) mod input;
 pub(crate) mod bridge;
@@ -289,6 +296,12 @@ pub(crate) struct App {
     /// already finished by then). See `input::menu_play_tick`, driven every frame beside
     /// `pump_detail()` (`app/run.rs`).
     pub(crate) menu_play_await: Option<MenuPlayAwait>,
+    /// **Live TV's tuner** (`app::livetv`): the stream probe in flight and the re-tune schedule.
+    pub(crate) livetv: livetv::LiveTuner,
+    /// Reopen where the last session left off (`resume_place`).
+    pub(crate) resume: resume_place::ResumePlace,
+    /// The ambient screensaver (`ambient`).
+    pub(crate) ambient: ambient::Ambient,
     pub(crate) prev: u32,
     /// A playback exit is owed a re-read of Home's hubs and every library's shelves. Armed by
     /// `exit_player`; spent by `playback_tick` once the stop's `stopped` POST has landed
@@ -297,6 +310,13 @@ pub(crate) struct App {
     pub(crate) refresh_hubs: bool,
     /// The return from the player to Home waiting on that refetch (`playback::ReturnHold`).
     pub(crate) return_hold: playback::ReturnHold,
+    /// When Continue Watching is refetched: after a playback stops, when Home is shown again or
+    /// the app is foregrounded, and on a cadence while Home is visible (`deck_refresh`); a playback exit's own refetch is `refresh_hubs` above.
+    pub(crate) deck_refresh: deck_refresh::DeckRefresh,
+    /// Home's On Now shelf, rebuilt from the Live TV guide when it can have moved (`on_now`).
+    pub(crate) on_now: on_now::OnNowFeed,
+    /// The wall-clock minute the top bar's clock last showed (`bridge::clock_minute_moved`).
+    pub(crate) clock_minute: i64,
     /// The HTTPS retry for servers on a plaintext grant (`plex::grant::UpgradeRetry`), stepped
     /// every frame beside the view-state pump (`app/run.rs`).
     pub(crate) plaintext_upgrade: plx_plex::plex::grant::UpgradeRetry,

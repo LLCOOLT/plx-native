@@ -62,10 +62,6 @@ pub(super) fn rollback_seconds(ps: &mut PlaybackSession) -> Option<i64> {
     rollback_original_recovery(ps).map(|rollback| rollback.offset_ns / 1_000_000_000)
 }
 
-// `test_original_candidate` lives in `route::decision` (beside `enhancement_test_session`, a seam
-// the layers above call, which cannot name this `cfg(test)`-only module).
-pub(super) use super::test_original_candidate;
-
 // ---- the playing item's SERVER: captured once, carried by value ---------------------------
 // A ratingKey, a Part id, a Stream id, a playQueueID and a resume point are all keys on ONE
 // server. Every PMS call in this file used to find its server by asking which one was current
@@ -428,6 +424,8 @@ pub(super) fn fourk_item_with_subs(
         markers: Vec::new(),
         chapters: Vec::new(),
         hdr: false,
+        versions: Vec::new(),
+        media_index: 0,
     }
 }
 

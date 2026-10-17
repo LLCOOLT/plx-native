@@ -31,6 +31,8 @@ mod servers;
 mod hubs;
 mod library;
 pub mod collections;
+mod playlists; // a virtual channel's playlist: create, edit, replace items, delete
+pub use playlists::PLAYLIST_ITEMS_MAX;
 /// Agent-backed subtitle search & download. `docs/pms-api.md` §8 is the verified contract; the
 /// bundled OpenAPI spec is wrong about this endpoint and must not be read as authority for it.
 pub mod subtitles;
@@ -229,7 +231,7 @@ pub use servers::{
 // wire DTOs, so they are re-exported by name (route.rs names the row in `Plan`/`QueueInfo` — the
 // rest of `timeline` is reached through `Client`'s methods and needs none).
 #[allow(unused_imports)]
-pub use timeline::{queue_index_of, QueueRow};
+pub use timeline::{next_after as queue_next_after, queue_index_of, QueueRow, QUEUE_WINDOW};
 // DP_AUDIO_CODECS is defined in `devcaps`, which intersects it with the device's own codec
 // table, and re-exported here — normal routing and its profile read the same codec and channel
 // limits.
@@ -241,5 +243,5 @@ pub use timeline::{queue_index_of, QueueRow};
 #[allow(unused_imports)]
 pub use transcoder::{
     DP_AUDIO_CODECS, DP_SUBTITLE_CODECS, LinkPolicy, direct_play_video_codecs, is_dp_audio, is_dp_audio_track,
-    is_dp_subtitle, link_policy,
+    is_dp_subtitle, link_policy, media_index_for, set_media_index,
 };

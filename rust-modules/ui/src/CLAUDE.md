@@ -378,6 +378,10 @@ presentation in a design pass.
    Transport is driven by REMOTE KEYS, which must genuinely work. Any `<<` / `>>` added must be a
    small glyph in that same indicator slot at the clock's cap height — never a control, and never a
    fourth entry in the HUD control row (`appkit/player_hud.rs`'s `BTN_N`, currently 3).
+   **This verdict is the television's.** A desktop mouse has no transport keys, so the desktop
+   builds draw a transport of their own — only while the pointer is live, which webOS never makes
+   it (see "The desktop pointer chrome" below). It is not a fourth row entry and changes nothing
+   the television draws.
 
 4. **Failure read-outs are never red — the app does not scold.** A failed verdict is inked bold at
    `size::TITLE` in `theme::TEXT_SECONDARY`, per the design system's `StatusOverlay` contract.
@@ -392,6 +396,34 @@ presentation in a design pass.
    field is the standing example: its focus is carried by INK ALONE — no capsule, rim, rule, plate
    or focus pop — and an accent underline was rejected on sight. A punch-list line like "make focus
    more visible" is satisfied WITHIN the contract (widen the ink step), never with a new primitive.
+
+## The desktop pointer chrome (`desk.rs`) — buttons a remote has and a mouse does not
+
+A remote carries BACK, play/pause, the skip keys and the volume rocker as hardware, so this
+interface never drew them. The desktop builds (the simulator, the Mac and Windows apps) do, and
+only there: the desktop port calls `Dispatcher::desk.enable()` at boot (`app::boot`, under
+`hostsim`), and every desktop-only control is drawn and registered only while
+`DrawFrame::pointer` is LIVE — enabled, a pointer has moved, and no D-pad press has taken over since
+(`HitMap::pointer_at`). A television, and a desktop driven by keys, never sees one. What exists:
+
+- **Global buttons on a pushed page** — back, Search, Settings — drawn by the DISPATCHER above a
+  page whose argument answers `ScreenArg::pointer_chrome()` (the app's content pages), and the
+  back arrow alone above an open SURFACE that answers it (Settings, full-screen, with nothing
+  outside it to click), keyed in the `desk::DESK_BASE` namespace. A click on one is intercepted in ingest and queued
+  (`Desk::take`) for the application, which performs it through the remote's and the strip's own
+  paths (`app::run::desk_actions`); no page ever receives it.
+- **A card section's buttons** (`cards::Shelf`, `cards::Grid`): the paging arrows and a hovered
+  card's ▶ and ⋯. Their stops are keyed by a CARD and carry what the click means —
+  `Activate::Focus` (move focus there; the section's reveal pages the strip), `Activate::Hold` (a
+  hold delivered at once: the page's own item-menu path) and `Activate::Play`
+  (`ScreenEvent::PlayCard`). A card wears ▶ / ⋯ only where its `CardSource` says
+  `playable` / `has_menu`, so a screen that has not taught its source those facts — and answered
+  `PlayCard` — draws neither.
+- **The player's desktop transport** (`appkit::player_hud::DeskCtl`), see rule 3 above.
+
+Every one is a `widgets::CircleButton` through `desk::draw_button`, hover drawn as the face's focus;
+none parks focus on hover (`Hover::Ignore`). A new pointer-only control follows the same two
+rules: gate it on `DrawFrame::pointer`, and make its click the path a key already takes.
 
 ## The route family says where BACK goes ONCE, as a crumb
 

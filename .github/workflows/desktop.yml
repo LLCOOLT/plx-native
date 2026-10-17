@@ -1,0 +1,244 @@
+name: Desktop apps
+
+# Builds the two desktop downloads — `PlxNative.app` for macOS (`ci/mkmacapp.py`) and the
+# `PlxNative/` folder for Windows (`ci/mkwinapp.py`) — each a zip that starts on a machine with
+# none of this repository's toolchain on it. Both are the `hostsim` build with the dev features
+# off, decoding with the bundled FFmpeg's desktop half (`player::desk`).
+#
+# On a pull request or a push to main the zips are workflow artifacts, kept for two weeks, so a
+# change can be tried on real hardware before it ships. `release.yml` calls this workflow with the
+# release tag and `release: true` and attaches the zips to the GitHub Release after the television
+# package is published: a desktop build that fails never holds the .ipk back.
+#
+# UNSIGNED, both of them, and the notes say so: macOS Gatekeeper and Windows SmartScreen each ask
+# for a confirmation on first launch (`docs/macos-app.md`, `docs/windows-app.md`). Signing needs a
+# Developer ID and a code-signing certificate this project does not hold.
+
+on:
+  push:
+    branches: [main]
+    paths: &desktop_paths
+      - '.github/workflows/desktop.yml'
+      - 'Makefile'
+      - 'rust-modules/**'
+      - '!rust-modules/**/*.md'
+      - 'src/svg.c'
+      - 'src/ass.c'
+      - 'vendor/nanosvg/**'
+      - 'pkg/appfont*.ttf'
+      - 'pkg/OFL.txt'
+      - 'pkg/le-roots.pem'
+      - 'ci/build-ffmpeg.sh'
+      - 'ci/stage-host-ffmpeg.sh'
+      - 'ci/ffabi-assert.c'
+      - 'ci/build-libass.sh'
+      - 'ci/build-libass.py'
+      - 'ci/libass-dependencies.json'
+      - 'ci/mkmacapp.py'
+      - 'ci/mkwinapp.py'
+      - 'docs/macos-app-readme.md'
+      - 'docs/windows-app.md'
+  pull_request:
+    paths: *desktop_paths
+  # By hand: build any branch (`ref` empty = the dispatched commit). With `release` and
+  # `attach_to` (an existing tag) it builds the released configuration and attaches the zips to
+  # that release, uploaded by the workflow's own token — for a release whose desktop jobs failed
+  # after the television package was published (v0.13.0: a Makefile fix landed after the tag).
+  # The attach job refuses a zip whose version is not the tag's.
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Build the released version (PLX_RELEASE=1, RELEASE=1).
+        type: boolean
+        default: false
+      attach_to:
+        description: Attach the zips to this existing release tag (needs release).
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      ref:
+        description: The tag or commit to build.
+        type: string
+        required: true
+      release:
+        description: Build the released version (PLX_RELEASE=1, RELEASE=1).
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  macos:
+    name: macOS app (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    # A cold FFmpeg build (a ci/build-ffmpeg.sh change) plus libass plus a release cargo build.
+    timeout-minutes: 60
+    env:
+      PLX_RELEASE: ${{ inputs.release && '1' || '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Install SDL
+        timeout-minutes: 15
+        run: brew install sdl2_ttf cmake pkg-config nasm
+      - id: toolchain
+        name: Identify the host toolchain
+        run: echo "id=$(./ci/host-toolchain-id.sh)" >> "$GITHUB_OUTPUT"
+      - name: Cache the host FFmpeg build tree
+        # The same entry `simulators.yml` keeps (same key), which explains why it is the script's
+        # work tree and not the prefix.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/plxnative/ffmpeg
+          key: host-ffmpeg-work-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('ci/build-ffmpeg.sh', 'ci/arm-cc.py', 'ci/check-link-evidence.py') }}
+      - name: Cache the host libass stack
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: vendor/libass-prefix-host
+          key: host-libass-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('ci/build-libass.sh', 'ci/build-libass.py', 'ci/libass-dependencies.json', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', 'src/ass.c', 'src/ass_composite.h', 'include/ass.h') }}
+      - name: Cache the libass source tarballs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: vendor/libass-sources
+          key: host-libass-sources-${{ hashFiles('ci/libass-dependencies.json') }}
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          workspaces: rust-modules -> target-macapp
+          key: desktop-macos-${{ matrix.arch }}
+      - name: Build PlxNative.app
+        run: make ${{ inputs.release && 'RELEASE=1' || '' }} macapp-zip
+      - name: The bundle starts
+        # The packaged binary, from the bundle, with nothing of the checkout on its search path:
+        # `--version` exits before a window opens, so this is the loader's verdict on the bundle.
+        run: pkg/PlxNative.app/Contents/MacOS/PlxNative --version
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-macos-${{ matrix.arch }}
+          path: pkg/PlxNative-*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows app (x64)
+    runs-on: windows-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      PLX_RELEASE: ${{ inputs.release && '1' || '' }}
+      RELEASE: ${{ inputs.release && '1' || '' }}
+      # `host_link.rs` compiles `src/svg.c` with `$CC`; MinGW-w64 installs `gcc`, not `cc`.
+      CC: gcc
+      # Link with MSYS2's MinGW-w64 and its C runtime, the one SDL2, curl and FFmpeg were built
+      # against, rather than the copy rustup's `rust-mingw` component carries.
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS: -C link-self-contained=no
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: MINGW64
+          # The runner's own Rust (rustup) stays reachable from the MSYS2 shell.
+          path-type: inherit
+          update: false
+          install: >-
+            make diffutils
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-nasm
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_ttf
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-python
+      - name: Add the MinGW Rust target
+        run: rustup target add x86_64-pc-windows-gnu
+      - name: Cache the host FFmpeg build tree
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/plxnative/ffmpeg
+          key: host-ffmpeg-work-windows-mingw64-${{ hashFiles('ci/build-ffmpeg.sh', 'ci/arm-cc.py', 'ci/check-link-evidence.py') }}
+      - name: Build the bundled FFmpeg (demux + desktop decode, D3D11VA)
+        run: HOST=1 ci/build-ffmpeg.sh
+      - name: The decode ABI matches the Rust offsets
+        # `ci/ffabi-assert.c` pins every AVFrame / AVCodecContext offset `player::desk::ffdec`
+        # reads; Windows is LLP64, so this is the check that the 64-bit numbers hold there too.
+        run: gcc -I vendor/ffmpeg-prefix-host/include -std=c11 -c ci/ffabi-assert.c -o /dev/null
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          workspaces: rust-modules -> target-winapp
+          key: desktop-windows
+      - name: Build PlxNative.exe
+        run: |
+          CARGO_INCREMENTAL=0 cargo build --manifest-path rust-modules/Cargo.toml \
+            --target-dir rust-modules/target-winapp --target x86_64-pc-windows-gnu \
+            --release --no-default-features --features hostsim --bin plxnative-sim
+      - name: Assemble PlxNative/ and its zip
+        run: |
+          python ci/mkwinapp.py \
+            --exe rust-modules/target-winapp/x86_64-pc-windows-gnu/release/plxnative-sim.exe \
+            --ffmpeg "$(cygpath -m vendor/ffmpeg-prefix-host/bin)" \
+            --mingw "$(cygpath -m /mingw64/bin)" \
+            --zip
+      - name: The folder starts
+        # From a shell with no MinGW on PATH, so every DLL the loader wants must be in the folder.
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\Windows\System32;C:\Windows"
+          $p = Start-Process -FilePath pkg\PlxNative\PlxNative.exe -ArgumentList '--version' -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { throw "PlxNative.exe --version exited $($p.ExitCode)" }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-windows-x64
+          path: pkg/PlxNative-*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  attach:
+    name: attach the zips to an existing release
+    if: github.event_name == 'workflow_dispatch' && inputs.release && inputs.attach_to != ''
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: desktop
+      - name: Upload the zips
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.attach_to }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          ls -l desktop
+          for zip in desktop/PlxNative-*.zip; do
+            case "$(basename "$zip")" in
+              "PlxNative-${TAG#v}-"*) ;;
+              *) echo "::error::$zip does not carry ${TAG#v}, the version of $TAG"; exit 1 ;;
+            esac
+          done
+          gh release upload "$TAG" desktop/PlxNative-*.zip --clobber --repo "$GITHUB_REPOSITORY"

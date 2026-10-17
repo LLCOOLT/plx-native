@@ -128,8 +128,8 @@ fn recompute() {
 /// **Supersampled rendering for high-resolution simulator captures** — `PLXNATIVE_RENDER_SCALE=<n>`,
 /// an integer 1..=4, read once. The simulator only: a television always renders at 1.
 ///
-/// At n > 1 the frame is drawn into an offscreen `n*1920 x n*1080` framebuffer ([`default_fb`])
-/// instead of the window, so a shot is a real `n`x render rather than an upscale — the window's own
+/// The desktop always draws into an offscreen `n*1920 x n*1080` framebuffer ([`default_fb`]; see
+/// [`probe`]), so at n > 1 a shot is a real `n`x render rather than an upscale — the window's own
 /// drawable is capped by the display it sits on. The rasterised caches that assume 1:1 texels
 /// (glyphs, icon masks, poster requests) consult this to rasterise at `n`x and draw at the same
 /// logical size; layout never sees it.
@@ -219,12 +219,17 @@ unsafe fn bind_framebuffer(fbo: u32) {
 
 #[cfg(feature = "hostsim")]
 static SS_FBO: AtomicU32 = AtomicU32::new(0);
-/// The WINDOW's own mapping while supersampling: the rect the offscreen frame is blitted into and
-/// the scale pointer coordinates are converted with. Unused (and zero) when [`SS_FBO`] is 0.
+/// The WINDOW's own mapping while drawing offscreen: the rect, in drawable pixels, the frame is
+/// blitted into, and the drawable-pixel scale of the canvas inside it. Unused (and zero) when
+/// [`SS_FBO`] is 0. Rewritten by [`window_resized`] whenever the window changes size.
 #[cfg(feature = "hostsim")]
 static WIN_VIEW: [AtomicI32; 4] = [const { AtomicI32::new(0) }; 4];
 #[cfg(feature = "hostsim")]
 static WIN_SCALE_BITS: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+/// Window points per drawable pixel (`SDL_GetWindowSize` over `SDL_GL_GetDrawableSize`): 0.5 on a
+/// Retina display, 1 elsewhere. SDL reports the pointer in points and the blit speaks pixels.
+#[cfg(feature = "hostsim")]
+static WIN_POINTS_BITS: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 
 #[cfg(feature = "hostsim")]
 extern "C" {
@@ -259,6 +264,9 @@ extern "C" {
         filter: u32,
     );
     fn glDisable(cap: u32);
+    fn glGetFloatv(pname: u32, data: *mut f32);
+    fn glClearColor(r: f32, g: f32, b: f32, a: f32);
+    fn glClear(mask: u32);
 }
 
 /// Create the `n`x offscreen target and leave it bound. `None` (and nothing bound) if the driver
@@ -285,9 +293,9 @@ unsafe fn create_supersample_fb(w: c_int, h: c_int) -> Option<u32> {
     Some(f)
 }
 
-/// Downscale the finished offscreen frame into the window so the loop still presents something to
-/// look at, then rebind the offscreen target for the next frame. Call after the shot, before the
-/// swap. A no-op unless supersampling.
+/// Scale the finished offscreen frame into the window, letterboxed, then rebind the offscreen
+/// target for the next frame. Call after the shot, before the swap. A no-op when drawing straight
+/// into the window (the fallback when the offscreen target was refused).
 #[cfg(feature = "hostsim")]
 pub fn present_supersampled() {
     let fbo = frame_fb();
@@ -301,6 +309,13 @@ pub fn present_supersampled() {
         glDisable(0x0C11);
         glBindFramebuffer(0x8CA8, fbo); // READ
         glBindFramebuffer(0x8CA9, 0); // DRAW
+        // The bars around a letterboxed frame are the window's own pixels, and nothing else
+        // paints them: black, without disturbing the clear colour the renderer set for itself.
+        let mut clear = [0f32; 4];
+        glGetFloatv(0x0C22, clear.as_mut_ptr()); // GL_COLOR_CLEAR_VALUE
+        glClearColor(0.0, 0.0, 0.0, 1.0);
+        glClear(0x4000);
+        glClearColor(clear[0], clear[1], clear[2], clear[3]);
         glBlitFramebuffer(
             vx,
             vy,
@@ -320,17 +335,18 @@ pub fn present_supersampled() {
 /// `(scale, vx, vy)` from window pixels to the canvas — the viewport's own unless supersampling,
 /// when the frame is drawn offscreen and the pointer still lives in the window.
 #[inline]
-fn pointer_map() -> (f32, i32, i32) {
+fn pointer_map() -> (f32, f32, f32) {
     #[cfg(feature = "hostsim")]
     if frame_fb() != 0 {
+        let points = f32::from_bits(WIN_POINTS_BITS.load(Ordering::Relaxed));
         return (
-            f32::from_bits(WIN_SCALE_BITS.load(Ordering::Relaxed)),
-            WIN_VIEW[0].load(Ordering::Relaxed),
-            WIN_VIEW[1].load(Ordering::Relaxed),
+            f32::from_bits(WIN_SCALE_BITS.load(Ordering::Relaxed)) * points,
+            WIN_VIEW[0].load(Ordering::Relaxed) as f32 * points,
+            WIN_VIEW[1].load(Ordering::Relaxed) as f32 * points,
         );
     }
     let (vx, vy, _, _) = viewport();
-    (scale(), vx, vy)
+    (scale(), vx as f32, vy as f32)
 }
 
 /// Physical window pixels -> the authored 1920x1080 canvas: the exact inverse of [`viewport`].
@@ -344,7 +360,7 @@ fn pointer_map() -> (f32, i32, i32) {
 #[inline]
 pub fn to_logical(px: f32, py: f32) -> (f32, f32) {
     let (s, vx, vy) = pointer_map();
-    ((px - vx as f32) / s, (py - vy as f32) / s)
+    ((px - vx) / s, (py - vy) / s)
 }
 
 /// The authored canvas -> physical window pixels. The inverse of [`to_logical`], for the one
@@ -354,7 +370,57 @@ pub fn to_logical(px: f32, py: f32) -> (f32, f32) {
 #[inline]
 pub fn to_physical(lx: f32, ly: f32) -> (f32, f32) {
     let (s, vx, vy) = pointer_map();
-    (lx * s + vx as f32, ly * s + vy as f32)
+    (lx * s + vx, ly * s + vy)
+}
+
+/// Is the desktop window fullscreen right now? Written by the desktop port on every window event
+/// and toggle (`app::desktop_window`); read by the player's desktop fullscreen control for its
+/// glyph. Always `false` on a television, which owns the whole panel and has no window to toggle.
+static FULLSCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn fullscreen() -> bool {
+    FULLSCREEN.load(Ordering::Relaxed)
+}
+
+pub fn set_fullscreen(full: bool) {
+    FULLSCREEN.store(full, Ordering::Relaxed);
+}
+
+/// The window changed size, display or fullscreen state: re-letterbox the offscreen frame into
+/// its new drawable and re-derive the pointer mapping. Nothing the renderer sized is touched (see
+/// [`probe`]). A no-op without the offscreen target.
+#[cfg(feature = "hostsim")]
+pub fn window_resized(win: *mut c_void) {
+    if frame_fb() == 0 {
+        return;
+    }
+    let (mut ww, mut wh, mut dw, mut dh) = (0, 0, 0, 0);
+    unsafe {
+        SDL_GetWindowSize(win, &mut ww, &mut wh);
+        SDL_GL_GetDrawableSize(win, &mut dw, &mut dh);
+    }
+    if dw <= 0 || dh <= 0 {
+        (dw, dh) = (ww, wh);
+    }
+    if dw <= 0 || dh <= 0 {
+        return;
+    }
+    let (view, s) = letterbox(dw, dh);
+    for (a, v) in WIN_VIEW.iter().zip(view) {
+        a.store(v, Ordering::Relaxed);
+    }
+    WIN_SCALE_BITS.store(s.to_bits(), Ordering::Relaxed);
+    let points = if ww > 0 { ww as f32 / dw as f32 } else { 1.0 };
+    WIN_POINTS_BITS.store(points.to_bits(), Ordering::Relaxed);
+}
+
+/// The canvas scaled uniformly and centred in a `dw x dh` surface: the rect and the scale.
+/// [`recompute`]'s arithmetic, for a surface that is not the one the renderer draws into.
+#[cfg(feature = "hostsim")]
+fn letterbox(dw: i32, dh: i32) -> ([i32; 4], f32) {
+    let s = (dw as f32 / LOGICAL_W).min(dh as f32 / LOGICAL_H);
+    let (w, h) = ((LOGICAL_W * s).round() as i32, (LOGICAL_H * s).round() as i32);
+    ([(dw - w) / 2, (dh - h) / 2, w, h], s)
 }
 
 /// Read back what we were actually given, once, after the GL context exists.
@@ -374,32 +440,33 @@ pub fn probe(win: *mut c_void) {
             dw = ww;
             dh = wh;
         }
+        // **The desktop draws the canvas offscreen, at a size the window does not choose.** The
+        // frame is rendered into an `n*1920 x n*1080` framebuffer (`n` is [`render_scale`], 1
+        // unless a capture asked for more) and [`present_supersampled`] scales it into the window.
+        // That is what lets the window be resized and go fullscreen: every renderer cache sized
+        // from [`viewport`] (the blur chain, the frame caches, the glyph raster) keeps the one
+        // size it was built at for the life of the process, and only the blit and the pointer
+        // mapping follow the window ([`window_resized`]). It is also the television's own 1:1
+        // texel contract, whatever the window's size. If the driver refuses the framebuffer, the
+        // frame goes straight into the window as it always did, at the size it opened at.
         #[cfg(feature = "hostsim")]
-        if render_scale() > 1 && dw > 0 && dh > 0 {
+        if dw > 0 && dh > 0 {
             let n = render_scale();
             let (sw, sh) = (LOGICAL_W as i32 * n, LOGICAL_H as i32 * n);
             match create_supersample_fb(sw, sh) {
                 Some(f) => {
-                    // The window's mapping first, computed exactly as the viewport would be.
-                    DRAWABLE_W.store(dw, Ordering::Relaxed);
-                    DRAWABLE_H.store(dh, Ordering::Relaxed);
-                    recompute();
-                    let (vx, vy, vw, vh) = viewport();
-                    for (a, v) in WIN_VIEW.iter().zip([vx, vy, vw, vh]) {
-                        a.store(v, Ordering::Relaxed);
-                    }
-                    WIN_SCALE_BITS.store(scale().to_bits(), Ordering::Relaxed);
                     SS_FBO.store(f, Ordering::Relaxed);
+                    window_resized(win);
                     log(&format!(
-                        "surface: supersampling x{n} — drawing into an offscreen {sw}x{sh} \
-                         framebuffer, shown downscaled in the {dw}x{dh} window"
+                        "surface: drawing into an offscreen {sw}x{sh} framebuffer (x{n}), \
+                         scaled into the {dw}x{dh} window"
                     ));
                     dw = sw;
                     dh = sh;
                 }
                 None => log(&format!(
-                    "surface: PLXNATIVE_RENDER_SCALE={n} refused — {sw}x{sh} framebuffer \
-                     incomplete; rendering to the window"
+                    "surface: the {sw}x{sh} offscreen framebuffer was refused (incomplete); \
+                     rendering to the window, which then cannot follow a resize"
                 )),
             }
         }

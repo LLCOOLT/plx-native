@@ -194,7 +194,7 @@ have always accepted keyboard keys), plus space=pause, `p`=play, `s`=stop, backs
 
 **`back` at a ROOT is the platform's root press** (`tv::home::go_home`) — Home's root, the
 who's-watching picker and the QR sign-in — and it does not end the process. **On the simulator it
-is a LOG LINE and nothing else** (`gohome: no LS2 bus off-device …`): there is no webOS launcher to
+is a LOG LINE and nothing else** (`gohome: no system launcher on the desktop …`): there is no webOS launcher to
 hand a Mac window to, so the screen does not change and a `back` too many looks like a key that did
 nothing. That is the one part of this behaviour the simulator is structurally blind to; whether the
 television really shows its launcher and brings the SAME PROCESS back is a `tv-session` question —
@@ -317,14 +317,16 @@ Report these ONLY from the device, via the **`tv-session`** skill (and `wake-tv`
 - **Text rasterization truth.** Different FreeType, so stem/bar weight, hinting and the
   `theme::size` ladder stay device questions — `tools/font-hint-audit.py` and a device capture.
   The window is no longer at an arbitrary fitted scale (`scale≈0.86` was the old fitted size): it
-  opens at an exact divisor of the 1920x1080 canvas and is not resizable, so on a Retina display
-  the drawable is 1920x1080 and `scale` is exactly 1.0. Check the `surface:` line — it prints the
+  opens at an exact divisor of the 1920x1080 canvas, so on a Retina display the drawable is
+  1920x1080 and `scale` is exactly 1.0. It can be resized (the blit re-letterboxes) or made
+  fullscreen (F11, Ctrl+Cmd+F, Alt+Enter); read `scale` from the `surface:` line after either. Check the `surface:` line — it prints the
   drawable and the scale, and a 0.5 there means glyphs are downscaled and softer by construction.
 - **Anything about LG's DECODER** — resource-allocation refusals, the Load payload's Dolby
   declaration, `SOUND_ERROR_019`, frame pacing, which codecs the panel takes. The 29-symbol
-  Starfish/ACB seam does not exist off-device, so by default `player::ffi`'s host arm reports the
-  seam's own "no video path" failure and pressing Play lands on the app's real failure read-out —
-  correct behaviour, not a bug, and a convenient way to look at that screen.
+  Starfish/ACB seam does not exist off-device. By default the simulator's sink
+  (`player::ffi_host::HostSink`) decodes with the desktop's own FFmpeg (`player::desk`) and plays,
+  which proves nothing about LG's decoder. The seam's "no video path" read-out now needs a build
+  without the desktop decoders (`sim-linux`/`sim-wsl`).
 - ~~**Anything about video.**~~ **Narrowed twice, and the second time is recent.** Arm
   **`plxnative-clocksink`** in the instance root and the seam becomes a plant: access units are
   accepted and discarded and a presentation clock advances at real time, clamped to the last fed
@@ -373,10 +375,11 @@ device-verified" is a useful, honest status. "Verified" without a TV is not.
   corrupt it. The in-app shot needs no permission, works occluded, and is deterministic.
 - The window is not 1:1. `surface::probe` letterboxes 1920×1080 into whatever the drawable is, so
   shots come out at the viewport size (e.g. 1650×928). Fine for layout, wrong for pixel work.
-- Without `plxnative-clocksink` there is no `player` route to screenshot beyond the failure
-  read-out and the HUD's busy states. With it there is a real one, driven by a real stream — but
-  the video PLANE is empty, because the app decodes nothing and the wayland overlay is webOS-only:
-  the HUD sits over black. Arm `plxnative-simvideo` as well and a system `ffmpeg` child decodes
+- Without `plxnative-clocksink` the desktop decoder (`player::desk`) plays and draws the picture
+  under the UI, on a sound card's clock, so its frame times are not repeatable. With the clock sink
+  the route is driven by a real stream on the sink's own clock — but the video PLANE is empty,
+  because the clock sink decodes nothing and the wayland overlay is webOS-only: the HUD sits over
+  black. Arm `plxnative-simvideo` as well and a system `ffmpeg` child decodes
   the stream the clock sink accepts and composites it UNDER the UI (`player/sim_video.rs`). That
   is a screenshot facility for the documentation's player figure; it says nothing about LG's
   decoder, the video plane or picture timing on the television.

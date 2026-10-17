@@ -250,5 +250,13 @@
   "widgets.region.nl": "Paesi Bassi",
   "widgets.region.latin_america": "America Latina",
   "widgets.failure.play_auto": "Passa ad Automatico e riproduci",
-  "widgets.failure.change_quality": "Cambia qualità"
+  "widgets.failure.change_quality": "Cambia qualità",
+  "widgets.menu.tracks": "Audio e sottotitoli",
+  "widgets.menu.queue": "Coda di riproduzione",
+  "widgets.menu.queue_position": "{position} di {total}",
+  "widgets.queue.watched": "Visto",
+  "widgets.queue.left": "{minutes} min rimanenti",
+  "widgets.menu.version": "Versione",
+  "widgets.skip.intro_skipped": "Intro saltata · Indietro",
+  "widgets.skip.credits_skipped": "Titoli di coda saltati · Indietro"
 }

@@ -266,7 +266,7 @@ impl SearchScreen {
             let request = match tab {
                 0 => SearchReq::Tab(HomeTab::Home), 1 => SearchReq::Tab(HomeTab::Movies),
                 2 => SearchReq::Tab(HomeTab::Shows), 3 => return Handled::Yes,
-                4 => SearchReq::Account, _ => return Handled::No,
+                4 => SearchReq::Account, 5 => SearchReq::Tab(HomeTab::LiveTv), _ => return Handled::No,
             };
             self.keyboard(false, true, fx);
             fx.push(Fx::App(AppFx::Search(request)));
@@ -360,6 +360,17 @@ impl<H: SearchLike> Machine<H> for SearchScreen {
             ScreenEvent::PressHold(_) => {
                 if let Some(CardEvent::Hold(elem)) = card { return self.activate(elem, true, cx, fx); }
                 if let Some(key) = cx.focus.current { return self.activate(key.elem, true, cx, fx); }
+            }
+            // A desktop card's hover play button (`plx_ui::desk`): a library hit, from its resume point.
+            ScreenEvent::PlayCard(elem) => {
+                let key = FocusKey { entry: self.entry, elem: *elem };
+                let Some(Item::Media(media)) = self.selected_item(Some(key), cx)
+                    .filter(|item| matches!(item, Item::Media(m) if crate::registry::item_plays_directly(m))) else { return Handled::No };
+                self.remember(fx);
+                fx.push(Fx::App(AppFx::Search(SearchReq::Play {
+                    sid: media.sid, rk: media.rk.clone(), resume_ns: crate::registry::item_play_resume_ns(&media),
+                })));
+                return Handled::Yes;
             }
             ScreenEvent::Input(input) => match &input.kind {
                 InputKind::SystemKeyboard(up) => {

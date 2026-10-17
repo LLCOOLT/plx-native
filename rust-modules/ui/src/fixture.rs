@@ -72,6 +72,11 @@ impl ScreenArg for FixtureArg {
     fn title(&self) -> Option<&str> {
         None
     }
+    /// The pushed fixture page wears the desktop pointer chrome (`desk_tests`) — inert unless a
+    /// test enables it, exactly as on a television.
+    fn pointer_chrome(&self) -> bool {
+        matches!(self, FixtureArg::Page(_) | FixtureArg::Modal)
+    }
     fn same_instance(&self, other: &Self) -> bool {
         self == other
     }
@@ -813,7 +818,7 @@ impl Screen<FixtureHost> for FixtureModal {
         self.last_draw_alpha = f.page_alpha;
         self.last_navigation = super::screen::NavPresentation {
             page_alpha: f.page_alpha, chrome_alpha: f.chrome_alpha,
-            view_tab: f.view_tab, blur_amount: f.blur_amount,
+            view_tab: f.view_tab, blur_amount: f.blur_amount, pointer: f.pointer,
         };
         let p = f.painter;
         // One string, so a test can see whether this surface's text reached the glyph cache or
@@ -1058,6 +1063,7 @@ impl Rig<FixtureHost> for FixtureRig {
         super::screen::NavPresentation {
             page_alpha: self.page_alpha, chrome_alpha: self.chrome_alpha,
             view_tab: self.view_tab, blur_amount: self.blur_amount,
+            pointer: Default::default(),
         }
     }
     fn draw_chrome(&mut self, _arg: &FixtureArg, _parts: &CxParts<u32>,

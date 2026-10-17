@@ -163,11 +163,12 @@ fn every_tab_pill_round_trips_through_the_focus_packing() {
         (STRIP_SHOWS_ELEM, HomeReq::Tab(HomeTab::Shows)),
         (STRIP_SEARCH_ELEM, HomeReq::Tab(HomeTab::Search)),
         (STRIP_ACCOUNT_ELEM, HomeReq::Account),
+        (STRIP_LIVETV_ELEM, HomeReq::Tab(HomeTab::LiveTv)),
     ];
     for (elem, want) in cases {
         assert_eq!(HomeScreen::request_for_strip(elem), Some(want));
     }
-    assert_eq!(HomeScreen::request_for_strip(STRIP_ACCOUNT_ELEM + 1), None);
+    assert_eq!(HomeScreen::request_for_strip(STRIP_LIVETV_ELEM + 1), None);
     for page_key in [HERO_PLAY_ELEM, HERO_INFO_ELEM, FIRST_ITEM_ELEM] {
         assert_eq!(HomeScreen::request_for_strip(page_key), None);
     }
@@ -5235,4 +5236,14 @@ fn an_unchanged_refetch_leaves_the_billboard_exactly_as_it_was() {
         "{trace:?}"
     );
     assert_eq!(s.backdrop.tex.0, shown);
+}
+
+/// Home warms the shelf below the last one on screen — never a shelf already shown, never past
+/// the end.
+#[test]
+fn home_warms_the_shelf_just_below_the_screen() {
+    let row = |shown: &[bool]| shelves_beyond_screen(shown.iter().copied());
+    assert_eq!(row(&[false, true, true, false, false]), Some(3));
+    assert_eq!(row(&[true, true]), None);
+    assert_eq!(row(&[false, false]), None, "nothing on screen: nothing to anchor a lookahead on");
 }

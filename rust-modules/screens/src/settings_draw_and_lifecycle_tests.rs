@@ -45,6 +45,7 @@ fn nested_draw_preserves_navigation_at_rest_and_through_push_and_pop() {
 
     let navigation = NavPresentation {
         page_alpha: 0.21, chrome_alpha: 0.37, view_tab: Some(2), blur_amount: 0.63,
+        pointer: Default::default(),
     };
     let cases: &[(&str, f32, f32, bool, &[u32])] = &[
         ("rest after pop", 0.0, 0.0, false, &[2]),
@@ -177,10 +178,10 @@ fn every_root_detail_line_fits_a_known_good_width() {
         }
     }
     assert_eq!(
-        checked, 9,
+        checked, 10,
         "expected a detail line on exactly Favorite libraries, Video & playback, Audio & \
          subtitles, Language, Automatically Sign In, Play trailers automatically, Privacy & \
-         data, Legal notices, and About PlxNative — got {checked}; \
+         data, Legal notices, Live TV, and About PlxNative — got {checked}; \
          did the signed-in multi-user fixture stop building one of these rows?"
     );
 }

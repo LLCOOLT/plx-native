@@ -246,5 +246,13 @@
   "widgets.region.nl": "Niederlande",
   "widgets.region.latin_america": "Lateinamerika",
   "widgets.failure.play_auto": "Auf „Automatisch“ stellen und abspielen",
-  "widgets.failure.change_quality": "Qualität ändern"
+  "widgets.failure.change_quality": "Qualität ändern",
+  "widgets.menu.tracks": "Audio & Untertitel",
+  "widgets.menu.queue": "Wiedergabewarteschlange",
+  "widgets.menu.queue_position": "{position} von {total}",
+  "widgets.queue.watched": "Gesehen",
+  "widgets.queue.left": "noch {minutes} Min.",
+  "widgets.menu.version": "Version",
+  "widgets.skip.intro_skipped": "Intro übersprungen · Zurück",
+  "widgets.skip.credits_skipped": "Abspann übersprungen · Zurück"
 }

@@ -274,5 +274,17 @@
   "browse.clock.notice_year": "L’horloge de la TV semble incorrecte ({year}). Connecté grâce à la clé mémorisée.",
   "browse.clock.notice": "L’horloge de la TV semble incorrecte. Connecté grâce à la clé mémorisée.",
   "browse.clock.no_key": "L’horloge de cette TV semble incorrecte. Connectez la TV à internet une fois, puis réessayez.",
-  "browse.clock.key_changed": "La clé de votre serveur a changé. Connectez la TV à internet une fois pour que l’application puisse la vérifier de nouveau."
+  "browse.clock.key_changed": "La clé de votre serveur a changé. Connectez la TV à internet une fois pour que l’application puisse la vérifier de nouveau.",
+  "browse.menu.shuffle": "Lecture aléatoire",
+  "browse.detail.version": "Version",
+  "browse.home.watchlist": "Liste de suivi",
+  "browse.home.on_now": "En ce moment",
+  "browse.home.your_genres": "Ajouts récents dans vos genres",
+  "browse.menu.watchlist_add": "Ajouter à la liste de suivi",
+  "browse.menu.watchlist_remove": "Retirer de la liste de suivi",
+  "browse.home.playlists": "Listes de lecture",
+  "browse.home.channels": "Chaînes suggérées",
+  "browse.home.surprise_title": "Surprenez-moi",
+  "browse.home.surprise_why": "Une chaîne à laquelle vous ne penseriez pas",
+  "browse.menu.make_channel": "Créer une chaîne"
 }

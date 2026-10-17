@@ -860,7 +860,8 @@ const CACHE_GLYPHS: i32 = 1000;
 const CACHE_BITMAP_MIB: i32 = 24;
 
 plx_base::dynlib! {
-    native_ass: ["libass-plx-host.so.0", "libass-plx.so.0", "libass-plx.0.dylib"] {
+    // `libass-plx.dll`: the same shim, built as a DLL for the Windows desktop build.
+    native_ass: ["libass-plx-host.so.0", "libass-plx.so.0", "libass-plx.0.dylib", "libass-plx.dll"] {
         fn plx_ass_abi_version() -> u32;
         fn plx_ass_create(default_font: *const c_char) -> *mut c_void;
         fn plx_ass_destroy(ctx: *mut c_void);

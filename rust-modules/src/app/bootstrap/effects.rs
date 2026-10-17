@@ -28,7 +28,7 @@ fn home_command(command: &plx_screens::registry::HomeCmd) -> Value {
         HomeCmd::FocusGrid { row,col } => json!({"focus_grid":[row,col]}),
         HomeCmd::Hero => json!("hero"),
         HomeCmd::FocusStrip(tab) => json!({"focus_strip":match tab {
-            HomeTab::Home => "home", HomeTab::Movies => "movies", HomeTab::Shows => "shows", HomeTab::Search => "search" }}),
+            HomeTab::Home => "home", HomeTab::Movies => "movies", HomeTab::Shows => "shows", HomeTab::Search => "search", HomeTab::LiveTv => "livetv" }}),
         HomeCmd::Flip(delta) => json!({"flip":delta}),
         HomeCmd::SelectHero(index) => json!({"select_hero":index}),
         HomeCmd::PinHero(index) => json!({"pin_hero":index}),
@@ -170,8 +170,10 @@ fn content_request(request: &plx_screens::registry::ContentReq) -> Result<Value,
     use plx_screens::registry::{ContentPanel, ContentReq};
     Ok(match request {
         ContentReq::Push(arg) => json!({"push":content(arg)}),
+        ContentReq::PushShow { sid, rk, season } => json!({"push_show":{"sid":sid.raw(),"rk":rk,"season":season}}),
         ContentReq::Present(arg) => json!({"present":content(arg)}),
         ContentReq::Back => json!("back"),
+        ContentReq::Shuffle { sid, rk } => json!({"shuffle":{"sid":sid.raw(),"rk":rk}}),
         ContentReq::PreviewStart { sid, rk, part, vcodec, acodec, title } =>
             json!({"preview_start":{"sid":sid.raw(),"rk":rk,"part":part,
                 "vcodec":vcodec,"acodec":acodec,"title":title}}),
@@ -343,6 +345,7 @@ pub(crate) fn encode(effect: &Fx<super::super::bridge::AppHost>) -> Result<Value
                         ScreenEvent::Timer(id) => json!(id.0),
                         ScreenEvent::PressHold(id) | ScreenEvent::PressCommit(id) => json!(id.0),
                         ScreenEvent::Activate(elem) => json!(elem),
+                        ScreenEvent::PlayCard(elem) => json!({"play_card":elem}),
                         ScreenEvent::Input(event) => input(event)?,
                         ScreenEvent::StoreChanged(store, generation) => json!([store.0,generation]),
                         ScreenEvent::FocusMoved { from, to, by } => json!({"from":from.map(focus),

@@ -49,7 +49,7 @@
 //!   cache rather than keep a second copy of the session live.
 use super::origin::Origin;
 use super::probe::Location;
-pub use prefs::{effective, own_prefs, persist_profile_pref, put_own, stored_effective, tenure, AudioEnhancementsPref,
+pub use prefs::{AutoSkipPref, LiveTvChannelPref, LiveTvSourcePref, ScreensaverPref, effective, own_prefs, persist_profile_pref, put_own, stored_effective, tenure, AudioEnhancementsPref,
     DeckPressPref, DirectPlayModePref, HdrOverlayBrightnessPref, NextEpisodeModePref, Preferences, ProfilePrefs, ProfilePrefsPref,
     ProfilePrefsRecord, ProfileSetting, ProfileWrite, QualityPref, Row, Setting, SkipIntervalPref,
     SubtitlePositionPref, SubtitleSizePref, SubtitleTonePref, TrailerAutoplayPref};
@@ -1206,6 +1206,91 @@ pub enum DeckPress {
     Play,
 }
 
+/// Whether the player skips a marker segment by itself — install-wide, like [`SubtitleTone`].
+/// Absence is `Off`: the Skip Intro / Skip Credits pill every build before this preference offered,
+/// and nothing skipped without a press. `Intro` skips an intro segment the moment the playhead
+/// enters it; `IntroAndCredits` skips credits too — except a final credits segment with a queued
+/// successor while the Up Next countdown owns it (the countdown is the better offer, and skipping
+/// would start the next episode silently).
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoSkip {
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "intro")]
+    Intro,
+    #[serde(rename = "intro_credits")]
+    IntroAndCredits,
+}
+
+impl AutoSkip {
+    /// Every option, the order the picker lists them in.
+    pub const LADDER: [AutoSkip; 3] = [AutoSkip::Off, AutoSkip::Intro, AutoSkip::IntroAndCredits];
+
+    /// An in-memory index back to an option — out of range is the default, for the reason
+    /// [`SubtitleTone::from_index`] gives: the ladder can grow or shrink.
+    pub fn from_index(i: u8) -> AutoSkip {
+        Self::LADDER.get(i as usize).copied().unwrap_or_default()
+    }
+
+    pub fn index(self) -> u8 {
+        Self::LADDER.iter().position(|&m| m == self).unwrap_or(0) as u8
+    }
+
+    /// Does this setting skip an intro segment by itself?
+    pub fn skips_intro(self) -> bool {
+        matches!(self, AutoSkip::Intro | AutoSkip::IntroAndCredits)
+    }
+
+    /// Does this setting skip a credits segment by itself?
+    pub fn skips_credits(self) -> bool {
+        self == AutoSkip::IntroAndCredits
+    }
+}
+
+/// How long a browsing page must be left alone before it fades to the ambient screensaver
+/// (`app::ambient`) — install-wide, like [`AutoSkip`]. Absence is five minutes.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screensaver {
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "2m")]
+    Minutes2,
+    #[default]
+    #[serde(rename = "5m")]
+    Minutes5,
+    #[serde(rename = "10m")]
+    Minutes10,
+    #[serde(rename = "20m")]
+    Minutes20,
+}
+
+impl Screensaver {
+    /// Every option, the order the picker lists them in.
+    pub const LADDER: [Screensaver; 5] =
+        [Screensaver::Off, Screensaver::Minutes2, Screensaver::Minutes5, Screensaver::Minutes10, Screensaver::Minutes20];
+
+    /// An in-memory index back to an option; out of range is the default.
+    pub fn from_index(i: u8) -> Screensaver {
+        Self::LADDER.get(i as usize).copied().unwrap_or_default()
+    }
+
+    pub fn index(self) -> u8 {
+        Self::LADDER.iter().position(|&m| m == self).unwrap_or(2) as u8
+    }
+
+    /// The idle delay in minutes, `None` when the screensaver is off.
+    pub fn minutes(self) -> Option<u32> {
+        match self {
+            Screensaver::Off => None,
+            Screensaver::Minutes2 => Some(2),
+            Screensaver::Minutes5 => Some(5),
+            Screensaver::Minutes10 => Some(10),
+            Screensaver::Minutes20 => Some(20),
+        }
+    }
+}
+
 impl DeckPress {
     /// Every option, the order the picker lists them in.
     pub const LADDER: [DeckPress; 2] = [DeckPress::Details, DeckPress::Play];
@@ -2085,6 +2170,38 @@ where
     Ok(serde_json::from_value::<Option<Location>>(v).unwrap_or(None))
 }
 
+/// The auto-skip mode is a preference too: a spelling this build does not know degrades to Off.
+fn de_soft_auto_skip<'de, D>(d: D) -> Result<AutoSkip, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Ok(v) = serde_json::Value::deserialize(d) else {
+        return Ok(AutoSkip::default());
+    };
+    Ok(serde_json::from_value::<AutoSkip>(v).unwrap_or_default())
+}
+
+/// `skip_serializing_if` needs a function, not just `PartialEq` with `Default::default()`.
+fn is_default_auto_skip(mode: &AutoSkip) -> bool {
+    *mode == AutoSkip::default()
+}
+
+/// The screensaver delay is a preference too: a spelling this build does not know degrades to the
+/// default.
+fn de_soft_screensaver<'de, D>(d: D) -> Result<Screensaver, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Ok(v) = serde_json::Value::deserialize(d) else {
+        return Ok(Screensaver::default());
+    };
+    Ok(serde_json::from_value::<Screensaver>(v).unwrap_or_default())
+}
+
+fn is_default_screensaver(mode: &Screensaver) -> bool {
+    *mode == Screensaver::default()
+}
+
 /// A preference switch: garbage degrades to off rather than failing the enclosing [`Session`].
 fn de_soft_bool<'de, D>(d: D) -> Result<bool, D::Error>
 where
@@ -2264,6 +2381,42 @@ impl Session {
 
     pub fn hdr_overlay_brightness(&self) -> HdrOverlayBrightness {
         self.prefs.hdr_overlay_brightness
+    }
+
+    pub fn auto_skip(&self) -> AutoSkip {
+        self.prefs.auto_skip
+    }
+
+    pub fn with_auto_skip(&self, mode: AutoSkip) -> Self {
+        self.with_pref::<AutoSkipPref>(mode)
+    }
+
+    pub fn screensaver(&self) -> Screensaver {
+        self.prefs.screensaver
+    }
+
+    pub fn with_screensaver(&self, mode: Screensaver) -> Self {
+        self.with_pref::<ScreensaverPref>(mode)
+    }
+
+    pub fn livetv_source(&self) -> &str {
+        &self.prefs.livetv_source
+    }
+
+    pub fn with_livetv_source(&self, origin: &str) -> Self {
+        let mut next = self.clone();
+        next.prefs.livetv_source = origin.to_owned();
+        next
+    }
+
+    pub fn livetv_channel(&self) -> &str {
+        &self.prefs.livetv_channel
+    }
+
+    pub fn with_livetv_channel(&self, number: &str) -> Self {
+        let mut next = self.clone();
+        next.prefs.livetv_channel = number.to_owned();
+        next
     }
 
     pub fn audio_enhancements(&self) -> crate::plex::AudioEnhancements {
@@ -4378,12 +4531,19 @@ fn has_protected_authority() -> bool {
 /// difference.
 pub fn write_atomic(path: &std::path::Path, json: &[u8]) -> Result<(), WriteFailure> {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
     let Some(parent) = path.parent() else {
         return Err(WriteFailure::InvalidPath);
     };
     if let Ok(meta) = std::fs::symlink_metadata(path) {
+        #[cfg(unix)]
         if !meta.file_type().is_file() || meta.uid() != unsafe { libc::geteuid() } {
+            return Err(WriteFailure::NotOwned);
+        }
+        // No uid on Windows: the profile directory's ACL is the owner check (`plx_base::winfs`).
+        #[cfg(windows)]
+        if !meta.file_type().is_file() {
             return Err(WriteFailure::NotOwned);
         }
     }
@@ -4464,6 +4624,13 @@ pub struct CandidateDiagnostic {
     pub failure: WriteFailure,
 }
 
+/// Windows has no uid, gid or mode to report, so its lines read `parent=unknown`.
+#[cfg(windows)]
+fn parent_stat(_path: &std::path::Path) -> Option<ParentStat> {
+    None
+}
+
+#[cfg(unix)]
 fn parent_stat(path: &std::path::Path) -> Option<ParentStat> {
     use std::os::unix::fs::MetadataExt;
     let parent = path.parent()?;
@@ -4519,18 +4686,24 @@ fn log_candidate_diagnostics(context: &str, failures: &[CandidateDiagnostic]) {
 fn create_private_temp(
     path: &std::path::Path,
 ) -> Result<(std::path::PathBuf, std::fs::File), WriteFailure> {
+    #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
     for attempt in 0..16u64 {
         let Some(tmp) = random_tmp_path(path, attempt) else {
             return Err(WriteFailure::InvalidPath);
         };
-        match std::fs::OpenOptions::new()
+        #[cfg(unix)]
+        let opened = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&tmp)
-        {
+            .open(&tmp);
+        // `create_new` already refuses any existing name, a link included; there is no mode to
+        // set on Windows (`plx_base::winfs`).
+        #[cfg(windows)]
+        let opened = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp);
+        match opened {
             Ok(file) => return Ok((tmp, file)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(WriteFailure::CreateFailed(e.raw_os_error().unwrap_or(0))),
@@ -4561,6 +4734,7 @@ fn random_tmp_path(path: &std::path::Path, attempt: u64) -> Option<std::path::Pa
 /// file this process owns. The metadata comes from the SAME descriptor the bytes will be read
 /// from, so a caller that records the file's identity describes what it read. A missing file is
 /// `NotFound`; anything else refused is `PermissionDenied`.
+#[cfg(unix)]
 pub fn open_owned_regular(
     path: &std::path::Path,
 ) -> std::io::Result<(std::fs::File, std::fs::Metadata)> {
@@ -4573,6 +4747,20 @@ pub fn open_owned_regular(
         .open(path)?;
     let meta = file.metadata()?;
     if !meta.file_type().is_file() || meta.uid() != unsafe { libc::geteuid() } {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
+    }
+    Ok((file, meta))
+}
+
+/// [`open_owned_regular`] on Windows: there is no uid to own the file, so this is the no-follow
+/// open and the regular-file check only (`plx_base::winfs`).
+#[cfg(windows)]
+pub fn open_owned_regular(
+    path: &std::path::Path,
+) -> std::io::Result<(std::fs::File, std::fs::Metadata)> {
+    let file = plx_base::winfs::no_follow(std::fs::OpenOptions::new().read(true)).open(path)?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
         return Err(std::io::ErrorKind::PermissionDenied.into());
     }
     Ok((file, meta))
@@ -4594,6 +4782,7 @@ pub fn read_owned_regular(path: &std::path::Path) -> Option<Vec<u8>> {
 }
 
 fn remove_temp_siblings(path: &std::path::Path) {
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
     if let Some(legacy) = tmp_path(path) {
         let _ = std::fs::remove_file(legacy);
@@ -4610,7 +4799,14 @@ fn remove_temp_siblings(path: &std::path::Path) {
             continue;
         }
         if let Ok(meta) = std::fs::symlink_metadata(entry.path()) {
+            #[cfg(unix)]
             if meta.file_type().is_symlink() || meta.uid() == unsafe { libc::geteuid() } {
+                let _ = std::fs::remove_file(entry.path());
+            }
+            // Every entry under the user's profile is the user's own (`plx_base::winfs`).
+            #[cfg(windows)]
+            {
+                let _ = meta;
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -5006,14 +5202,25 @@ fn canonical_write_completed_locked(s: &Session, authority: SaveAuthority, gener
 /// validate the opened fd before truncation, and never follow a symlink or create a new file.
 fn neutralize_session_candidate(path: &std::path::Path) -> std::io::Result<()> {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    #[cfg(unix)]
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)?;
+    // Windows: no uid or link count to check (`plx_base::winfs`); a link is still never followed.
+    #[cfg(windows)]
+    let mut file = plx_base::winfs::no_follow(std::fs::OpenOptions::new().write(true)).open(path)?;
     let meta = file.metadata()?;
+    #[cfg(unix)]
     if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1 {
         return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+    }
+    // A Win32 error code is not an errno, so the refusal is a kind rather than `EPERM`.
+    #[cfg(windows)]
+    if !meta.is_file() {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
     }
     file.set_len(0)?;
     let written = file.write_all(SESSION_TOMBSTONE);
@@ -5353,6 +5560,110 @@ mod next_episode_mode_tests {
     }
 }
 
+/// `Session::auto_skip`: soft-parse, omit-at-default (so committed replay fixtures and every
+/// session written before the field existed serialize unchanged) and round-trip.
+#[cfg(test)]
+mod auto_skip_tests {
+    use super::*;
+
+    #[test]
+    fn absent_or_malformed_is_off() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"auto_skip": null}),
+            serde_json::json!({"auto_skip": "future"}),
+            serde_json::json!({"auto_skip": 2}),
+        ] {
+            let session: Session = serde_json::from_value(value.clone())
+                .unwrap_or_else(|e| panic!("{value}: a bad preference must not fail the session: {e}"));
+            assert_eq!(session.auto_skip(), AutoSkip::Off, "{value}");
+        }
+    }
+
+    #[test]
+    fn the_default_is_not_serialized() {
+        let session = Session::default();
+        assert_eq!(session.auto_skip(), AutoSkip::Off);
+        assert!(!serde_json::to_string(&session).unwrap().contains("auto_skip"));
+        let prefs = serde_json::to_string(&split_public(&session).unwrap().preferences).unwrap();
+        assert!(!prefs.contains("auto_skip"), "{prefs}");
+    }
+
+    #[test]
+    fn a_pick_round_trips_through_both_formats() {
+        for mode in [AutoSkip::Intro, AutoSkip::IntroAndCredits] {
+            let session = Session::default().with_auto_skip(mode);
+            let json = serde_json::to_string(&session).unwrap();
+            assert!(json.contains("auto_skip"), "{json}");
+            let round: Session = serde_json::from_str(&json).unwrap();
+            assert_eq!(round.auto_skip(), mode);
+
+            let (public, protected) = split_canonical(&session).unwrap();
+            assert_eq!(join_canonical(&public, &protected).unwrap().auto_skip(), mode);
+            assert_eq!(public_session(&public).auto_skip(), mode);
+        }
+    }
+
+    #[test]
+    fn the_kinds_each_option_skips() {
+        assert!(!AutoSkip::Off.skips_intro() && !AutoSkip::Off.skips_credits());
+        assert!(AutoSkip::Intro.skips_intro() && !AutoSkip::Intro.skips_credits());
+        assert!(AutoSkip::IntroAndCredits.skips_intro() && AutoSkip::IntroAndCredits.skips_credits());
+        for m in AutoSkip::LADDER {
+            assert_eq!(AutoSkip::from_index(m.index()), m);
+        }
+        assert_eq!(AutoSkip::from_index(99), AutoSkip::Off);
+    }
+}
+
+/// `Session::screensaver`: soft-parse, omit-at-default and round-trip.
+#[cfg(test)]
+mod screensaver_tests {
+    use super::*;
+
+    #[test]
+    fn absent_or_malformed_is_five_minutes() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"screensaver": null}),
+            serde_json::json!({"screensaver": "1h"}),
+            serde_json::json!({"screensaver": 5}),
+        ] {
+            let session: Session = serde_json::from_value(value.clone())
+                .unwrap_or_else(|e| panic!("{value}: a bad preference must not fail the session: {e}"));
+            assert_eq!(session.screensaver(), Screensaver::Minutes5, "{value}");
+        }
+        let session = Session::default();
+        assert!(!serde_json::to_string(&session).unwrap().contains("screensaver"));
+        let prefs = serde_json::to_string(&split_public(&session).unwrap().preferences).unwrap();
+        assert!(!prefs.contains("screensaver"), "{prefs}");
+    }
+
+    #[test]
+    fn a_pick_round_trips_through_both_formats() {
+        for mode in [Screensaver::Off, Screensaver::Minutes2, Screensaver::Minutes20] {
+            let session = Session::default().with_screensaver(mode);
+            let json = serde_json::to_string(&session).unwrap();
+            assert!(json.contains("screensaver"), "{json}");
+            let round: Session = serde_json::from_str(&json).unwrap();
+            assert_eq!(round.screensaver(), mode);
+            let (public, protected) = split_canonical(&session).unwrap();
+            assert_eq!(join_canonical(&public, &protected).unwrap().screensaver(), mode);
+            assert_eq!(public_session(&public).screensaver(), mode);
+        }
+    }
+
+    #[test]
+    fn every_option_has_an_index_and_a_delay() {
+        for m in Screensaver::LADDER {
+            assert_eq!(Screensaver::from_index(m.index()), m);
+        }
+        assert_eq!(Screensaver::from_index(99), Screensaver::Minutes5);
+        assert_eq!(Screensaver::Off.minutes(), None);
+        assert_eq!(Screensaver::Minutes10.minutes(), Some(10));
+    }
+}
+
 /// `Session::deck_press`: soft-parse, omit-at-default (so committed replay fixtures and every
 /// session written before the field existed serialize unchanged) and round-trip.
 #[cfg(test)]
@@ -5407,6 +5718,41 @@ mod deck_press_tests {
 
 /// `Session::skip_interval`: soft-parse, omit-at-default (so committed replay fixtures and every
 /// session written before the field existed serialize unchanged) and round-trip.
+#[cfg(test)]
+mod livetv_source_tests {
+    use super::*;
+
+    #[test]
+    fn absent_or_malformed_is_not_set_up() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"livetv_source": null}),
+            serde_json::json!({"livetv_source": 8000}),
+            serde_json::json!({"livetv_source": ["http://x"]}),
+        ] {
+            let session: Session = serde_json::from_value(value.clone())
+                .unwrap_or_else(|e| panic!("{value}: a bad preference must not fail the session: {e}"));
+            assert_eq!(session.livetv_source(), "", "{value}");
+        }
+    }
+
+    #[test]
+    fn unset_is_not_serialized_and_a_source_round_trips_through_both_formats() {
+        let session = Session::default();
+        assert!(!serde_json::to_string(&session).unwrap().contains("livetv_source"));
+        let prefs = serde_json::to_string(&split_public(&session).unwrap().preferences).unwrap();
+        assert!(!prefs.contains("livetv_source"), "{prefs}");
+
+        let session = Session::default().with_livetv_source("http://192.0.2.20:8000").with_livetv_channel("12");
+        let round: Session = serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
+        assert_eq!(round.livetv_source(), "http://192.0.2.20:8000");
+        let (public, protected) = split_canonical(&session).unwrap();
+        assert_eq!(join_canonical(&public, &protected).unwrap().livetv_source(), "http://192.0.2.20:8000");
+        assert_eq!(public_session(&public).livetv_source(), "http://192.0.2.20:8000");
+        assert_eq!(public_session(&public).livetv_channel(), "12", "the last channel rides with the server");
+    }
+}
+
 #[cfg(test)]
 mod skip_interval_tests {
     use super::*;

@@ -477,6 +477,12 @@ impl Grid {
             self.draw_card(f, p, src, i, super::press_scale(self.pop(src, i, focus), i, pressed, f.cx), true, &bands);
         }
         self.record_stops(f, p, src);
+        // The row a scroll reaches next, so it is on its way before it arrives — unless no card of
+        // this grid is on the canvas (a retained page moved away), when nothing it warms is seen.
+        let window = self.window(src.len());
+        if window.clone().any(|i| card_row::paint_visible(p, super::to_local(p, self.cell(i, &bands)), 1.0, false)) {
+            super::warm_cards(p, src, super::grid_lookahead(window, self.spec.geom().cols, src.len()));
+        }
     }
 
     /// Register the stops of the cards the scroll can show: each is the rect [`draw`](Self::draw) paints.
@@ -498,6 +504,12 @@ impl Grid {
                 hover: Hover::Focus,
                 activate: Activate::Press,
             });
+        }
+        // The desktop pointer chrome's buttons on the focused card (`ui::desk`), above every card.
+        if let Some(i) = focus.filter(|&i| f.pointer.live && i < src.len()) {
+            let s = super::press_scale(self.pop(src, i, focus), i, pressed, f.cx);
+            let rect = super::to_local(p, self.cell(i, &bands)).scaled(s);
+            super::hover_button_stops(f, p, src, self.entry, i, rect, Rect::FULL);
         }
     }
 
@@ -554,6 +566,9 @@ impl Grid {
             card_row::draw_tile(p, src.art(i), rect, s, &self.spec.style, src.progress(i));
         }
         src.overlay(p, i, &Tile { rect, scale: s, radius: self.spec.style.tile_radius(rect, s), focused }, f.measure);
+        if focused {
+            super::paint_hover_buttons(f, p, src, i, rect);
+        }
     }
 
     /// The `Focusable` neighbour of `key`: down from above a short last row lands on its last card.

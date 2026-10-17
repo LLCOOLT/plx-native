@@ -9,12 +9,12 @@
 //! T-live and T-settings sit in media (`route/prefs_tests.rs`), where the lists they hold to these
 //! descriptors are declared.
 use super::prefs::{Descriptor, Fallback, ListRow, Parse, ProfileMemory, Row, Scope, Setting, SettingsWrite, DESCRIPTORS};
-use super::prefs::{AudioEnhancementsPref, AutoSignInPref, DeckPressPref, DirectPlayModePref, LastHeroBlurPref,
+use super::prefs::{AudioEnhancementsPref, AutoSignInPref, AutoSkipPref, LiveTvChannelPref, LiveTvSourcePref, ScreensaverPref, DeckPressPref, DirectPlayModePref, LastHeroBlurPref,
     LastLibraryRow, LibraryViewsRow, NextEpisodeModePref, PlaintextConsentRow, QualityPref, ServerKeyPinsRow,
     HdrOverlayBrightnessPref, SkipIntervalPref, SubtitleOffsetsPref, SubtitlePositionPref, SubtitleSizePref, SubtitleTonePref,
     TrailerAutoplayPref};
 use super::{
-    CanonicalSessionPreferences, DeckPress, DirectPlayMode, LastLibrary, LibraryViews, NextEpisodeMode,
+    AutoSkip, Screensaver, CanonicalSessionPreferences, DeckPress, DirectPlayMode, LastLibrary, LibraryViews, NextEpisodeMode,
     PlaintextChoice, PlaintextConsent, PlaybackQuality, Preferences, ServerKeyPin, Session, SkipInterval,
     HdrOverlayBrightness, SubtitleOffsetEntry, SubtitlePosition, SubtitleSize, SubtitleTone,
 };
@@ -116,13 +116,44 @@ fn every_marker_names_its_own_field() {
     check_row::<AutoSignInPref>(true);
     check_row::<TrailerAutoplayPref>(true);
     check_row::<LastHeroBlurPref>(Some([[0.5, 0.25, 0.125]; 4]));
-    // The table lists exactly these thirteen `Setting` rows, the four list rows below, the two
+    check_row::<AutoSkipPref>(AutoSkip::IntroAndCredits);
+    check_row::<ScreensaverPref>(Screensaver::Minutes10);
+    // The table lists exactly these fifteen `Setting` rows, the four list rows below, the two
     // memory-door rows (`TrackMemoryPref`, whose field check is
     // `track_memory_tests::the_list_row_names_its_own_field`, and `SubtitleOffsetsPref`, checked by
     // `the_subtitle_offsets_row_names_its_own_field`) and the per-profile record list
     // (`ProfilePrefsPref`, `profile_prefs_tests::nothing_picked_serializes_to_no_key`): a row needs
     // its line in one of the four places.
-    assert_eq!(DESCRIPTORS.len(), 13 + 4 + 2 + 1);
+    // plus the two free-text Live TV rows (`livetv_source`, `livetv_channel`), checked by
+    // `the_live_tv_rows_name_their_own_fields`.
+    assert_eq!(DESCRIPTORS.len(), 15 + 4 + 2 + 1 + 2);
+}
+
+/// The two free-text Live TV rows are `Row`s only (a `String` is not `Copy`, so they are no
+/// `Setting`): each names its own field, writes nothing while empty and nothing else when set, and
+/// both are install-wide, never account-bound, with no live cell and no Settings row.
+#[test]
+fn the_live_tv_rows_name_their_own_fields() {
+    let default_json = serde_json::to_value(Preferences::default()).unwrap();
+    for (key, set) in [
+        (LiveTvSourcePref::KEY, (|p: &mut Preferences| p.livetv_source = "http://192.0.2.20:8000".into()) as fn(&mut Preferences)),
+        (LiveTvChannelPref::KEY, (|p: &mut Preferences| p.livetv_channel = "7".into()) as fn(&mut Preferences)),
+    ] {
+        assert!(default_json.get(key).is_none(), "{key}: an empty string writes no key: {default_json}");
+        let mut p = Preferences::default();
+        set(&mut p);
+        let body = serde_json::to_value(&p).unwrap();
+        assert!(body[key].is_string(), "{key}: {body}");
+        for (other, value) in body.as_object().unwrap() {
+            if other != key {
+                assert_eq!(default_json.get(other), Some(value), "{key}: moved the unrelated key {other}");
+            }
+        }
+        let back: Preferences = serde_json::from_value(body).unwrap();
+        assert_eq!(back, p);
+        let d = DESCRIPTORS.iter().find(|d| d.key == key).expect("the row is in the table");
+        assert_eq!((d.scope, d.account_bound, d.live, d.settings, d.parse), (Scope::Install, false, false, None, Parse::Soft), "{key}");
+    }
 }
 
 /// The list rows do what `check_row` proves for the `Copy` ones: the marker names its own field
@@ -240,6 +271,8 @@ fn the_a5_rows_declare_the_scope_and_binding_main_has() {
     for (key, scope, bound, parse) in [
         ("auto_sign_in", Scope::Install, false, Parse::BoolOff),
         ("last_hero_blur", Scope::Install, false, Parse::OptionalSoft),
+        ("auto_skip", Scope::Install, false, Parse::Soft),
+        ("screensaver", Scope::Install, false, Parse::Soft),
         ("plaintext_consent", Scope::Account, true, Parse::SoftVec),
         ("server_key_pins", Scope::Account, true, Parse::SoftVec),
         ("last_library", Scope::Profile, true, Parse::SoftVec),
@@ -294,6 +327,12 @@ fn garbage_fixtures() -> Vec<(&'static str, Vec<Value>)> {
         // A5. A switch's garbage excludes the booleans, which are VALID values for it.
         ("auto_sign_in", not_a_bool()),
         ("trailer_autoplay", not_a_bool()),
+        // The install-wide enums are soft scalars like the ten; the free-text Live TV rows read any
+        // string as valid, so their garbage is every non-string shape.
+        ("auto_skip", generic()),
+        ("screensaver", generic()),
+        ("livetv_source", not_a_string()),
+        ("livetv_channel", not_a_string()),
         ("last_hero_blur", vec![Value::Null, json!("zzz"), json!(17), json!([1, "x"]), json!([[1, 2, 3]]), json!({"unexpected": 1})]),
         // A list's garbage is anything that is not an array; a mixed array is driven separately.
         ("plaintext_consent", not_a_list()),
@@ -308,6 +347,10 @@ fn garbage_fixtures() -> Vec<(&'static str, Vec<Value>)> {
 
 fn not_a_bool() -> Vec<Value> {
     vec![Value::Null, json!("zzz-not-a-spelling"), json!("true"), json!(17), json!([1, "x"]), json!({"unexpected": 1})]
+}
+
+fn not_a_string() -> Vec<Value> {
+    vec![Value::Null, json!(17), json!(true), json!([1, "x"]), json!({"unexpected": 1})]
 }
 
 fn not_a_list() -> Vec<Value> {

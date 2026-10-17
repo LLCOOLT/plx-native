@@ -17,11 +17,16 @@
     "subtitle_preferences": "rust-modules/plex/src/plex/session.rs: SubtitleTone::White serializes as white and is the captured default in every synthetic session.",
     "session_persistence": "rust-modules/plex/src/plex/session.rs: SaveAuthority::Routine (also PublicOnly, FreshReauthentication — already covered/unused in controlled recordings); rust-modules/plex/src/plex/session/async_persistence.rs: PersistencePurpose::Background; rust-modules/src/auth/owner.rs: CommitAdmission::RegistryOnly. These serialize into every controlled session commit/plan once a store owns its own persistence (cleanup/ownership), so a synthetic recording now always carries them.",
     "related_hub_key": "rust-modules/plex/src/plex/hubs.rs is_pageable_hub_key: the Related hub of a Detail page is paged through its own key, /library/metadata/{digits}/similar (tests/mock_pms.py serves it); a recorded Detail page names it in its page request.",
-    "hold_hint": "ui/src/hold_hint.rs measures the three runs of Home's \"Hold OK for options\" capsule when a recorded Home rests on a shelf tile: locales/en/widgets.json widgets.hint.hold_options (pre and post words, split at the key placeholder) and KEY (the OK cap)."
+    "hold_hint": "ui/src/hold_hint.rs measures the three runs of Home's \"Hold OK for options\" capsule when a recorded Home rests on a shelf tile: locales/en/widgets.json widgets.hint.hold_options (pre and post words, split at the key placeholder) and KEY (the OK cap).",
+    "home_app_shelves": "data/pms.rs APP_SHELF_PREFIX (\"home.plx.\") names the Home shelves the app makes itself: home.plx.genres (Recently Added in Your Genres) and home.plx.playlists (the servers' video playlists), beside the onnow, channels and watchlist ids.",
+    "row_mode": "data/stores/paging.rs RowMode::Head: a hub row's paging state is recorded with its mode, and a row still at its preview reads Head.",
+    "plex_guid_and_playlist_art": "tests/mock_pms.py derives every guid from the closed token (plex://<kind>/s<8 hex>, episodes included) and serves a playlist's composite art at /playlists/<id>/composite/<epoch seconds>.",
+    "live_tv_and_versions_ui": "locales/en: livetv.tab (Live TV, and LIVE TV when the top strip upper-cases it), settings.livetv.detail (Channels from your Tunarr server.) and browse.detail.version / widgets.menu.version (Version) are English UI text the recorded frames measure."
   },
   "patterns": [
     "/library/metadata/people/[0-9]+/thumb/1",
-    "plex://(movie|show)/s[0-9a-f]{8}",
+    "plex://(movie|show|episode)/s[0-9a-f]{8}",
+    "/playlists/[0-9]+/composite/[0-9]+",
     "/s[0-9a-f]{8}/s[0-9a-f]{8}\\.mkv",
     "s[0-9a-f]{8}( s[0-9a-f]{8}){3}",
     "s[0-9a-f]{8}",
@@ -56,6 +61,13 @@
     "press phase=(idle|down|up) live=[01] active=[01] long=[01]"
   ],
   "literals": [
+    "home.plx.genres",
+    "home.plx.playlists",
+    "Head",
+    "LIVE TV",
+    "Live TV",
+    "Channels from your Tunarr server.",
+    "Version",
     "Hold",
     "for options",
     "OK",

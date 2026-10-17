@@ -1132,12 +1132,25 @@ fn mark_paths() -> Vec<std::path::PathBuf> {
 #[cfg(any(test, feature = "test-support"))]
 static TEST_ROOT: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
 
+/// The `(st_dev, st_ino)` a [`Mark`] binds its offset to.
+#[cfg(unix)]
+fn file_identity(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.dev(), meta.ino()))
+}
+
+/// Windows has no inode on stable std: the mark carries no identity there, and the prefix hash
+/// alone ties it to the log it measured (it still catches a truncate-and-rewrite).
+#[cfg(windows)]
+fn file_identity(_meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    None
+}
+
 /// Read the crash log's bytes and identity from ONE non-following descriptor
 /// (`session::open_owned_regular`). A missing log is a valid empty generation; a symlink, a file
 /// somebody else owns, or one larger than `MAX_OWNED_FILE` is an error, and nothing is imported.
 fn read_snapshot(path: &std::path::Path) -> std::io::Result<Snapshot> {
     use std::io::Read;
-    use std::os::unix::fs::MetadataExt;
     let (file, meta) = match plx_plex::plex::session::open_owned_regular(path) {
         Ok(opened) => opened,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Snapshot::default()),
@@ -1151,7 +1164,7 @@ fn read_snapshot(path: &std::path::Path) -> std::io::Result<Snapshot> {
     }
     Ok(Snapshot {
         bytes,
-        identity: Some((meta.dev(), meta.ino())),
+        identity: file_identity(&meta),
     })
 }
 
@@ -1161,7 +1174,6 @@ fn read_snapshot(path: &std::path::Path) -> std::io::Result<Snapshot> {
 /// existing prefix.
 fn cutoff_mark(path: &std::path::Path) -> std::io::Result<Mark> {
     use std::io::Read;
-    use std::os::unix::fs::MetadataExt;
     let (mut file, meta) = match plx_plex::plex::session::open_owned_regular(path) {
         Ok(opened) => opened,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Snapshot::default().mark()),
@@ -1182,7 +1194,7 @@ fn cutoff_mark(path: &std::path::Path) -> std::io::Result<Mark> {
     }
     Ok(Mark {
         reported_bytes: total,
-        identity: Some((meta.dev(), meta.ino())),
+        identity: file_identity(&meta),
         prefix_hash: Some(hash),
     })
 }

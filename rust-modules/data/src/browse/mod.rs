@@ -491,6 +491,7 @@ pub enum SecFetch {
     Failed,
 }
 
+pub mod filters;
 pub mod record;
 mod saved_view;
 pub mod section_hubs;
@@ -534,8 +535,16 @@ struct SecState {
     sort_desc: bool,
     unwatched: bool,
     genre: Option<Arc<GenreEntry>>,
+    /// The further filters in force (`filters`), for the session only.
+    more: Arc<Vec<filters::ActiveFilter>>,
     // menus (kept across re-queries)
     sorts: Arc<Vec<SortEntry>>,
+    /// The further filters the section offers for the listed type (`filters::defs`).
+    filter_defs: Arc<Vec<filters::FilterDef>>,
+    /// One field's value list, for the Filter menu's value picker: `(field, values)`.
+    values: Option<(String, Arc<Vec<GenreEntry>>)>,
+    /// The field whose value list is out (`kick_values`) — one at a time.
+    values_asked: String,
     genres: Arc<Vec<GenreEntry>>,
     genres_done: bool, // a genre fetch LANDED (even empty) — kick_genres won't re-spawn
     /// Is the live sort the viewer's CHOICE rather than merely what a failed restore left? False
@@ -733,7 +742,11 @@ impl Default for SecState {
             sort_desc: false,
             unwatched: false,
             genre: None,
+            more: Arc::default(),
             sorts: Arc::default(),
+            filter_defs: Arc::default(),
+            values: None,
+            values_asked: String::new(),
             genres: Arc::default(),
             genres_done: false,
             sort_resolved: true,
@@ -784,6 +797,7 @@ impl SecState {
         if let Some(genre) = &self.genre {
             filters.push(("genre".into(), genre.id.clone()));
         }
+        filters.extend(filters::pairs(&self.more));
         filters
     }
 }
@@ -863,10 +877,12 @@ impl PinWrite {
 pub struct BrowseAdapter {
     fetching: AtomicBool,
     genre_fetching: AtomicBool,
+    values_fetching: AtomicBool,
     letters_fetching: AtomicBool,
     src_fetching: AtomicBool,
     page_result: Mutex<Option<PageResult>>,
     genre_result: Mutex<Option<DirectoryResult<GenreEntry>>>,
+    values_result: Mutex<Option<DirectoryResult<GenreEntry>>>,
     letter_result: Mutex<Option<DirectoryResult<(String, i64)>>>,
     src_result: Mutex<Option<(u32, usize, SrcLanding)>>,
     hubs: section_hubs::HubAdapter,
@@ -882,10 +898,12 @@ impl Default for BrowseAdapter {
         Self {
             fetching: AtomicBool::new(false),
             genre_fetching: AtomicBool::new(false),
+            values_fetching: AtomicBool::new(false),
             letters_fetching: AtomicBool::new(false),
             src_fetching: AtomicBool::new(false),
             page_result: Mutex::new(None),
             genre_result: Mutex::new(None),
+            values_result: Mutex::new(None),
             letter_result: Mutex::new(None),
             src_result: Mutex::new(None),
             hubs: Default::default(),
@@ -897,10 +915,11 @@ impl BrowseAdapter {
     fn clear(&self) {
         *self.page_result.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.genre_result.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.values_result.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.letter_result.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.src_result.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.hubs.result.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        for flag in [&self.fetching, &self.genre_fetching, &self.letters_fetching,
+        for flag in [&self.fetching, &self.genre_fetching, &self.values_fetching, &self.letters_fetching,
             &self.src_fetching, &self.hubs.fetching] {
             flag.store(false, Ordering::SeqCst);
         }
@@ -1225,6 +1244,9 @@ impl BrowseState {
         state.genre = None;
         state.genres = Arc::default();
         state.genres_done = false;
+        state.more = Arc::default();
+        state.filter_defs = Arc::default();
+        state.values = None;
         // A new listing starts a new restore, and the viewer just chose it.
         state.sort_resolved = true;
         state.genre_resolved = true;
@@ -1262,6 +1284,39 @@ impl BrowseState {
                 None => false,
             },
         }
+    }
+    /// Put a further filter in force on the current section, or take it off (`filters::set`).
+    /// Refused while a listing the filters do not apply to is shown, and for a field the section
+    /// does not offer.
+    fn set_filter(&mut self, field: &str, value: Option<(String, String)>) -> bool {
+        let current = self.cur();
+        let Some(state) = self.states.get_mut(current) else { return false };
+        if !state.library_type.filters()
+            || (value.is_some() && !state.filter_defs.iter().any(|d| d.field == field))
+        {
+            return false;
+        }
+        let mut more = (*state.more).clone();
+        if filters::set(&mut more, field, value) {
+            state.more = Arc::new(more);
+            self.requery();
+        }
+        true
+    }
+    /// Fetch `field`'s value list for the Filter menu's picker — one list at a time; the menu asks
+    /// again every frame it is open, so a field asked for while another's list is out is fetched
+    /// when that one lands.
+    fn kick_values(&mut self, adapter: &Arc<BrowseAdapter>, field: &str) {
+        let current = self.cur();
+        let Some(state) = self.states.get_mut(current) else { return };
+        if state.values.as_ref().is_some_and(|(f, _)| f == field)
+            || !state.filter_defs.iter().any(|d| d.field == field && d.kind == filters::FilterKind::Values)
+            || adapter.values_fetching.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        state.values_asked = field.to_owned();
+        self.kick_directory(adapter, false, |a| &a.values_fetching, |a| &a.values_result, field.to_owned(), genre_entry);
     }
     /// Edit every listing row the change covers, in every section's loaded pages.
     ///
@@ -1534,7 +1589,7 @@ impl BrowseState {
         done: bool,
         flag: fn(&BrowseAdapter) -> &AtomicBool,
         mail: fn(&BrowseAdapter) -> &Mutex<Option<DirectoryResult<T>>>,
-        dir: &'static str,
+        dir: impl Into<String>,
         project: fn(&plx_plex::plex::LibrarySection) -> Option<T>,
     ) {
         let current = self.cur();
@@ -1551,6 +1606,7 @@ impl BrowseState {
         if flag(&adapter).swap(true, Ordering::SeqCst) {
             return;
         }
+        let dir: String = dir.into();
         let key = self.sections[current].key;
         let library_type = self.states[current].library_type;
         let metadata_type = library_type.plex_type(self.sections[current].kind);
@@ -1559,7 +1615,7 @@ impl BrowseState {
         let spawned = plx_base::task::spawn_small("directory", move || {
             let list = catch_unwind(|| {
                 let mut values = Vec::new();
-                if let Some(container) = client.section_directory(key, dir, metadata_type) {
+                if let Some(container) = client.section_directory(key, &dir, metadata_type) {
                     values.extend(container.directory.iter().filter_map(project));
                 }
                 values
@@ -1658,6 +1714,8 @@ impl BrowseState {
                         }
                         landed
                     }
+                    // Session-only: not a remembered view choice (`filters`' module doc).
+                    Some(QueryEdit::Filter { field, value }) => self.set_filter(&field, value),
                     Some(QueryEdit::LibraryType(library_type)) => {
                         let before = self.cur_state().map(|state| state.library_type);
                         let landed = self.set_library_type(library_type);
@@ -1684,6 +1742,7 @@ impl BrowseState {
                     LibraryWork::Want { lo, hi, focus } => self.want(lo, hi, focus),
                     LibraryWork::Letters => self.kick_letters(adapter),
                     LibraryWork::Genres => self.kick_genres(adapter),
+                    LibraryWork::FilterValues(field) => self.kick_values(adapter, &field),
                     LibraryWork::Retry => self.retry_cur_source(),
                     LibraryWork::Requery => {
                         self.requery_stale();
@@ -2621,7 +2680,7 @@ impl BrowseState {
             *worker_adapter.page_result.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(PageResult {
                     client, token_gen, gen, sec: current, start, items: page.items,
-                    total: page.total, sorts: page.sorts, restored: page.restored,
+                    total: page.total, sorts: page.sorts, filters: page.filters, restored: page.restored,
                     genres: page.genres, genre: page.genre, resolved: page.resolved,
                 });
         });
@@ -2671,6 +2730,11 @@ impl BrowseState {
                 state.genres = Arc::new(list);
             }
         });
+        changed |= self.land_directory_owned_with_gate(
+            gate,
+            &adapter.values_fetching, &adapter.values_result, |state, list| {
+                state.values = Some((state.values_asked.clone(), Arc::new(list)));
+            });
         changed |= self.land_directory_owned_with_gate(
             gate,
             &adapter.letters_fetching, &adapter.letter_result, |state, list| {
@@ -2725,6 +2789,11 @@ impl BrowseState {
                                 }
                                 if let Some(genre) = result.genre {
                                     state.genre = Some(Arc::new(genre));
+                                }
+                                if let Some(defs) = result.filters {
+                                    if state.filter_defs.is_empty() {
+                                        state.filter_defs = Arc::new(defs);
+                                    }
                                 }
                                 if let Some(sorts) = result.sorts {
                                     if state.sorts.is_empty() {
@@ -2804,6 +2873,8 @@ struct ListingPage {
     /// `totalSize`; **negative = the fetch failed** (see [`PageResult::total`]).
     total: i64,
     sorts: Option<Vec<SortEntry>>,
+    /// The further filters the listed type offers — with `sorts`, from the same `Meta`.
+    filters: Option<Vec<filters::FilterDef>>,
     /// The remembered `(sort key, descending)` this page was fetched in, when a [`Restore`] was
     /// asked for and the menu offered its key — what the landing points the menu at.
     restored: Option<(String, bool)>,
@@ -2835,8 +2906,8 @@ impl Default for Resolved {
 impl ListingPage {
     fn failed() -> Self {
         Self {
-            items: Vec::new(), total: -1, sorts: None, restored: None, genres: None, genre: None,
-            resolved: Resolved::default(),
+            items: Vec::new(), total: -1, sorts: None, filters: None, restored: None, genres: None,
+            genre: None, resolved: Resolved::default(),
         }
     }
 }
@@ -2901,6 +2972,9 @@ fn fetch_listing_page(
     let Some(mut container) = client.section_items_query(&base) else {
         return ListingPage::failed();
     };
+    let filter_defs: Option<Vec<filters::FilterDef>> = container.meta.as_ref().and_then(|meta| {
+        meta.types.iter().find(|kind| kind.active != 0).or_else(|| meta.types.first()).map(filters::defs)
+    });
     let sorts: Option<Vec<SortEntry>> = container.meta.as_ref().and_then(|meta| {
         meta.types.iter().find(|kind| kind.active != 0)
             .or_else(|| meta.types.first()).map(|kind| kind.sort.iter()
@@ -2962,7 +3036,7 @@ fn fetch_listing_page(
     let total = if container.total_size > 0 { container.total_size }
         else { query.start + container.metadata.len() as i64 };
     let items = container.metadata.iter().map(|item| parse_item(item, sid)).collect();
-    ListingPage { items, total, sorts, restored, genres, genre, resolved }
+    ListingPage { items, total, sorts, filters: filter_defs, restored, genres, genre, resolved }
 }
 
 /// Bumped whenever the section table's SHAPE changes — a source's sections appended, or the whole
@@ -2991,6 +3065,7 @@ struct PageResult {
     /// store (a transient network error once wiped a whole populated section to "empty").
     total: i64,
     sorts: Option<Vec<SortEntry>>, // Some when the fetch carried includeMeta=1
+    filters: Option<Vec<filters::FilterDef>>, // likewise
     /// Some when the page was fetched in a remembered sort — see [`ListingPage::restored`].
     restored: Option<(String, bool)>,
     /// See [`ListingPage::genres`] and [`ListingPage::genre`].
@@ -3865,7 +3940,7 @@ pub fn queue_page_failure_for_owner_test(
     adapter.fetching.store(true, Ordering::SeqCst);
     *adapter.page_result.lock().unwrap_or_else(|e| e.into_inner()) = Some(PageResult {
         client, token_gen: client.token_gen(), gen: state.query_gen(), sec, start: 0,
-        items: Vec::new(), total: -1, sorts: None, restored: None, genres: None, genre: None,
+        items: Vec::new(), total: -1, sorts: None, filters: None, restored: None, genres: None, genre: None,
         resolved: Default::default(),
     });
 }
@@ -3898,7 +3973,7 @@ pub fn spawn_owned_page_for_test(
             Some(PageResult {
                 client, token_gen, gen, sec, start: 0,
                 items: vec![PmsMovie { sid, title, ..Default::default() }],
-                total: 1, sorts: None, restored: None, genres: None, genre: None,
+                total: 1, sorts: None, filters: None, restored: None, genres: None, genre: None,
                 resolved: Default::default(),
             });
         done_tx.send(()).expect("test receives worker completion");
@@ -3913,6 +3988,10 @@ mod test_support;
 #[cfg(test)]
 #[path = "browse_table_tests.rs"]
 mod table_tests;
+
+#[cfg(test)]
+#[path = "browse_filters_tests.rs"]
+mod filters_tests;
 
 #[cfg(test)]
 #[path = "browse_dump_tests.rs"]

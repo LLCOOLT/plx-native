@@ -122,6 +122,12 @@ pub enum Chrome {
 /// The application's screen argument (§6.1).
 pub trait ScreenArg: Clone + LogicalState + 'static {
     fn chrome(&self) -> Chrome;
+    /// Does this page wear the desktop pointer chrome's global buttons (`ui::desk`: back, search,
+    /// settings) — a PUSHED page, which on a television is left with the remote's BACK and nothing
+    /// on screen to click? Only ever drawn on a desktop with the pointer live; `false` by default.
+    fn pointer_chrome(&self) -> bool {
+        false
+    }
     fn id(&self) -> ScreenId;
     fn title(&self) -> Option<&str>;
     fn same_instance(&self, other: &Self) -> bool;
@@ -508,6 +514,10 @@ pub enum ScreenEvent<H: Host> {
     PressHold(PressId),
     PressCommit(PressId),
     Activate(H::Elem),
+    /// **Play this card now** — a desktop card's hover play button (`ui::desk`,
+    /// `ui::screen::Activate::Play`). Never sent on a television. A screen with no direct play for
+    /// the element answers `Handled::No` and its card draws no such button.
+    PlayCard(H::Elem),
     Tick(Tick),
     Timer(TimerId),
     Async(RequestId, H::Msg),
@@ -538,6 +548,7 @@ impl<H: Host> ScreenEvent<H> {
             ScreenEvent::PressHold(_) => "press_hold",
             ScreenEvent::PressCommit(_) => "press_commit",
             ScreenEvent::Activate(_) => "activate",
+            ScreenEvent::PlayCard(_) => "play_card",
             ScreenEvent::Tick(_) => "tick",
             ScreenEvent::Timer(_) => "timer",
             ScreenEvent::Async(..) => "async",

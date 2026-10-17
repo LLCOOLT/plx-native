@@ -97,7 +97,8 @@ about LG's decoder and video plane. Those need the set.
 simulator inputs change. Linux runs a 1920x1080 screenshot smoke test under Xvfb; macOS performs
 the same smoke test through its native window server. The Windows job parses `tools/sim.ps1` with
 Windows PowerShell 5.1 and PowerShell 7. Hosted Windows runners cannot boot WSLg, so Linux runtime
-coverage is the runtime half of the Windows/WSLg path until a native Windows binary exists.
+coverage is the runtime half of the WSLg path. The native Windows app is built and packaged by
+`.github/workflows/desktop.yml`.
 The workflow is path-filtered, so do not make `Simulator CI` a required status check: GitHub leaves
 a path-skipped required workflow pending. If it must become required, first move the path decision
 inside an always-started workflow and report one aggregate status.

@@ -292,8 +292,12 @@ pub struct DetailScreen {
     cast: Shelf,
     tabs: TabStrip,
     season_pop: CtlPop<1>,
-    ctl_pop: CtlPop<5>,
-    disc_unfurl: [Spring; 3],
+    ctl_pop: CtlPop<{ hero::HERO_MAX }>,
+    disc_unfurl: [Spring; hero::DISCS],
+    /// The item's membership of the profile's watchlist (`MetadataLike::on_watchlist`), re-read
+    /// at every step: a projection of the hub store's published list, like the key maps above,
+    /// and so not logical state. `None` shows no watchlist toggle.
+    watchlisted: Option<bool>,
     season_metrics: season::Metrics,
     about_rows: about::Rows,
     /// The page's own keyed ground. Deliberately a bare [`AmbientWash`] and not the shared
@@ -543,7 +547,8 @@ impl DetailScreen {
             tabs: TabStrip::new(),
             season_pop: CtlPop::new(),
             ctl_pop: CtlPop::new(),
-            disc_unfurl: [Spring::at(0.0); 3],
+            disc_unfurl: [Spring::at(0.0); hero::DISCS],
+            watchlisted: None,
             season_metrics: season::Metrics::new(),
             about_rows: about::Rows::new(),
             ground,
@@ -811,6 +816,22 @@ impl DetailScreen {
         let d = self.detail(meta)?;
         let s = d.seasons.get(i)?;
         (!s.rk.is_empty()).then(|| (s.rk.clone(), d.rk.clone(), s.index, season::watch_state(s)))
+    }
+
+    /// The page's VERSION chooser, when the focus is on the hero's Version pill: the item's rating
+    /// key, its versions labelled, and the version this session plays (`plex::media_index_for`).
+    pub fn focused_versions(
+        &self,
+        focus: Option<FocusKey<u32>>,
+        meta: plx_data::metadata::MetadataView<'_>,
+    ) -> Option<(String, Vec<String>, u32)> {
+        let key = focus.filter(|k| k.entry == self.entry)?.elem;
+        if !matches!(self.locate(key, meta)?, Located::Hero(hero::HeroCtl::Version)) {
+            return None;
+        }
+        let d = self.detail(meta).filter(|d| hero::has_versions(d))?;
+        let labels = d.versions.iter().map(plx_appkit::info_panel::version_label).collect();
+        Some((d.rk.clone(), labels, plx_plex::plex::media_index_for(plx_media::route::item_sid(d.sid), &d.rk)))
     }
 
     /// The focused card of a poster shelf that is some other item — Related, or the collection
@@ -1926,6 +1947,7 @@ impl<H: ContentLike + crate::registry::MetadataLike> Machine<H> for DetailScreen
 
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
         let meta = H::metadata(cx);
+        self.watchlisted = self.detail(meta).and_then(|d| H::on_watchlist(cx, &d.guid));
         // The cards component's one entry: every event reaches every shelf it owns (its pop,
         // scroll and let-go ride the Tick, its placement the FocusMoved). What a card DOES stays
         // in `activate` below.
@@ -2064,6 +2086,20 @@ impl<H: ContentLike + crate::registry::MetadataLike> Machine<H> for DetailScreen
             }
             ScreenEvent::Activate(elem) => {
                 self.activate(*elem, cx, fx);
+                Handled::Yes
+            }
+            // A desktop card's hover play button (`plx_ui::desk`) on a Related or collection card:
+            // that title, from its resume point — not this page's own item.
+            ScreenEvent::PlayCard(elem) => {
+                let key = FocusKey { entry: self.entry, elem: *elem };
+                let Some(item) = self.focused_related(Some(key), meta).filter(|m| crate::registry::item_plays_from_page(m)) else {
+                    return Handled::No;
+                };
+                self.content(fx, ContentReq::Play {
+                    play: crate::registry::PlayIntent::Movie(item.clone()),
+                    resume_ns: crate::registry::item_play_resume_ns(item),
+                });
+                fx.invalidate(Provenance::Input);
                 Handled::Yes
             }
             ScreenEvent::PressHold(_) => {
@@ -2940,6 +2976,15 @@ impl DetailScreen {
                 .ground(ground)
                 .scale(scale)
                 .draw(&Env::inert(), p),
+                hero::HeroCtl::Version => {
+                    Button::new(hero::version_label().as_ptr(), theme::size::BODY, rect)
+                        .trailing_icon(plx_ui::icons::Icon::ChevronDown)
+                        .focused(focused)
+                        .palette(palette)
+                        .ground(ground)
+                        .scale(scale)
+                        .draw(&Env::inert(), p)
+                }
                 hero::HeroCtl::Alt => {
                     Button::new(hero::alt_label().as_ptr(), theme::size::BODY, rect)
                         .trailing_icon(plx_ui::icons::Icon::ChevronDown)
@@ -2955,6 +3000,10 @@ impl DetailScreen {
                         hero::HeroCtl::Trailer => plx_ui::icons::Icon::Trailer,
                         hero::HeroCtl::MarkWatched => plx_ui::icons::Icon::Check,
                         hero::HeroCtl::MarkUnwatched => plx_ui::icons::Icon::Minus,
+                        hero::HeroCtl::GoToShow => plx_ui::icons::Icon::Show,
+                        hero::HeroCtl::Shuffle => plx_ui::icons::Icon::Shuffle,
+                        hero::HeroCtl::WatchlistAdd => plx_ui::icons::Icon::WatchlistAdd,
+                        hero::HeroCtl::WatchlistRemove => plx_ui::icons::Icon::WatchlistRemove,
                         _ => unreachable!(),
                     };
                     let mut button = CircleButton::new(c"".as_ptr())
@@ -4076,6 +4125,10 @@ impl DetailScreen {
             trailer: false,
             alt: self.alt_available(meta),
             mark,
+            show: self.detail(meta).is_some_and(hero::goes_to_show),
+            shuffle: self.detail(meta).is_some_and(hero::shuffles),
+            version: self.detail(meta).is_some_and(hero::has_versions),
+            watchlist: self.watchlisted.filter(|_| self.detail(meta).is_some_and(|d| matches!(d.kind.as_str(), "movie" | "show"))),
         }
     }
 
@@ -4256,6 +4309,36 @@ impl DetailScreen {
                             anchor: [rect.x, rect.y, rect.w, rect.h].map(f32::to_bits),
                         }),
                     );
+                }
+            }
+            // the version chooser: the item menu's Versions form, anchored to this pill
+            // (`app::bridge::content_menu_arg` reads the focused pill through `focused_versions`)
+            hero::HeroCtl::Version => {
+                if self.detail(meta).is_some_and(hero::has_versions) {
+                    self.content(fx, ContentReq::ItemMenu);
+                }
+            }
+            hero::HeroCtl::Shuffle => {
+                let Some(d) = self.detail(meta).filter(|d| hero::shuffles(d)) else { return };
+                self.content(fx, ContentReq::Shuffle { sid: plx_media::route::item_sid(d.sid), rk: d.rk.clone() });
+            }
+            hero::HeroCtl::GoToShow => {
+                let Some(d) = self.detail(meta).filter(|d| hero::goes_to_show(d)) else { return };
+                self.content(fx, ContentReq::PushShow { sid: d.sid, rk: d.show_rk.clone(), season: d.season });
+            }
+            hero::HeroCtl::WatchlistAdd | hero::HeroCtl::WatchlistRemove => {
+                // The hub store moves the membership (this toggle's face) on the press and its
+                // worker performs the edit on plex.tv. No row: the page holds metadata, not a
+                // shelf card, so an added title joins the Home shelf when the list is read back.
+                if let Some(d) = self.detail(meta) {
+                    fx.push(Fx::App(AppFx::Store(
+                        StoreId::Hubs,
+                        StoreCmd::Hubs(plx_data::stores::hubs::HubsCmd::EditWatchlist {
+                            guid: d.guid.clone(),
+                            add: ctl == hero::HeroCtl::WatchlistAdd,
+                            row: plx_data::pms::ShelfRows::default(),
+                        }),
+                    )));
                 }
             }
             hero::HeroCtl::MarkWatched | hero::HeroCtl::MarkUnwatched => {

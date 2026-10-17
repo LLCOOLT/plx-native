@@ -64,6 +64,7 @@ pub mod fanout;
 mod content_arg;
 pub use content_arg::ContentArg;
 pub mod hubs;
+pub mod livetv;
 pub mod metadata;
 pub mod notify;
 pub mod notify_map;
@@ -109,6 +110,8 @@ pub struct Stores {
     /// hub refetch a landed write owes, the membership re-query it may start) stays owed instead of
     /// running under the video. Set once a frame by [`Stores::hold_network`].
     network_held: bool,
+    /// Live TV: the configured Tunarr server's channels and guide (`crate::livetv`). Appended last.
+    pub livetv: livetv::LiveTvStore,
 }
 
 impl Default for Stores {
@@ -129,6 +132,7 @@ impl Default for Stores {
             notify_map: Default::default(),
             view_ledger: Default::default(),
             network_held: false,
+            livetv: livetv::LiveTvStore::default(),
         };
         stores.share_view_ledger();
         stores
@@ -182,6 +186,12 @@ impl Stores {
     pub fn subtitle_search_view(&self) -> crate::subsearch::SubSearchView<'_> {
         self.subtitle_search.view()
     }
+
+    pub fn livetv_run(&mut self, cmd: crate::livetv::LiveTvCmd) -> bool { self.livetv.run(cmd) }
+
+    pub fn livetv_pump(&mut self) -> bool { self.livetv.pump() }
+
+    pub fn livetv_view(&self) -> crate::livetv::LiveTvView<'_> { self.livetv.view() }
 
     pub fn person_pump(&mut self) -> bool {
         self.person.pump(&self.landgate)
@@ -428,6 +438,7 @@ impl Stores {
             StoreId::ViewReconcile => self.reconcile.gen(),
             // A landing gate slot only: the stop mailbox is not a store and has no generation.
             StoreId::ViewStop => 0,
+            StoreId::LiveTv => self.livetv.gen(),
         }
     }
 
@@ -453,6 +464,9 @@ impl Stores {
         }
         if let Some(generation) = self.subtitle_search.take_notice() {
             notices.push((StoreId::SubtitleSearch, generation));
+        }
+        if let Some(generation) = self.livetv.take_notice() {
+            notices.push((StoreId::LiveTv, generation));
         }
         if let Some(generation) = self.viewstate.borrow().take_notice() {
             notices.push((StoreId::ViewState, generation));
@@ -483,6 +497,8 @@ pub enum StoreId {
     /// (`route::take_landed_stops`), which is no store but needs an ordinal of its own because the
     /// gate keeps one mailbox per ordinal.
     ViewStop,
+    /// Appended for the same reason.
+    LiveTv,
 }
 
 /// Route-scoped background work, distinct from a user command. Polling an idle store must not
@@ -508,7 +524,7 @@ impl StoreWork {
 }
 
 impl StoreId {
-    pub const ALL: [StoreId; 10] = [
+    pub const ALL: [StoreId; 11] = [
         StoreId::Browse,
         StoreId::Hubs,
         StoreId::Metadata,
@@ -519,6 +535,7 @@ impl StoreId {
         StoreId::SubtitleSearch,
         StoreId::ViewReconcile,
         StoreId::ViewStop,
+        StoreId::LiveTv,
     ];
 
     /// The library's ordinal for this store (spec §5.1: the library never names `StoreId`).
@@ -542,6 +559,7 @@ impl StoreId {
             StoreId::ViewState => "viewstate",
             StoreId::ViewReconcile => "viewreconcile",
             StoreId::ViewStop => "viewstop",
+            StoreId::LiveTv => "livetv",
         }
     }
 }
@@ -558,6 +576,7 @@ pub enum StoreCmd {
     Collection(collection::CollectionCmd),
     ViewState(viewstate::ViewStateCmd),
     SubtitleSearch(subsearch::SubSearchCmd),
+    LiveTv(crate::livetv::LiveTvCmd),
 }
 
 impl StoreCmd {
@@ -571,6 +590,7 @@ impl StoreCmd {
             StoreCmd::Collection(_) => StoreId::Collection,
             StoreCmd::ViewState(_) => StoreId::ViewState,
             StoreCmd::SubtitleSearch(_) => StoreId::SubtitleSearch,
+            StoreCmd::LiveTv(_) => StoreId::LiveTv,
         }
     }
 }
@@ -876,7 +896,7 @@ mod tests {
         for id in StoreId::ALL {
             assert_eq!(StoreId::from_ord(id.ord()), Some(id));
         }
-        assert_eq!(StoreId::from_ord(StoreOrd(10)), None);
+        assert_eq!(StoreId::from_ord(StoreOrd(11)), None);
     }
 }
 

@@ -75,8 +75,10 @@ pub enum Icon {
     /// the player HUD's transport state read-out beside the elapsed clock (`player_hud::draw_hud`,
     /// via `plx_appkit::player_hud::transport_mark`), where `Rewind` marks the playhead travelling
     /// BACKWARDS and `FastForward` marks it travelling forwards — a scrub, a chapter/marker hop and
-    /// a rapid-seek burst alike. They are a read-out, never a control: there is no rewind BUTTON in
-    /// this app and the design system forbids adding one.
+    /// a rapid-seek burst alike. On the television they are a read-out, never a control: there is
+    /// no rewind BUTTON there and the design system forbids adding one. The one exception is the
+    /// desktop pointer transport (`player_hud::draw_desk`), which a mouse needs because it has no
+    /// skip keys and which a television never draws (`ui/src/CLAUDE.md`, rule 3).
     ///
     /// **Both live in [`Icon::Pause`]'s own 14-unit band** (y 5..19 of a 24 viewBox), which is the
     /// design system's transport rule rather than a coincidence — the read-out is one small slot
@@ -109,6 +111,10 @@ pub enum Icon {
     /// the item menu's Play Trailer row. One path, evenodd knockout, same construction as
     /// [`Icon::CheckCircleFill`].
     Trailer,
+    /// Two crossing arrows — **Shuffle** (the item menu's row for a show or season, the detail
+    /// hero's disc on a show page). ONE stroked `<path>` whose subpaths cross: a single element, so
+    /// the crossing composites once and cannot crease (the module doc's rule 1).
+    Shuffle,
     Info,
     /// Warning triangle — `info.svg`'s sibling (same 24 viewBox, 2.2 stroke, round caps/joins,
     /// dot-and-bar inverted). From `Plex Pass Awareness.dc.html`: the facts row's HDR chip at
@@ -226,6 +232,23 @@ pub enum Icon {
     ServerBadgeXmark,
     /// A crossed-out wifi arc — no internet to even reach plex.tv (`IncidentKind::PinCreate`).
     WifiSlash,
+    /// A bookmark with a plus — the press that puts a title on the profile's watchlist.
+    WatchlistAdd,
+    /// The same bookmark with a minus — the press that takes it off again.
+    WatchlistRemove,
+    /// Three sliders — the desktop pointer chrome's Settings shortcut (`ui::desk`).
+    Settings,
+    /// A speaker with sound arcs — the desktop player's volume control. A television's volume is
+    /// the set's own, so only the desktop transport row (`appkit::player_hud`) draws it.
+    Volume,
+    /// The speaker crossed out — that control while muted.
+    VolumeMute,
+    /// Corners pointing out — the desktop window's fullscreen toggle, entering.
+    Fullscreen,
+    /// Corners pointing in — the same toggle, leaving.
+    FullscreenExit,
+    /// A triangle against a bar — the desktop transport row's next-episode button.
+    SkipNext,
 }
 
 /// **Where a mark's INK sits inside its 24-unit viewBox**, as `(left, right)` fractions — and
@@ -285,6 +308,7 @@ fn src(id: Icon) -> &'static str {
         Icon::FastForward => include_str!("../../../assets/icons/fast-forward.svg"),
         Icon::Restart => include_str!("../../../assets/icons/restart.svg"),
         Icon::Trailer => include_str!("../../../assets/icons/trailer.svg"),
+        Icon::Shuffle => include_str!("../../../assets/icons/shuffle.svg"),
         Icon::Info => include_str!("../../../assets/icons/info.svg"),
         Icon::Alert => include_str!("../../../assets/icons/alert.svg"),
         Icon::User => include_str!("../../../assets/icons/user.svg"),
@@ -312,6 +336,14 @@ fn src(id: Icon) -> &'static str {
         Icon::ServerBadgePlus => include_str!("../../../assets/icons/server-badge-plus.svg"),
         Icon::ServerBadgeXmark => include_str!("../../../assets/icons/server-badge-xmark.svg"),
         Icon::WifiSlash => include_str!("../../../assets/icons/wifi-slash.svg"),
+        Icon::WatchlistAdd => include_str!("../../../assets/icons/watchlist-add.svg"),
+        Icon::WatchlistRemove => include_str!("../../../assets/icons/watchlist-remove.svg"),
+        Icon::Settings => include_str!("../../../assets/icons/settings.svg"),
+        Icon::Volume => include_str!("../../../assets/icons/volume.svg"),
+        Icon::VolumeMute => include_str!("../../../assets/icons/volume-mute.svg"),
+        Icon::Fullscreen => include_str!("../../../assets/icons/fullscreen.svg"),
+        Icon::FullscreenExit => include_str!("../../../assets/icons/fullscreen-exit.svg"),
+        Icon::SkipNext => include_str!("../../../assets/icons/skip-next.svg"),
     }
 }
 
@@ -480,6 +512,25 @@ mod ink_tests {
         assert!(src(Icon::ChevronLeft).contains(r#"d="M15 6l-6 6 6 6""#));
     }
 
+    /// The shuffle mark at the sizes it is drawn (a menu row's leading glyph, a hero disc's):
+    /// it rasterizes, reaches full opacity, and keeps its ink off the border.
+    #[test]
+    fn the_shuffle_mark_rasterizes_clean() {
+        assert_eq!(src(Icon::Shuffle).matches("<path").count(), 1, "one element: no crease where the arrows cross");
+        for px in [20, 26, 32] {
+            let rgba = plx_gfx::svg::rasterize(src(Icon::Shuffle), px, px)
+                .unwrap_or_else(|| panic!("Shuffle failed to rasterize at {px}px"));
+            let alpha = |x: i32, y: i32| rgba[((y * px + x) * 4 + 3) as usize];
+            let max_alpha = (0..px).flat_map(|y| (0..px).map(move |x| alpha(x, y))).max().unwrap();
+            assert!(max_alpha > 200, "Shuffle is barely inked at {px}px: {max_alpha}");
+            for i in 0..px {
+                for (x, y) in [(i, 0), (i, px - 1), (0, i), (px - 1, i)] {
+                    assert_eq!(alpha(x, y), 0, "Shuffle has ink on the border at {px}px ({x},{y})");
+                }
+            }
+        }
+    }
+
     #[test]
     fn agreement_art_stays_inside_the_nanosvg_subset() {
         let svg = src(Icon::Agreement);
@@ -534,6 +585,44 @@ mod ink_tests {
             for y in 0..px {
                 assert_eq!(alpha(0, y), 0, "{id:?} has ink on the left border");
                 assert_eq!(alpha(px - 1, y), 0, "{id:?} has ink on the right border");
+            }
+        }
+    }
+
+    /// The desktop pointer chrome's marks (`ui::desk`, the desktop transport row) at the sizes a
+    /// 56/64px disc draws them and at 4x: full opacity, a clean border.
+    #[test]
+    fn the_desktop_chrome_marks_rasterize_clean() {
+        for id in [Icon::Settings, Icon::Volume, Icon::VolumeMute, Icon::Fullscreen, Icon::FullscreenExit, Icon::SkipNext] {
+            for px in [26, 30, 120] {
+                let rgba = plx_gfx::svg::rasterize(src(id), px, px).unwrap_or_else(|| panic!("{id:?} failed at {px}px"));
+                let alpha = |x: i32, y: i32| rgba[((y * px + x) * 4 + 3) as usize];
+                let max_alpha = (0..px).flat_map(|y| (0..px).map(move |x| alpha(x, y))).max().unwrap();
+                assert_eq!(max_alpha, 255, "{id:?} never reaches full opacity at {px}px");
+                for i in 0..px {
+                    for (x, y) in [(i, 0), (i, px - 1), (0, i), (px - 1, i)] {
+                        assert_eq!(alpha(x, y), 0, "{id:?} has ink on its border at {px}px ({x},{y})");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The two watchlist marks at the detail disc's and the menu row's sizes: full opacity, a clean
+    /// border.
+    #[test]
+    fn the_watchlist_marks_rasterize_clean() {
+        for id in [Icon::WatchlistAdd, Icon::WatchlistRemove] {
+            for px in [24, 32, 40] {
+                let rgba = plx_gfx::svg::rasterize(src(id), px, px).unwrap_or_else(|| panic!("{id:?} failed at {px}px"));
+                let alpha = |x: i32, y: i32| rgba[((y * px + x) * 4 + 3) as usize];
+                let max_alpha = (0..px).flat_map(|y| (0..px).map(move |x| alpha(x, y))).max().unwrap();
+                assert_eq!(max_alpha, 255, "{id:?} never reaches full opacity at {px}px");
+                for i in 0..px {
+                    for (x, y) in [(i, 0), (i, px - 1), (0, i), (px - 1, i)] {
+                        assert_eq!(alpha(x, y), 0, "{id:?} has ink on the border at {px}px ({x},{y})");
+                    }
+                }
             }
         }
     }

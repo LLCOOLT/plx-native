@@ -25,9 +25,9 @@
 //! **What remains excluded is excluded for a reason that does not dissolve.** A tile that is a
 //! PERSON or a TAG has no rating key and no watch state at all, so every row this module can build
 //! would be absent and the hold would open an empty panel: the detail page's cast headshots, and
-//! Search's Cast & Crew rows (`search::Item::Tag` has no rating key). A collection has a rating
-//! key but no watch state and no row here either ([`has_actions`] refuses it), so a hold on a
-//! Collections tile opens the collection page as OK does.
+//! Search's Cast & Crew rows (`search::Item::Tag` has no rating key). A collection or a playlist
+//! has a rating key but no watch state: its menu is the one row that can be done with it, *Make a
+//! Channel* ([`offers_channel`]), which a show and a season offer too.
 //!
 //! **Navigation owns its lifetime, phase and input scope** (restructure phase 10). It was
 //! `ui/item_menu.rs` — a `Popover` plus six `static mut`s (`POP`, `TABLE`, `ACTS`, `OPENER`,
@@ -101,6 +101,18 @@ pub enum Action {
     /// playing the item again picks up where it left off (see
     /// `plex::Client::remove_from_continue_watching`).
     RemoveFromDeck(String),
+    /// play this SHOW or SEASON shuffled — a `shuffle=1` PlayQueue over it, whose episodes then
+    /// play one after another in the shuffled order (`route::request_shuffle`)
+    Shuffle(String),
+    /// play VERSION `.1` of this leaf from now on, for the rest of the session
+    /// (`plex::set_media_index`) — the detail page's version chooser
+    SetVersion(String, u32),
+    /// put the title with this guid on the profile's watchlist (`true`) or take it off (`false`)
+    /// — `HubsCmd::EditWatchlist`. Its identity is the GUID, the one key plex.tv's list speaks.
+    Watchlist { guid: String, add: bool },
+    /// make a Live TV channel from this show, season, collection or playlist (`kind` is the row's
+    /// catalog kind) — the channel studio opens on it, to preview and keep (`plx_data::vchannel`)
+    MakeChannel { rk: String, kind: c_int, title: String },
 }
 
 impl Action {
@@ -130,8 +142,12 @@ impl Action {
             | Action::MarkUnwatched(rk)
             | Action::Play(rk)
             | Action::PlayFromStart(rk)
-            | Action::RemoveFromDeck(rk) => rk,
+            | Action::RemoveFromDeck(rk)
+            | Action::Shuffle(rk)
+            | Action::SetVersion(rk, _) => rk,
             Action::PlayTrailer { rk, .. } => rk,
+            Action::Watchlist { guid, .. } => guid,
+            Action::MakeChannel { rk, .. } => rk,
         }
     }
 
@@ -146,10 +162,21 @@ impl Action {
             Action::RemoveFromDeck(_) => 6,
             Action::PlayTrailer { .. } => 7,
             Action::Play(_) => 8,
+            Action::Shuffle(_) => 9,
+            Action::SetVersion(..) => 10,
+            Action::Watchlist { add: true, .. } => 11,
+            Action::Watchlist { add: false, .. } => 12,
+            Action::MakeChannel { .. } => 13,
         };
         c.u32(tag).str(self.rk());
+        if let Action::SetVersion(_, index) = self {
+            c.u32(*index);
+        }
         if let Action::GoToShow(_, season) = self {
             c.u32(*season as u32);
+        }
+        if let Action::MakeChannel { kind, title, .. } = self {
+            c.u32(*kind as u32).str(title);
         }
         if let Action::PlayTrailer {
             part,
@@ -183,7 +210,58 @@ pub const SHAPE: &str =
 /// Is `m` an item the menu has anything to offer? A leaf or a show/season — i.e. everything the
 /// home shelves carry. Kept as a predicate so the caller can decline to present an empty panel.
 pub fn has_actions(m: &PmsMovie) -> bool {
-    m.kind != plx_data::pms::KIND_COLLECTION && !m.rk.is_empty()
+    if m.rk.is_empty() {
+        return false;
+    }
+    match m.kind {
+        plx_data::pms::KIND_CHANNEL | plx_data::pms::KIND_CHANNEL_IDEA => false,
+        // A collection or a playlist has no watch state; its one row is Make a Channel.
+        plx_data::pms::KIND_COLLECTION | plx_data::pms::KIND_PLAYLIST => offers_channel(m),
+        _ => true,
+    }
+}
+
+/// **Does `m` play directly?** A movie or an episode with a key: the cards a desktop's hover play
+/// button (`plx_ui::desk`) is drawn on. A show, a season, a collection, a playlist or a channel
+/// opens a page or tunes instead, so that button is never drawn on one.
+pub fn plays_directly(m: &PmsMovie) -> bool {
+    !m.rk.is_empty() && matches!(m.kind, 0 | 3)
+}
+
+/// **Does `m` play straight from a content page?** A page's direct play is `PlayIntent::Movie`,
+/// which streams the part the row already carries — so a movie whose part is known, and nothing a
+/// further metadata read would have to complete.
+pub fn plays_from_page(m: &PmsMovie) -> bool {
+    plays_directly(m) && m.kind == 0 && !m.part.is_empty()
+}
+
+/// Where a direct play of `m` starts: its resume point, as every other Play of an item reads it.
+pub fn play_resume_ns(m: &PmsMovie) -> i64 {
+    plx_data::metadata::resume_ns(m.resume_ms, m.dur_ns / 1_000_000)
+}
+
+/// Does `m` offer *Make a Channel*? A show, a season, a collection or a playlist on the server
+/// the profile's channels live on (`plex::current_server`, the server `vchannel` keeps them on):
+/// a title borrowed from another server could not be read back to air.
+pub fn offers_channel(m: &PmsMovie) -> bool {
+    matches!(m.kind, 1 | 2 | plx_data::pms::KIND_COLLECTION | plx_data::pms::KIND_PLAYLIST)
+        && !m.rk.is_empty()
+        && (!m.sid.is_set() || m.sid == plx_plex::plex::current_server())
+}
+
+/// The *Make a Channel* row for `m`. A season's channel is named for its show as well.
+fn make_channel_row(m: &PmsMovie) -> FormSection<ItemRow, Action, Infallible> {
+    let title = if m.kind == 2 && !m.show_title.is_empty() {
+        format!("{} \u{b7} {}", m.show_title, m.title)
+    } else {
+        m.title.clone()
+    };
+    FormSection::new("").item(
+        ItemRow::MakeChannel,
+        RowKind::Button,
+        Action::MakeChannel { rk: m.rk.clone(), kind: m.kind, title },
+        Row::new(plx_platform::i18n::msg::browse_menu_make_channel()).licon(Icon::Show),
+    )
 }
 
 /// A menu row's identity: which of the seven rows it is. Hand-assigned keys, never a position —
@@ -201,6 +279,11 @@ pub enum ItemRow {
     PlayTrailer,
     RemoveFromDeck,
     Play,
+    Shuffle,
+    /// a row of the version chooser: version `n`
+    Version(u32),
+    Watchlist,
+    MakeChannel,
 }
 
 impl ItemRow {
@@ -222,6 +305,10 @@ impl FormId for ItemRow {
             ItemRow::PlayTrailer => 6,
             ItemRow::RemoveFromDeck => 7,
             ItemRow::Play => 8,
+            ItemRow::Shuffle => 9,
+            ItemRow::Version(n) => 100 + n,
+            ItemRow::Watchlist => 11,
+            ItemRow::MakeChannel => 12,
         })
     }
 }
@@ -246,7 +333,7 @@ type ItemForm = Form<ItemRow, Action, Infallible>;
 /// state group is one row or two off [`state_rows`], so this list has no fixed length.
 #[cfg(test)]
 fn build(m: &PmsMovie, from_deck: bool) -> ItemForm {
-    build_with(m, from_deck, DeckPress::Play, None)
+    build_with(m, from_deck, DeckPress::Play, None, None)
 }
 
 /// `deck_press` is the Continue Watching setting. It changes this menu for a card FROM the deck
@@ -262,6 +349,7 @@ fn build_with(
     from_deck: bool,
     deck_press: DeckPress,
     trailer: Option<&plx_data::metadata::Extra>,
+    watchlist: Option<bool>,
 ) -> ItemForm {
     let leaf = m.kind == 0 || m.kind == 3;
     let opens_details = from_deck && !deck_press.press_plays();
@@ -343,6 +431,22 @@ fn build_with(
         trailer.filter(|_| m.kind == 0 || m.kind == 1),
         &m.title,
     );
+    // ---- a show or a season plays shuffled too ----
+    sec = shuffle_row(sec, &m.rk, m.kind == 1 || m.kind == 2);
+
+    // ---- the watchlist: the one row whose outcome is the item's membership of the list ----
+    // Offered only once the list is known (`HubsView::on_watchlist` answers `Some`) and only for a
+    // movie or show, the two kinds plex.tv's list holds. The label is the outcome, like the watch
+    // rows: on the list it reads Remove, otherwise Add.
+    if let Some(on) = watchlist.filter(|_| m.kind == 0 || m.kind == 1) {
+        let (label, icon) = if on {
+            (plx_platform::i18n::msg::browse_menu_watchlist_remove(), Icon::WatchlistRemove)
+        } else {
+            (plx_platform::i18n::msg::browse_menu_watchlist_add(), Icon::WatchlistAdd)
+        };
+        sec = sec.item(ItemRow::Watchlist, RowKind::Button,
+            Action::Watchlist { guid: m.guid.clone(), add: !on }, Row::new(label).licon(icon));
+    }
 
     // ---- and, only on a Continue Watching card, the row that takes it off the deck ----
     // Gated on the SHELF, not on the item: the action is meaningless anywhere else (nothing to
@@ -466,7 +570,36 @@ fn build_episode(rk: &str, mark: PosterMark) -> ItemForm {
 /// from its beginning is what the first episode's own tile does, exactly and visibly. So
 /// `leaf: false` — the same flag [`build`] passes for a show, for the same reason.
 fn build_season(rk: &str, mark: PosterMark) -> ItemForm {
-    Form::new().section(state_rows(FormSection::new(""), rk, mark, false, None, ""))
+    Form::new().section(shuffle_row(state_rows(FormSection::new(""), rk, mark, false, None, ""), rk, true))
+}
+
+/// The detail page's VERSION chooser: one row per `Media[]` version, labelled, the one this session
+/// plays checked; a row picks that version for the item ([`Action::SetVersion`]).
+fn build_versions(rk: &str, labels: &[String], current: u32) -> ItemForm {
+    let sec = labels.iter().enumerate().fold(FormSection::new(""), |sec, (i, label)| {
+        let i = i as u32;
+        sec.choice(ItemRow::Version(i), Action::SetVersion(rk.to_string(), i), Row::new(label.clone()).server_label(), |id| {
+            *id == ItemRow::Version(current)
+        })
+    });
+    Form::new().section(sec)
+}
+
+/// The Shuffle row, for a show or a season (`offered`): it plays the container's episodes in a
+/// shuffled order. After the state rows — it is another way to PLAY, not a navigation, and the
+/// menu must keep opening where it always did.
+fn shuffle_row(
+    sec: FormSection<ItemRow, Action, Infallible>,
+    rk: &str,
+    offered: bool,
+) -> FormSection<ItemRow, Action, Infallible> {
+    sec.item_if(
+        offered && !rk.is_empty(),
+        ItemRow::Shuffle,
+        RowKind::Button,
+        Action::Shuffle(rk.to_string()),
+        Row::new(plx_platform::i18n::msg::browse_menu_shuffle()).licon(Icon::Shuffle),
+    )
 }
 
 /// Beside the card, never over it: to its RIGHT by default, flipped to its LEFT when that would run
@@ -548,18 +681,23 @@ impl ItemMenuScreen {
     /// The rows, built ONCE at `Mount`. A hub refetch can re-order the catalog underneath an open
     /// panel, so nothing here is rebuilt while the menu is up — which is also why every [`Action`]
     /// carries the identity it needs rather than an index.
-    fn build_rows(&mut self, meta: plx_data::metadata::MetadataView<'_>) {
+    fn build_rows(&mut self, meta: plx_data::metadata::MetadataView<'_>, watchlist: Option<bool>) {
         if self.built {
             return;
         }
         self.built = true;
         let form = match &self.arg.kind {
+            ItemMenuKind::Card { row, .. } if matches!(row.kind, plx_data::pms::KIND_COLLECTION | plx_data::pms::KIND_PLAYLIST) => {
+                Form::new().section(make_channel_row(row))
+            }
             ItemMenuKind::Card { row, from_deck } => {
                 let trailer = cached_trailer(self.arg.sid, row, meta);
-                build_with(row, *from_deck, plx_media::route::deck_press(), trailer.as_ref())
+                let form = build_with(row, *from_deck, plx_media::route::deck_press(), trailer.as_ref(), watchlist);
+                if offers_channel(row) { form.section(make_channel_row(row)) } else { form }
             }
             ItemMenuKind::Episode { mark } => build_episode(&self.arg.rk, *mark),
             ItemMenuKind::Season { mark, .. } => build_season(&self.arg.rk, *mark),
+            ItemMenuKind::Versions { labels, current } => build_versions(&self.arg.rk, labels, *current),
         };
         // a short list of one-line actions — BODY labels, not menu-size HEADLINE
         self.form.table.compact = true;
@@ -649,7 +787,11 @@ impl<H: AppLike + crate::registry::MetadataLike> Machine<H> for ItemMenuScreen {
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
         match ev {
             ScreenEvent::Mount => {
-                self.build_rows(H::metadata(cx));
+                let watchlist = match &self.arg.kind {
+                    ItemMenuKind::Card { row, .. } => H::on_watchlist(cx, &row.guid),
+                    _ => None,
+                };
+                self.build_rows(H::metadata(cx), watchlist);
                 // The menu is the thing the Home hold hint teaches; once ANY card screen has
                 // opened one the lesson is learned and the hint retires (`ui::hold_hint::learned`).
                 plx_ui::hold_hint::mark_learned();
@@ -901,11 +1043,32 @@ mod tests {
         built(super::build(m, from_deck))
     }
     fn build_with(m: &PmsMovie, from_deck: bool, trailer: Option<&plx_data::metadata::Extra>) -> Built {
-        built(super::build_with(m, from_deck, DeckPress::Play, trailer))
+        built(super::build_with(m, from_deck, DeckPress::Play, trailer, None))
     }
+    fn build_listed(m: &PmsMovie, watchlist: Option<bool>) -> Built {
+        built(super::build_with(m, false, DeckPress::Play, None, watchlist))
+    }
+
+    #[test]
+    fn the_watchlist_row_states_its_outcome_and_only_once_the_list_is_known() {
+        let mut movie = item(0, PosterMark::None);
+        movie.guid = "plex://movie/a".into();
+        assert!(!build_listed(&movie, None).ids().contains(&ItemRow::Watchlist), "the list is unknown");
+        assert_eq!(build_listed(&movie, Some(false)).action(ItemRow::Watchlist),
+            Action::Watchlist { guid: "plex://movie/a".into(), add: true });
+        assert_eq!(build_listed(&movie, Some(true)).action(ItemRow::Watchlist),
+            Action::Watchlist { guid: "plex://movie/a".into(), add: false });
+        let show = item(1, PosterMark::None);
+        assert!(build_listed(&show, Some(false)).ids().contains(&ItemRow::Watchlist));
+        for kind in [2, 3] {
+            assert!(!build_listed(&item(kind, PosterMark::None), Some(false)).ids().contains(&ItemRow::Watchlist),
+                "a season or an episode is not on plex.tv's list");
+        }
+    }
+
     /// A menu built under the Continue Watching setting `mode`.
     fn build_deck(m: &PmsMovie, from_deck: bool, mode: DeckPress) -> Built {
-        built(super::build_with(m, from_deck, mode, None))
+        built(super::build_with(m, from_deck, mode, None, None))
     }
     fn build_episode(rk: &str, mark: PosterMark) -> Built {
         built(super::build_episode(rk, mark))
@@ -935,6 +1098,34 @@ mod tests {
         fn is_destructive(&self, id: ItemRow) -> bool {
             self.0.index_of(&id).is_some_and(|i| self.0.table.sections[0].rows[i].destructive)
         }
+    }
+    /// *Make a Channel*: offered on a show, a season, a collection and a playlist from the server
+    /// the channels live on, never on a film, an episode, a channel or another server's title; a
+    /// season's channel is named for its show too.
+    #[test]
+    fn make_a_channel_is_offered_where_a_channel_can_be_made() {
+        let mut show = item(1, PosterMark::None);
+        show.title = "Frasier".into();
+        assert!(offers_channel(&show));
+        let mut season = item(2, PosterMark::None);
+        season.title = "Season 3".into();
+        season.show_title = "Frasier".into();
+        let row = built(Form::new().section(make_channel_row(&season)));
+        assert_eq!(row.action(ItemRow::MakeChannel), Action::MakeChannel { rk: "42".into(), kind: 2, title: "Frasier \u{b7} Season 3".into() });
+        for kind in [plx_data::pms::KIND_COLLECTION, plx_data::pms::KIND_PLAYLIST] {
+            let m = item(kind, PosterMark::None);
+            assert!(offers_channel(&m) && has_actions(&m), "kind {kind} opens a menu for its one row");
+        }
+        for kind in [0, 3, plx_data::pms::KIND_CHANNEL, plx_data::pms::KIND_CHANNEL_IDEA] {
+            assert!(!offers_channel(&item(kind, PosterMark::None)), "kind {kind}");
+        }
+        let mut borrowed = item(1, PosterMark::None);
+        borrowed.sid = plx_plex::plex::ServerId::from_raw(9);
+        assert!(!offers_channel(&borrowed), "another server's show cannot become a channel here");
+    }
+
+    fn labels_of(menu: &Built) -> Vec<String> {
+        labels(menu)
     }
     fn labels(menu: &Built) -> Vec<String> {
         menu.0.table.sections[0]
@@ -1129,11 +1320,17 @@ mod tests {
         assert!(!menu.offers(ItemRow::GoToShow));
     }
 
+    /// A collection has no watch state and nothing to play from the start: its menu is the one
+    /// row that can be done with it, *Make a Channel* — and none at all from another server.
     #[test]
-    fn a_collection_has_no_item_menu_actions() {
+    fn a_collections_only_item_menu_row_is_make_a_channel() {
         let collection = PmsMovie { rk: "42".into(), kind: plx_data::pms::KIND_COLLECTION,
             ..Default::default() };
-        assert!(!has_actions(&collection), "a collection menu must not be openable before its page exists");
+        assert!(has_actions(&collection));
+        let menu = built(Form::new().section(make_channel_row(&collection)));
+        assert_eq!(menu.ids(), [ItemRow::MakeChannel]);
+        let borrowed = PmsMovie { sid: plx_plex::plex::ServerId::from_raw(9), ..collection };
+        assert!(!has_actions(&borrowed), "nothing to offer for another server's collection");
     }
 
     /// A show or season never offers *Play from Start* — there is no single part to start — and
@@ -1144,7 +1341,7 @@ mod tests {
         let menu = build(&item(1, PosterMark::InProgress), false);
         assert_eq!(
             labels(&menu),
-            ["Go to Show", "—", "Mark as Watched", "Mark as Unwatched"]
+            ["Go to Show", "—", "Mark as Watched", "Mark as Unwatched", "Shuffle"]
         );
         assert_eq!(
             menu.action(ItemRow::MarkWatched).watch_write(),
@@ -1158,10 +1355,40 @@ mod tests {
         // a show whose every leaf is seen is DONE, and offering to mark it watched again was the
         // old row set's other wrong answer (it read `!unwatched`, which cannot tell the two apart)
         let menu = build(&item(1, PosterMark::Watched), false);
-        assert_eq!(labels(&menu), ["Go to Show", "—", "Mark as Unwatched"]);
+        assert_eq!(labels(&menu), ["Go to Show", "—", "Mark as Unwatched", "Shuffle"]);
         // …and one nobody has opened offers only the way forward
         let menu = build(&item(1, PosterMark::None), false);
-        assert_eq!(labels(&menu), ["Go to Show", "—", "Mark as Watched"]);
+        assert_eq!(labels(&menu), ["Go to Show", "—", "Mark as Watched", "Shuffle"]);
+    }
+
+    /// **Shuffle is offered for a show or a season, never a leaf**, after the state rows (the menu
+    /// keeps opening where it did), and commits a shuffle of THAT container — the season strip's
+    /// menu on the detail page included.
+    #[test]
+    fn a_show_or_season_offers_shuffle_and_a_leaf_does_not() {
+        for kind in [1, 2] {
+            let menu = build(&item(kind, PosterMark::None), false);
+            assert_eq!(menu.ids().last(), Some(&ItemRow::Shuffle), "kind {kind}");
+            assert_eq!(menu.action(ItemRow::Shuffle), Action::Shuffle("42".into()));
+            assert_ne!(menu.0.opening_key(), Some(ItemRow::Shuffle.key()), "kind {kind} still opens where it did");
+        }
+        for kind in [0, 3] {
+            assert!(!build(&item(kind, PosterMark::None), false).offers(ItemRow::Shuffle), "kind {kind}");
+        }
+        assert!(!build_episode("7", PosterMark::None).offers(ItemRow::Shuffle));
+        assert_eq!(build_season("78", PosterMark::None).action(ItemRow::Shuffle), Action::Shuffle("78".into()));
+    }
+
+    /// **The version chooser lists every version, the playing one checked**, and a row picks THAT
+    /// version of THIS item.
+    #[test]
+    fn the_version_chooser_picks_a_version_of_the_item() {
+        let labels = vec!["4K \u{b7} HEVC".to_string(), "1080p \u{b7} H.264".to_string()];
+        let menu = built(super::build_versions("9", &labels, 1));
+        assert_eq!(labels_of(&menu), labels);
+        assert_eq!(menu.ids(), [ItemRow::Version(0), ItemRow::Version(1)]);
+        assert!(menu.0.table.sections[0].rows[1].checked && !menu.0.table.sections[0].rows[0].checked);
+        assert_eq!(menu.action(ItemRow::Version(0)), Action::SetVersion("9".into(), 0));
     }
 
     #[test]
@@ -1181,7 +1408,7 @@ mod tests {
         let mut s = item(2, PosterMark::None);
         s.show_rk.clear();
         let menu = build(&s, false);
-        assert_eq!(labels(&menu), ["Mark as Watched"]);
+        assert_eq!(labels(&menu), ["Mark as Watched", "Shuffle"]);
     }
 
     /// **Remove from Continue Watching** is gated on the SHELF, not on the item: only a card that
@@ -1278,7 +1505,7 @@ mod tests {
         assert!(matches!(opening(build_episode("77", PosterMark::Watched)),
             Action::PlayFromStart(_)), "a watched episode opened on Mark as Unwatched");
         assert!(matches!(opening(build_season("78", PosterMark::Watched)),
-            Action::MarkUnwatched(_)), "the only row is the one on offer");
+            Action::Shuffle(_)), "a watched season opens on Shuffle, not on Mark as Unwatched");
         assert!(matches!(opening(build_episode("79", PosterMark::None)),
             Action::MarkWatched(_)));
         let menu = build(&item(3, PosterMark::None), true);
@@ -1388,17 +1615,17 @@ mod tests {
             |extra: &str| format!(r#"{{"ratingKey":"14","type":"show","leafCount":10{extra}}}"#);
         assert_eq!(
             set(&show("")),
-            ["Go to Show", "—", "Mark as Watched"],
+            ["Go to Show", "—", "Mark as Watched", "Shuffle"],
             "no leaf viewed"
         );
         assert_eq!(
             set(&show(r#","viewedLeafCount":3"#)),
-            ["Go to Show", "—", "Mark as Watched", "Mark as Unwatched"],
+            ["Go to Show", "—", "Mark as Watched", "Mark as Unwatched", "Shuffle"],
             "3 of 10: neither watched nor unwatched, so BOTH verbs — the case `viewCount > 0` misses"
         );
         assert_eq!(
             set(&show(r#","viewedLeafCount":10"#)),
-            ["Go to Show", "—", "Mark as Unwatched"],
+            ["Go to Show", "—", "Mark as Unwatched", "Shuffle"],
             "all 10"
         );
 
@@ -1538,7 +1765,7 @@ mod tests {
         m.part = "/library/parts/42/file.mkv".to_string();
 
         let mut screen = ItemMenuScreen::new(EntryId(7), card_arg(&m, false));
-        screen.build_rows(test_store().view());
+        screen.build_rows(test_store().view(), None);
         let elem = first_action(&screen, |a| matches!(a, Action::PlayFromStart(_)));
         let req = commit(&mut screen, elem);
         assert_eq!(
@@ -1572,7 +1799,7 @@ mod tests {
                 from_home: false,
             },
         );
-        strip.build_rows(test_store().view());
+        strip.build_rows(test_store().view(), None);
         let elem = first_action(&strip, |a| matches!(a, Action::PlayFromStart(_)));
         let req = commit(&mut strip, elem);
         assert!(
@@ -1604,7 +1831,7 @@ mod tests {
                 from_home: false,
             },
         );
-        tab.build_rows(test_store().view());
+        tab.build_rows(test_store().view(), None);
         let elem = first_action(&tab, |a| matches!(a, Action::MarkWatched(_)));
         let req = commit(&mut tab, elem);
         assert!(req.item.is_none(), "the tab is no catalog row");

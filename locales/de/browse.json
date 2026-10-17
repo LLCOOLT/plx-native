@@ -262,5 +262,17 @@
   "browse.clock.notice_year": "TV-Uhr scheint falsch zu gehen ({year}). Über den gespeicherten Schlüssel verbunden.",
   "browse.clock.notice": "TV-Uhr scheint falsch zu gehen. Über den gespeicherten Schlüssel verbunden.",
   "browse.clock.no_key": "Die Uhr dieses Fernsehers scheint falsch zu gehen. Verbinde den Fernseher einmal mit dem Internet und versuche es erneut.",
-  "browse.clock.key_changed": "Der Schlüssel deines Servers hat sich geändert. Verbinde den Fernseher einmal mit dem Internet, damit die App ihn neu prüfen kann."
+  "browse.clock.key_changed": "Der Schlüssel deines Servers hat sich geändert. Verbinde den Fernseher einmal mit dem Internet, damit die App ihn neu prüfen kann.",
+  "browse.menu.shuffle": "Zufallswiedergabe",
+  "browse.detail.version": "Version",
+  "browse.home.watchlist": "Watchlist",
+  "browse.home.on_now": "Läuft jetzt",
+  "browse.home.your_genres": "Neu in deinen Genres",
+  "browse.menu.watchlist_add": "Zur Watchlist hinzufügen",
+  "browse.menu.watchlist_remove": "Von der Watchlist entfernen",
+  "browse.home.playlists": "Playlists",
+  "browse.home.channels": "Vorgeschlagene Kanäle",
+  "browse.home.surprise_title": "Überrasch mich",
+  "browse.home.surprise_why": "Ein Kanal, auf den du vielleicht nicht kommst",
+  "browse.menu.make_channel": "Kanal erstellen"
 }

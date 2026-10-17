@@ -219,6 +219,8 @@ fn avio_over(src: Src, size: i64, aq: *mut AuQueue) -> AvioState {
         bounce: Vec::new(),
         bounce_pos: 0,
         parked_at_end: false,
+        stalled_since: None,
+        reconnects: 0,
     }
 }
 
@@ -684,6 +686,7 @@ fn demux_video_aus(file: Virtual, want: usize) -> (usize, Vec<(Option<u64>, u16)
             origin,
             "/library/parts/1/file.mp4".into(),
             "aac".into(),
+            false,
             None,
             None,
             vp,

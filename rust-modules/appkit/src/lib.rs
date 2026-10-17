@@ -24,6 +24,7 @@
 pub mod chapters_panel;
 pub mod held_key; // the key-hold half of hold-to-scrub, shared by the player HUD and the trailer transport
 pub mod info_panel;
+pub mod live_banner; // the player's transport for a Live TV channel: LIVE badge, channel, airing progress, what's next
 pub mod more_menu; // the player's `…` overflow popover (holds the Stats for nerds toggle)
 pub mod player_hud;
 pub mod scrub_preview; // the still above the knob while scrubbing, from the part's BIF index

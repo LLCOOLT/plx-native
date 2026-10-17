@@ -9,13 +9,18 @@
 //! has its own trigger namespace, its own remote FIFO and its own event log — which is what lets
 //! independent UI and data-layer work proceed in parallel.
 //!
-//! **What it is NOT.** There is no video. The 29-symbol media seam does not exist off-device, and
-//! `player::ffi_host`'s `HostSink` reports the same "no video path" failure a television with no
-//! usable ACB binding reports, so Play lands on the app's real failure read-out. Nor is it a substitute
-//! for the device on anything the GPU decides: the `--fps` gates are calibrated to the SM9000's
-//! Mali, and text rasterization here goes through a different FreeType. A green run on this binary
-//! is evidence about a Mac. Layout, focus, navigation, and every byte of the Plex data layer are
-//! the parts that do transfer — and they are most of the UI work.
+//! **What it is NOT.** It is not a television. There is no Starfish pipeline off-device: when the
+//! bundled FFmpeg carries the desktop decoders, `player::desk` decodes behind `player::ffi_host`'s
+//! sink with the OS's decoder and the sound card's clock, and without them Play lands on the app's
+//! real failure read-out. Either way nothing it shows says what LG's decoder will do, nor is it a
+//! substitute for the device on anything the GPU decides: the `--fps` gates are calibrated to the
+//! SM9000's Mali, and text rasterization here goes through a different FreeType. A green run on
+//! this binary is evidence about a desktop. Layout, focus, navigation, and every byte of the Plex
+//! data layer are the parts that do transfer — and they are most of the UI work.
+//!
+//! It is also the desktop APP: the same binary, built `--release --no-default-features`, is what
+//! `ci/mkmacapp.py` bundles and `ci/mkwinapp.py` zips. A release build on Windows is a GUI
+//! program, so no console window opens beside it.
 //!
 //! Usage:
 //!   plxnative-sim [pms-host] [pms-port]
@@ -24,7 +29,9 @@
 //!   PLXNATIVE_RUNTIME_DIR                     this instance's trigger/FIFO/log root
 //!   PLXNATIVE_APP_DIR                         where appfont*.ttf and the icons live (repo `pkg/`)
 
-use plxnative_modules::port::plex_run;
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+use plxnative_modules::desktop::plex_run;
 use std::ffi::CString;
 use std::os::raw::c_int;
 
@@ -41,8 +48,15 @@ fn main() {
         .next()
         .or_else(|| std::env::var("PLXNATIVE_PMS_HOST").ok())
         .unwrap_or_default();
+    // The packaging jobs' smoke test (`.github/workflows/desktop.yml`): reaching this line means
+    // the loader resolved every library the binary imports, from the bundle alone.
+    if host == "--version" {
+        println!("PlxNative {}", env!("PLX_VERSION"));
+        return;
+    }
     if host == "--write-synthetic-initial" {
         use std::io::Write;
+        #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
         let result = (|| -> Result<(), &'static str> {
             let path = args.next().ok_or("missing output path")?;
@@ -57,8 +71,12 @@ fn main() {
             };
             if args.next().is_some() { return Err("unexpected argument"); }
             let encoded = plxnative_modules::synthetic_home_initial(seed,port,settings)?;
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
-                .open(path).map_err(|_| "cannot create initial input file")?;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            // Windows has no mode bits; the file inherits the ACL of the directory it is made in.
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(path).map_err(|_| "cannot create initial input file")?;
             file.write_all(encoded.as_bytes()).map_err(|_| "cannot write initial input file")
         })();
         if let Err(reason) = result { eprintln!("synthetic initial input: {reason}"); std::process::exit(2); }
@@ -102,8 +120,9 @@ fn main() {
     // The banner is the FIRST line of the log, so a log read from the middle, tailed, or pasted
     // into an issue still declares what produced it. Every heartbeat additionally carries `sim=1`
     // (see `app.rs`'s SIM_TAG) — one marker at the top is easy to scroll past.
-    let banner = "sim: THIS IS THE DESKTOP SIMULATOR, not a television. No video pipeline; \
-                  frame rates here describe this Mac's GPU and must never be read as an fps gate.\n";
+    let banner = "sim: THIS IS THE DESKTOP SIMULATOR, not a television. No Starfish pipeline; \
+                  anything decoded here is the desktop's own FFmpeg, and frame rates describe this \
+                  machine's GPU and must never be read as an fps gate.\n";
     if let Err(e) = std::fs::write(&events, banner) {
         eprintln!("plxnative-sim: cannot truncate {}: {e}", events.display());
         std::process::exit(1);
@@ -143,6 +162,7 @@ fn exit_without_atexit_teardown(rc: c_int) -> ! {
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
     // SAFETY: `_exit` is async-signal-safe and takes no pointers; it ends every thread at once,
-    // which is exactly the point.
+    // which is exactly the point. (The Windows CRT's `_exit` skips `atexit` too and ends in
+    // `ExitProcess`, which terminates the other threads before any DLL detach handler runs.)
     unsafe { libc::_exit(rc) }
 }

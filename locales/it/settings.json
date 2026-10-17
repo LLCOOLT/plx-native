@@ -300,5 +300,17 @@
   "settings.consent.placeholder.random_id": "id casuale",
   "settings.consent.placeholder.project_key": "chiave del progetto",
   "settings.consent.placeholder.app_version": "versione dell'app",
-  "settings.consent.placeholder.webos_codename_short": "nome in codice webOS"
+  "settings.consent.placeholder.webos_codename_short": "nome in codice webOS",
+  "settings.playback.auto_skip": "Salta intro e titoli di coda",
+  "settings.playback.auto_skip.off": "Disattivato",
+  "settings.playback.auto_skip.intro": "Salta l'intro",
+  "settings.playback.auto_skip.intro_credits": "Salta intro e titoli di coda",
+  "settings.playback.auto_skip.copy": "Salta le intro, e se vuoi anche i titoli di coda, appena iniziano. Sinistra o il pulsante Indietro sullo schermo riporta all'inizio. I titoli di coda non vengono mai saltati mentre il conto alla rovescia porta all'episodio successivo.",
+  "settings.playback.screensaver": "Salvaschermo",
+  "settings.playback.screensaver.off": "Disattivato",
+  "settings.playback.screensaver.min2": "Dopo 2 minuti",
+  "settings.playback.screensaver.min5": "Dopo 5 minuti",
+  "settings.playback.screensaver.min10": "Dopo 10 minuti",
+  "settings.playback.screensaver.min20": "Dopo 20 minuti",
+  "settings.playback.screensaver.copy": "Quando per un po' non viene premuto nulla in una pagina di navigazione, lo schermo sfuma in una presentazione di immagini della tua libreria con l'ora. Qualsiasi pulsante riporta alla pagina. Non parte mai durante la riproduzione."
 }

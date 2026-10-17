@@ -574,6 +574,9 @@ fn cold_start_plan_lands_as_client_over_remux_with_a_reader_target() {
         title: String::new(),
         ctx: String::new(),
         preview: false,
+        seed: None,
+        playlist: String::new(),
+        channel: false,
     });
     assert_eq!(subtitle_presenter(&ps), SubtitlePresenter::ClientOverRemux);
     assert!(!subtitles_burned(&ps));

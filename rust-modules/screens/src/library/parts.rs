@@ -488,6 +488,8 @@ impl<H: Host<Elem = u32>> CardSource<H> for GridSrc<'_, '_> {
     fn progress(&self, i: usize) -> Option<f32> {
         self.view.item(i).filter(|item| item.kind != 3).and_then(|item| item.resume_frac())
     }
+    fn has_menu(&self, i: usize) -> bool { self.view.item(i).is_some_and(crate::registry::item_has_menu) }
+    fn playable(&self, i: usize) -> bool { self.view.item(i).is_some_and(crate::registry::item_plays_directly) }
     fn overlay(&self, p: Painter, i: usize, tile: &Tile, measure: &dyn Measure) {
         #[cfg(test)] OVERLAID.with(|seen| seen.borrow_mut().push((i, tile.scale)));
         if let Some(item) = self.view.item(i).filter(|item| item.kind == 3) {

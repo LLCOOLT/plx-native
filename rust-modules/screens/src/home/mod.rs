@@ -91,6 +91,8 @@ pub const STRIP_MOVIES_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 1;
 pub const STRIP_SHOWS_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 2;
 pub const STRIP_SEARCH_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 3;
 pub const STRIP_ACCOUNT_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 4;
+/// The Live TV pill, drawn while Live TV has anything to show (`LiveTvView::configured`, `app::chrome`).
+pub const STRIP_LIVETV_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 5;
 
 const MAX_ITEMS: usize = plx_data::pms::MAX_SHELF_ITEMS;
 const HERO_FLIP_CD: f32 = 0.35;
@@ -1402,6 +1404,11 @@ impl HomeScreen {
         else {
             return HintInput::default();
         };
+        // A live channel or a playlist has no menu to hold for (`emit_item_menu`), so it
+        // promises none.
+        if self.item_at(H::hubs(cx), row, col).is_some_and(|item| !plx_data::pms::item_has_menu_kind(item.kind)) {
+            return HintInput::default();
+        }
         let count = self.rows.get(row).map_or(0, |r| r.elems.len());
         let glide = self
             .grid
@@ -1621,6 +1628,7 @@ impl HomeScreen {
             STRIP_SHOWS_ELEM => HomeReq::Tab(HomeTab::Shows),
             STRIP_SEARCH_ELEM => HomeReq::Tab(HomeTab::Search),
             STRIP_ACCOUNT_ELEM => HomeReq::Account,
+            STRIP_LIVETV_ELEM => HomeReq::Tab(HomeTab::LiveTv),
             _ => return None,
         })
     }
@@ -1636,6 +1644,24 @@ impl HomeScreen {
         ));
     }
 
+    /// A desktop card's hover play button (`ScreenEvent::PlayCard`): play the card's item from its
+    /// resume point, as the Continue Watching deck's press does in Play mode — whatever the row.
+    fn play_card<H: HomeLike>(&self, elem: u32, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
+        let Some(Located::Item(row, col)) = self.locate(self.activation_elem(elem)) else {
+            return Handled::No;
+        };
+        let Some(item) = self.item_at(H::hubs(cx), row, col).filter(|m| crate::registry::item_plays_directly(m)) else {
+            return Handled::No;
+        };
+        fx.push(Fx::App(AppFx::Home(HomeReq::Play {
+            sid: item.sid,
+            rk: item.rk.clone(),
+            resume_ns: crate::registry::item_play_resume_ns(item),
+        })));
+        fx.invalidate(Provenance::Input);
+        Handled::Yes
+    }
+
     fn emit_item_menu<H: HomeLike>(&self, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
         if self.snap.pos < 0.5 {
             return Handled::No;
@@ -1646,6 +1672,8 @@ impl HomeScreen {
         let Some(item) = self.item_at(H::hubs(cx), row, col) else {
             return Handled::No;
         };
+        // A live channel, a collection or a playlist still reaches the app, which declines it
+        // (`item_menu::has_actions`) so the dipped card springs back rather than staying held.
         if item.rk.is_empty() {
             return Handled::No;
         }
@@ -1680,6 +1708,7 @@ impl HomeScreen {
                     HomeTab::Movies => STRIP_MOVIES_ELEM,
                     HomeTab::Shows => STRIP_SHOWS_ELEM,
                     HomeTab::Search => STRIP_SEARCH_ELEM,
+                    HomeTab::LiveTv => STRIP_LIVETV_ELEM,
                 };
                 self.strip_chosen = true;
                 self.reseat(
@@ -1796,7 +1825,23 @@ impl HomeScreen {
                 let Some(item) = self.item_at(view, row, col) else {
                     return;
                 };
-                if self
+                if item.kind == plx_data::pms::KIND_PLAYLIST {
+                    // A playlist opens its page — the collection page over the playlist's items,
+                    // which plays it in order.
+                    fx.push(Fx::App(AppFx::Content(ContentReq::Push(ContentArg::Collection(
+                        plx_plex::plex::collections::CollectionRef::by_playlist(item.sid, &item.rk, &item.title),
+                    )))));
+                    return;
+                }
+                if item.kind == plx_data::pms::KIND_CHANNEL {
+                    // An On Now card tunes its channel, as OK on the guide does; its key is the
+                    // channel's guide number (`livetv::on_now::rows`).
+                    (item, HomeReq::Tune { number: item.rk.clone() })
+                } else if item.kind == plx_data::pms::KIND_CHANNEL_IDEA {
+                    // A Suggested Channels card opens the channel studio on that suggestion
+                    // (`livetv::suggested::rows`), where it is previewed and kept.
+                    (item, HomeReq::Studio { id: item.rk.clone() })
+                } else if self
                     .rows
                     .get(row)
                     .is_some_and(|h| h.identity == HomeHubIdentity::ContinueWatching)
@@ -2027,6 +2072,18 @@ impl HomeScreen {
                     shelf.paint_ghosts(f, p, &self.cards(view, row), &self.ghost_source(shelf), self.section(row));
                 }
                 shelf.paint_resting(f, p, &self.cards(view, row), self.section(row));
+            }
+        }
+        // The shelf just below the screen, so a scroll down arrives at artwork already on its way
+        // (`plx_ui::cards::LOOKAHEAD_AHEAD`).
+        let beyond = if plx_ui::cards::page_on_canvas(p) {
+            shelves_beyond_screen((0..self.rows.len()).map(|r| self.shelf_on_screen(r)))
+        } else {
+            None
+        };
+        if let Some(row) = beyond {
+            if let (Some(shelf), Some(_)) = (self.grid.shelves.get(row), self.hub(view, row)) {
+                shelf.prefetch::<H, _>(p, &self.cards(view, row), self.section(row), true);
             }
         }
         // The focused tile after every row, so its glow overlaps the neighbouring rows.
@@ -2824,6 +2881,7 @@ impl<H: HomeLike> Machine<H> for HomeScreen {
                 Handled::Yes
             }
             ScreenEvent::PressHold(_) => self.emit_item_menu(cx, fx),
+            ScreenEvent::PlayCard(elem) => self.play_card(*elem, cx, fx),
             ScreenEvent::App(AppMsg::Home(command)) => {
                 self.sync_catalog(cx);
                 self.command(*command, cx, fx)
@@ -3203,6 +3261,14 @@ fn hero_logo_rk(item: &PmsMovie) -> &str {
         &item.rk
     }
 }
+/// The shelf a page warms beyond the screen, given which rows are on it: the one below the last
+/// one shown. Pure.
+fn shelves_beyond_screen(on_screen: impl Iterator<Item = bool>) -> Option<usize> {
+    let shown: Vec<bool> = on_screen.collect();
+    let last = shown.iter().rposition(|&v| v)?;
+    (last + 1 < shown.len()).then_some(last + 1)
+}
+
 fn prefetch_order(cur: i32, n: i32, out: &mut [i32; 2 * HERO_PREFETCH]) -> usize {
     if n <= 1 {
         return 0;
@@ -3500,6 +3566,14 @@ impl<H: HomeLike> CardSource<H> for HomeCards<'_> {
 
     fn hover(&self, _i: usize) -> Hover {
         self.hover
+    }
+
+    fn has_menu(&self, i: usize) -> bool {
+        self.item(i).is_some_and(crate::registry::item_has_menu)
+    }
+
+    fn playable(&self, i: usize) -> bool {
+        self.item(i).is_some_and(crate::registry::item_plays_directly)
     }
 
     /// The row sweeps in with the dive: its offset and its caption's lag are the spring's times `snap`.

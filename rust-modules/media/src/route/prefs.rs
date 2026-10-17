@@ -36,7 +36,7 @@
 //! frozen top-level keys: no pick in this module ever writes one.
 use super::plan::{supported_quality, Quality, QUALITY_LADDER};
 use plx_plex::plex::session::{
-    effective, own_prefs, persist_profile_pref, AudioEnhancementsPref, DeckPress, DeckPressPref, DirectPlayMode,
+    effective, own_prefs, persist_profile_pref, AudioEnhancementsPref, AutoSkip, Screensaver, DeckPress, DeckPressPref, DirectPlayMode,
     DirectPlayModePref, HdrOverlayBrightness, HdrOverlayBrightnessPref, NextEpisodeMode, NextEpisodeModePref, Preferences, ProfilePrefs, ProfilePrefsRecord,
     ProfileSetting, ProfileWrite, QualityPref, Row, Setting, SkipInterval, SkipIntervalPref, SubtitlePosition,
     SubtitlePositionPref, SubtitleSize, SubtitleSizePref, SubtitleTone, SubtitleTonePref, TrailerAutoplayPref,
@@ -869,6 +869,59 @@ pub fn deck_press() -> DeckPress { DeckPressPref::live() }
 pub fn restore_deck_press(mode: DeckPress) { restore_live::<DeckPressPref>(mode) }
 /// Blocking persistence seam, as [`set_next_episode_mode`].
 pub fn set_deck_press(mode: DeckPress) -> bool { confirm::<DeckPressPref>(mode) }
+
+// ---- the install-wide cells (not per-profile, so not `LiveSetting` rows) ---------------------
+
+/// Whether the player skips intro / credits markers by itself — install-wide (`AutoSkipPref` is an
+/// `Install` row in plex, `LIVE = false`), so a plain cell outside [`LIVE_ROWS`]. Read once a frame
+/// by the loop's marker-offer edge (`app::run`), which asks `player_hud::auto_skip_for` whether the
+/// segment just offered is one this setting skips. Seeded by boot and the credentials handoff
+/// through [`restore_auto_skip`].
+static AUTO_SKIP: AtomicU8 = AtomicU8::new(0); // AutoSkip::Off's index
+
+pub fn auto_skip() -> AutoSkip { AutoSkip::from_index(AUTO_SKIP.load(Relaxed)) }
+pub fn restore_auto_skip(mode: AutoSkip) {
+    #[cfg(any(test, feature = "test-support"))]
+    plx_base::testlock::assert_held("auto-skip preference");
+    AUTO_SKIP.store(mode.index(), Relaxed);
+}
+
+/// Blocking persistence seam; Settings dispatches it on the storage worker. The live value changes
+/// only once the write is durable, so a failed save claims nothing.
+pub fn set_auto_skip(mode: AutoSkip) -> bool {
+    let saved = plx_plex::plex::session::update_with_outcome(|s| Some(s.with_auto_skip(mode)))
+        .is_some_and(|write| matches!(write.classify(),
+            plx_plex::plex::session::async_persistence::CompletionOutcome::Durable(_)));
+    if saved {
+        restore_auto_skip(mode);
+        plx_machine::idle::invalidate();
+    }
+    saved
+}
+
+/// How long a browsing page waits before the ambient screensaver (`app::ambient`) — install-wide,
+/// like [`auto_skip`]. Not a playback preference, but the preferences screen reads every live value
+/// from here.
+static SCREENSAVER: AtomicU8 = AtomicU8::new(2); // Screensaver::Minutes5's index
+
+pub fn screensaver() -> Screensaver { Screensaver::from_index(SCREENSAVER.load(Relaxed)) }
+pub fn restore_screensaver(mode: Screensaver) {
+    #[cfg(any(test, feature = "test-support"))]
+    plx_base::testlock::assert_held("screensaver preference");
+    SCREENSAVER.store(mode.index(), Relaxed);
+}
+
+/// Blocking persistence seam, durable-first like [`set_auto_skip`].
+pub fn set_screensaver(mode: Screensaver) -> bool {
+    let saved = plx_plex::plex::session::update_with_outcome(|s| Some(s.with_screensaver(mode)))
+        .is_some_and(|write| matches!(write.classify(),
+            plx_plex::plex::session::async_persistence::CompletionOutcome::Durable(_)));
+    if saved {
+        restore_screensaver(mode);
+        plx_machine::idle::invalidate();
+    }
+    saved
+}
 
 pub fn subtitle_size() -> SubtitleSize { SubtitleSizePref::live() }
 pub fn restore_subtitle_size(size: SubtitleSize) { restore_live::<SubtitleSizePref>(size) }

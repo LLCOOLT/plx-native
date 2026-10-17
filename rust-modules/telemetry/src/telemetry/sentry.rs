@@ -264,8 +264,14 @@ pub extern "C" fn plx_crash_write_image_marker(fd: std::os::raw::c_int) {
             image_size()
         )
     };
+    #[cfg(unix)]
     unsafe {
         let _ = libc::write(fd, line.as_ptr().cast(), line.len());
+    }
+    // The CRT's `_write` takes an `unsigned int` count; the marker is one short line.
+    #[cfg(windows)]
+    unsafe {
+        let _ = libc::write(fd, line.as_ptr().cast(), line.len() as libc::c_uint);
     }
 }
 

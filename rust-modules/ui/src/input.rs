@@ -114,6 +114,18 @@ impl<K: Copy + Eq + Hash> InputMachine<K> {
         id
     }
 
+    /// **Deliver the armed press's hold NOW**, rather than from the tick that sees it cross
+    /// `LONG_MS` — the desktop overflow button's (`screen::Activate::Hold`), which is a hold
+    /// already. Waiting for the tick loses it to a fast click: a button-down and -up in ONE frame
+    /// reach the press before any tick, and that tick then latches the long press and leaves the
+    /// down phase in the same step, so `is_long` is never seen. `None` for a press that is not
+    /// holdable or whose hold was already delivered; the tick never delivers this one twice.
+    pub fn hold_now(&mut self) -> Option<PressEvent<K>> {
+        let arm = self.arm.as_mut().filter(|a| a.holdable && !a.held_delivered)?;
+        arm.held_delivered = true;
+        Some(PressEvent::Hold(arm.id, arm.owner, arm.key))
+    }
+
     /// Abandon the press: navigation, an owner change, a pointer that left the arm. The dip owner
     /// stays (see [`dip_owner`](Self::dip_owner)); [`tick`](Self::tick) releases it once the spring
     /// has settled.

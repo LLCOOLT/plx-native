@@ -218,7 +218,7 @@ pub(crate) fn arm_gst_logging() {}
 ///
 /// **Not free**: a dozen formatted lines a frame. Arm it for the leg that needs it, and read
 /// pacing from another.
-#[cfg(feature = "devtriggers")]
+#[cfg(all(feature = "devtriggers", unix))]
 pub(crate) fn arm_wayland_debug() {
     if !plx_base::devtrig::flag("wldebug") {
         return;
@@ -238,7 +238,8 @@ pub(crate) fn arm_wayland_debug() {
     let (real, mono) = (stamp(libc::CLOCK_REALTIME), stamp(libc::CLOCK_MONOTONIC));
     plx_base::eventlog::log(&format!("wldebug: WAYLAND_DEBUG=client realtime_us={real} mono_us={mono} offset_us={}", real - mono));
 }
-#[cfg(not(feature = "devtriggers"))]
+// Windows has no Wayland client library to arm, so the trigger compiles out there.
+#[cfg(not(all(feature = "devtriggers", unix)))]
 pub(crate) fn arm_wayland_debug() {}
 
 /// Parse `/tmp/plxnative-server=<slot>`, the optional server half of a direct-screen trigger.

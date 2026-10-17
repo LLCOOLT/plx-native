@@ -2,9 +2,15 @@
 //! src/aq.c). The player consumer allocates an `AuQueue` and passes `&q`; `aq_pop`
 //! hands back a malloc'd `AuNode` the caller reads and frees. AuNode uses a flexible
 //! array member (`data[]`); AuQueue embeds pthread objects — both repr(C) so the
-//! layouts match glibc.
+//! layouts match glibc. On Windows the pthread objects are `plx_base::task::pthread`'s SRWLOCK and
+//! CONDITION_VARIABLE under the same names (`pt` below), so this file has one body.
 use std::os::raw::{c_int, c_long, c_uchar, c_void};
 use std::ptr;
+
+#[cfg(unix)]
+use libc as pt;
+#[cfg(windows)]
+use plx_base::task::pthread as pt;
 
 #[repr(C)]
 pub struct AuNode {
@@ -27,9 +33,9 @@ pub struct AuQueue {
     pops: u64, // AUs the consumer has popped, ever: a producer's evidence that the lane is draining
     eof: c_int,
     abort: c_int,
-    m: libc::pthread_mutex_t,
-    not_full: libc::pthread_cond_t,
-    not_empty: libc::pthread_cond_t,
+    m: pt::pthread_mutex_t,
+    not_full: pt::pthread_cond_t,
+    not_empty: pt::pthread_cond_t,
 }
 
 /// pointer to the au_node's flexible `data[]` (offset = right after `es`)
@@ -49,9 +55,9 @@ pub unsafe fn aq_is_aborted(q: *const AuQueue) -> bool {
         return false;
     }
     let q = q as *mut AuQueue;
-    libc::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
+    pt::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
     let aborted = (*q).abort != 0;
-    libc::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
+    pt::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
     aborted
 }
 
@@ -85,9 +91,9 @@ fn aq_init_cap(q: *mut AuQueue, cap: c_long) {
         ptr::write_bytes(q as *mut u8, 0, core::mem::size_of::<AuQueue>());
         (*q).max_bytes = cap;
         (*q).base_bytes = cap;
-        libc::pthread_mutex_init(ptr::addr_of_mut!((*q).m), ptr::null());
+        pt::pthread_mutex_init(ptr::addr_of_mut!((*q).m), ptr::null());
         init_not_full_cond(ptr::addr_of_mut!((*q).not_full));
-        libc::pthread_cond_init(ptr::addr_of_mut!((*q).not_empty), ptr::null());
+        pt::pthread_cond_init(ptr::addr_of_mut!((*q).not_empty), ptr::null());
     }
 }
 
@@ -100,20 +106,20 @@ fn aq_init_cap(q: *mut AuQueue, cap: c_long) {
 /// its tests, which check the drain LOGIC, not clock robustness) keeps the default REALTIME
 /// clock — matched by [`aq_park_deadline`]'s `#[cfg]` twin.
 #[cfg(target_os = "linux")]
-unsafe fn init_not_full_cond(cond: *mut libc::pthread_cond_t) {
+unsafe fn init_not_full_cond(cond: *mut pt::pthread_cond_t) {
     unsafe {
-        let mut attr: libc::pthread_condattr_t = std::mem::zeroed();
-        libc::pthread_condattr_init(&mut attr);
-        libc::pthread_condattr_setclock(&mut attr, libc::CLOCK_MONOTONIC);
-        libc::pthread_cond_init(cond, &attr);
-        libc::pthread_condattr_destroy(&mut attr);
+        let mut attr: pt::pthread_condattr_t = std::mem::zeroed();
+        pt::pthread_condattr_init(&mut attr);
+        pt::pthread_condattr_setclock(&mut attr, libc::CLOCK_MONOTONIC);
+        pt::pthread_cond_init(cond, &attr);
+        pt::pthread_condattr_destroy(&mut attr);
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-unsafe fn init_not_full_cond(cond: *mut libc::pthread_cond_t) {
+unsafe fn init_not_full_cond(cond: *mut pt::pthread_cond_t) {
     unsafe {
-        libc::pthread_cond_init(cond, ptr::null());
+        pt::pthread_cond_init(cond, ptr::null());
     }
 }
 
@@ -122,9 +128,9 @@ pub fn aq_destroy(q: *mut AuQueue) {
         return;
     }
     unsafe {
-        libc::pthread_mutex_destroy(ptr::addr_of_mut!((*q).m));
-        libc::pthread_cond_destroy(ptr::addr_of_mut!((*q).not_full));
-        libc::pthread_cond_destroy(ptr::addr_of_mut!((*q).not_empty));
+        pt::pthread_mutex_destroy(ptr::addr_of_mut!((*q).m));
+        pt::pthread_cond_destroy(ptr::addr_of_mut!((*q).not_full));
+        pt::pthread_cond_destroy(ptr::addr_of_mut!((*q).not_empty));
     }
 }
 
@@ -167,8 +173,8 @@ pub fn aq_push_with_drain(
 /// to. Mixing clock bases between the condvar and its deadline would make the timeout meaningless
 /// rather than merely imprecise.
 #[cfg(target_os = "linux")]
-fn aq_park_deadline() -> libc::timespec {
-    let mut ts = libc::timespec {
+fn aq_park_deadline() -> pt::timespec {
+    let mut ts = pt::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
@@ -178,8 +184,15 @@ fn aq_park_deadline() -> libc::timespec {
     add_10ms(ts)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn aq_park_deadline() -> libc::timespec {
+/// Windows: the condvar has no clock of its own; `plx_base::task::pthread` measures a timed
+/// wait's deadline on its monotonic clock, so the deadline is read from that same clock.
+#[cfg(windows)]
+fn aq_park_deadline() -> pt::timespec {
+    add_10ms(pt::monotonic_now())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn aq_park_deadline() -> pt::timespec {
     let mut tv = libc::timeval {
         tv_sec: 0,
         tv_usec: 0,
@@ -187,20 +200,20 @@ fn aq_park_deadline() -> libc::timespec {
     unsafe {
         libc::gettimeofday(&mut tv, ptr::null_mut());
     }
-    add_10ms(libc::timespec {
+    add_10ms(pt::timespec {
         tv_sec: tv.tv_sec,
         tv_nsec: i64::from(tv.tv_usec) * 1000,
     })
 }
 
-fn add_10ms(ts: libc::timespec) -> libc::timespec {
+fn add_10ms(ts: pt::timespec) -> pt::timespec {
     let mut nsec = ts.tv_nsec + 10_000_000;
     let mut sec = ts.tv_sec;
     if nsec >= 1_000_000_000 {
         sec += 1;
         nsec -= 1_000_000_000;
     }
-    libc::timespec {
+    pt::timespec {
         tv_sec: sec,
         tv_nsec: nsec as libc::c_long,
     }
@@ -231,36 +244,36 @@ fn aq_push_park(
         if len > 0 && !data.is_null() {
             ptr::copy_nonoverlapping(data, node_data(n), len as usize);
         }
-        libc::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
         while (*q).queued_bytes > (*q).max_bytes && (*q).abort == 0 {
             if let Some(drain) = drain.as_mut() {
-                libc::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
+                pt::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
                 let keep_polling = drain();
-                libc::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
+                pt::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
                 if (*q).queued_bytes > (*q).max_bytes && (*q).abort == 0 {
                     if keep_polling {
                         let ts = aq_park_deadline();
-                        libc::pthread_cond_timedwait(
+                        pt::pthread_cond_timedwait(
                             ptr::addr_of_mut!((*q).not_full),
                             ptr::addr_of_mut!((*q).m),
                             &ts,
                         );
                     } else {
-                        libc::pthread_cond_wait(
+                        pt::pthread_cond_wait(
                             ptr::addr_of_mut!((*q).not_full),
                             ptr::addr_of_mut!((*q).m),
                         );
                     }
                 }
             } else {
-                libc::pthread_cond_wait(
+                pt::pthread_cond_wait(
                     ptr::addr_of_mut!((*q).not_full),
                     ptr::addr_of_mut!((*q).m),
                 );
             }
         }
         if (*q).abort != 0 {
-            libc::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
+            pt::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
             libc::free(n as *mut c_void);
             return -1;
         }
@@ -271,8 +284,8 @@ fn aq_push_park(
         }
         (*q).tail = n;
         (*q).queued_bytes += len as c_long;
-        libc::pthread_cond_signal(ptr::addr_of_mut!((*q).not_empty));
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_cond_signal(ptr::addr_of_mut!((*q).not_empty));
+        pt::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
         0
     }
 }
@@ -284,7 +297,7 @@ pub fn aq_pop(q: *mut AuQueue, eof_out: *mut c_int) -> *mut AuNode {
         return ptr::null_mut();
     }
     unsafe {
-        libc::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
         let n = (*q).head;
         if !n.is_null() {
             (*q).head = (*n).next;
@@ -296,7 +309,7 @@ pub fn aq_pop(q: *mut AuQueue, eof_out: *mut c_int) -> *mut AuNode {
             if (*q).releasing != 0 {
                 settle_released_cap(q);
             }
-            libc::pthread_cond_signal(ptr::addr_of_mut!((*q).not_full));
+            pt::pthread_cond_signal(ptr::addr_of_mut!((*q).not_full));
         }
         if !eof_out.is_null() {
             *eof_out = if (*q).head.is_null() && (*q).eof != 0 {
@@ -305,7 +318,7 @@ pub fn aq_pop(q: *mut AuQueue, eof_out: *mut c_int) -> *mut AuNode {
                 0
             };
         }
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
         n
     }
 }
@@ -315,10 +328,10 @@ pub fn aq_set_eof(q: *mut AuQueue) {
         return;
     }
     unsafe {
-        libc::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
         (*q).eof = 1;
-        libc::pthread_cond_signal(ptr::addr_of_mut!((*q).not_empty));
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_cond_signal(ptr::addr_of_mut!((*q).not_empty));
+        pt::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
     }
 }
 
@@ -327,11 +340,11 @@ pub fn aq_abort(q: *mut AuQueue) {
         return;
     }
     unsafe {
-        libc::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
         (*q).abort = 1;
-        libc::pthread_cond_broadcast(ptr::addr_of_mut!((*q).not_full));
-        libc::pthread_cond_broadcast(ptr::addr_of_mut!((*q).not_empty));
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_cond_broadcast(ptr::addr_of_mut!((*q).not_full));
+        pt::pthread_cond_broadcast(ptr::addr_of_mut!((*q).not_empty));
+        pt::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
     }
 }
 
@@ -347,18 +360,18 @@ pub fn aq_if_not_aborted<T>(q: *mut AuQueue, f: impl FnOnce() -> T) -> Option<T>
         return None;
     }
 
-    struct Unlock(*mut libc::pthread_mutex_t);
+    struct Unlock(*mut pt::pthread_mutex_t);
     impl Drop for Unlock {
         fn drop(&mut self) {
             unsafe {
-                libc::pthread_mutex_unlock(self.0);
+                pt::pthread_mutex_unlock(self.0);
             }
         }
     }
 
     unsafe {
         let mutex = ptr::addr_of_mut!((*q).m);
-        libc::pthread_mutex_lock(mutex);
+        pt::pthread_mutex_lock(mutex);
         let _unlock = Unlock(mutex);
         if (*q).abort != 0 {
             None
@@ -382,14 +395,14 @@ pub fn aq_set_headroom(q: *mut AuQueue, extra: c_long) {
         return;
     }
     unsafe {
-        libc::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
         let prev = (*q).max_bytes;
         (*q).max_bytes = (*q).base_bytes + extra.max(0);
         (*q).releasing = 0;
         if (*q).max_bytes > prev {
-            libc::pthread_cond_broadcast(ptr::addr_of_mut!((*q).not_full));
+            pt::pthread_cond_broadcast(ptr::addr_of_mut!((*q).not_full));
         }
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
     }
 }
 
@@ -413,10 +426,10 @@ pub fn aq_release_headroom(q: *mut AuQueue) {
         return;
     }
     unsafe {
-        libc::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
         (*q).releasing = 1;
         settle_released_cap(q);
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
     }
 }
 
@@ -438,9 +451,9 @@ pub fn aq_cap(q: *mut AuQueue) -> c_long {
         return 0;
     }
     unsafe {
-        libc::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
         let cap = (*q).max_bytes;
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
         cap
     }
 }
@@ -452,9 +465,9 @@ pub fn aq_would_park(q: *mut AuQueue) -> bool {
         return false;
     }
     unsafe {
-        libc::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
         let parks = (*q).queued_bytes > (*q).max_bytes && (*q).abort == 0;
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
         parks
     }
 }
@@ -468,9 +481,9 @@ pub fn aq_pops(q: *mut AuQueue) -> u64 {
         return 0;
     }
     unsafe {
-        libc::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
         let n = (*q).pops;
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
         n
     }
 }
@@ -480,9 +493,9 @@ pub fn aq_bytes(q: *mut AuQueue) -> c_long {
         return 0;
     }
     unsafe {
-        libc::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
         let b = (*q).queued_bytes;
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
+        pt::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
         b
     }
 }
@@ -741,8 +754,8 @@ mod tests {
         entered.wait();
         let mutex = unsafe { ptr::addr_of_mut!((*(q_addr as *mut AuQueue)).m) };
         assert_eq!(
-            unsafe { libc::pthread_mutex_trylock(mutex) },
-            libc::EBUSY,
+            unsafe { pt::pthread_mutex_trylock(mutex) },
+            pt::EBUSY,
             "the publication closure must own the abort mutex",
         );
         release.wait();

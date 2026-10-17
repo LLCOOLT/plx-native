@@ -1,8 +1,18 @@
 //! The `hostsim` stand-in for `src/starfish.c` — the television's media seam, absent.
 //!
-//! This file has two behaviours and the default is still the honest failure.
+//! Which behaviour answers is latched at the first verb (`mode`): the desktop decoder when the
+//! bundled FFmpeg carries the desktop's decoders, the clock sink when a session armed it, and the
+//! honest failure otherwise.
 //!
-//! # Default: nothing decodes, and it says so immediately
+//! # A desktop build: the desktop decoder (`player::desk`)
+//!
+//! The FFmpeg a desktop app ships (`HOST=1 ci/build-ffmpeg.sh`) carries decoders, and with them
+//! every verb below also drives `player::desk`: Load starts a session, Feed decodes, Play and Pause
+//! run and hold the sound card, and the position this file reports is the card's. The rest of this
+//! file, the lifecycle gates and the callbacks, is unchanged, so the engine above cannot tell it
+//! from the clock sink except that there is a picture and sound.
+//!
+//! # No decoders: nothing decodes, and it says so immediately
 //!
 //! The simulator has no StarfishMediaAPIs, no `libAcbAPI`, and no hardware video plane. Every verb
 //! reports the same failure the seam itself reports when a television has no usable video path
@@ -56,7 +66,7 @@
 //! # How it is reached
 //!
 //! The verbs below are private; [`HostSink`] is the simulator's own `tv::sink::VideoSink`, one
-//! method per verb, installed by `port.rs` for the `hostsim` build and returned directly by
+//! method per verb, installed by the desktop port (`desktop.rs`) in the simulator build and returned directly by
 //! `player::sink()` in the hostsim tests. The `*_for_test` hooks stay here, next to the statics
 //! they touch, and the tests reach them as `crate::player::ffi_host::<hook>`.
 
@@ -304,28 +314,52 @@ pub(super) fn force_pause_result_for_test(result: Option<c_int>) {
     FORCE_PAUSE_RESULT.store(result.unwrap_or(i32::MIN), Relaxed);
 }
 
-/// Is the clock sink armed? Read once, at the first seam call, and latched.
+/// What answers the verbs: nothing (the honest failure), the clock sink, or the desktop decoder.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Off,
+    Clock,
+    Decode,
+}
+
+/// Read once, at the first seam call, and latched.
 ///
-/// A trigger rather than a build feature so one binary does both: `make sim` keeps landing on the
-/// failure read-out (which is what the UI work wants to see) unless a session explicitly asks for
-/// a pipeline run.
-fn enabled() -> bool {
+/// The clock sink is a trigger rather than a build feature so one binary does both, and it wins
+/// over decoding: a session that armed it asked for a pipeline run with nothing decoded. Without
+/// it, a build whose FFmpeg carries the desktop decoders (`player::desk`) plays for real, and one
+/// without them lands on the failure read-out as it always has.
+fn mode() -> Mode {
     #[cfg(any(test, feature = "test-support"))]
     if FORCE_ENABLED.load(Relaxed) {
-        return true;
+        return Mode::Clock;
     }
-    static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ONCE: std::sync::OnceLock<Mode> = std::sync::OnceLock::new();
     *ONCE.get_or_init(|| {
-        let on = plx_base::devtrig::flag("clocksink");
-        if on {
+        if plx_base::devtrig::flag("clocksink") {
             plx_base::eventlog::log(
                 "clocksink: ARMED — AUs are accepted and discarded, and the presentation clock \
                  advances at real time. NOTHING IS DECODED and no number from this run is a \
                  device measurement.",
             );
+            Mode::Clock
+        } else if crate::player::desk::available() {
+            plx_base::eventlog::log(
+                "desk: the desktop decoder answers the sink. Nothing measured here is a device \
+                 measurement.",
+            );
+            Mode::Decode
+        } else {
+            Mode::Off
         }
-        on
     })
+}
+
+fn enabled() -> bool {
+    mode() != Mode::Off
+}
+
+fn decoding() -> bool {
+    mode() == Mode::Decode
 }
 
 fn now_ms() -> i64 {
@@ -516,6 +550,18 @@ impl Clock {
     /// draining at the reader, and the app sees the same shape a real underrun produces. An
     /// unclamped clock would run away from the data and report healthy playback through a stall.
     fn position_ns() -> i64 {
+        // The desktop decoder's sound card, when its session has sound: the clock a real
+        // pipeline presents to. Clamped by nothing here, because a starved card stops by itself.
+        if decoding() {
+            if let Some(at) = crate::player::desk::position_ns() {
+                return at;
+            }
+        }
+        Self::wall_ns()
+    }
+
+    /// The wall clock alone: what a session without sound presents against.
+    fn wall_ns() -> i64 {
         let base = BASE_NS.load(Relaxed);
         let fed = FED_MAX_NS.load(Relaxed);
         let elapsed = if PLAYING.load(Relaxed) {
@@ -583,7 +629,9 @@ impl Clock {
                 if !LOADED.load(Relaxed) {
                     continue;
                 }
-                if PLAYING.load(Relaxed) {
+                // The desktop decoder reports nothing before its first picture, as a television's
+                // pipeline reports nothing before its first frame: the HUD stays on its spinner.
+                if PLAYING.load(Relaxed) && (!decoding() || crate::player::desk::shown()) {
                     report_position(Clock::position_ns());
                 }
             });
@@ -603,6 +651,9 @@ unsafe fn sf_load(payload: *const c_char, epoch: u32) -> c_int {
     if !payload.is_null() {
         let payload = std::ffi::CStr::from_ptr(payload).to_string_lossy();
         crate::player::sim_video::load(&payload, Clock::position_ns);
+        if decoding() {
+            crate::player::desk::load(&payload, Clock::wall_ns);
+        }
     }
     ACTIVE_EPOCH.store(epoch, Relaxed);
     CALLBACK_INTERCEPTS.store(0, Relaxed);
@@ -717,6 +768,9 @@ unsafe fn sf_play() -> c_int {
         return 0;
     }
     Clock::resume();
+    if decoding() {
+        crate::player::desk::play();
+    }
     1
 }
 unsafe fn sf_pause() -> c_int {
@@ -733,6 +787,9 @@ unsafe fn sf_pause() -> c_int {
         return 0;
     }
     Clock::hold();
+    if decoding() {
+        crate::player::desk::pause();
+    }
     1
 }
 unsafe fn sf_set_volume(volume: c_int) -> c_int {
@@ -757,6 +814,9 @@ unsafe fn sf_flush() -> c_int {
     }
     Clock::rewind();
     crate::player::sim_video::flush();
+    if decoding() {
+        crate::player::desk::flush();
+    }
     1
 }
 /// LG's public `Seek(millis)`: refuses a negative target, otherwise flushes the pipeline and
@@ -784,6 +844,9 @@ unsafe fn sf_seek_ms(ms: i64) -> c_int {
 unsafe fn sf_push_eos() -> c_int {
     #[cfg(any(test, feature = "test-support"))]
     note_dispatch("sf_push_eos");
+    if decoding() {
+        crate::player::desk::end_of_stream();
+    }
     c_int::from(enabled())
 }
 unsafe fn sf_set_time_to_decode(_position_ns: i64) -> c_int {
@@ -833,6 +896,9 @@ unsafe fn sf_feed(p: *const u8, size: c_uint, pts: i64, es_data: c_int) -> c_cha
             crate::player::sim_video::feed(std::slice::from_raw_parts(p, size as usize), pts);
         }
     }
+    if decoding() && !p.is_null() && size > 0 {
+        crate::player::desk::feed(std::slice::from_raw_parts(p, size as usize), pts, es_data == 1);
+    }
     FEED_OK
 }
 unsafe fn sf_unload() {
@@ -855,6 +921,9 @@ unsafe fn sf_unload() {
     LOADED.store(false, Relaxed);
     Clock::rewind();
     crate::player::sim_video::stop();
+    if decoding() {
+        crate::player::desk::stop();
+    }
 }
 unsafe fn sf_callback_gate_retire() -> c_int {
     #[cfg(any(test, feature = "test-support"))]
@@ -891,6 +960,9 @@ unsafe fn sf_destroy() -> c_int {
     LOADED.store(false, Relaxed);
     Clock::rewind();
     crate::player::sim_video::stop();
+    if decoding() {
+        crate::player::desk::stop();
+    }
     1
 }
 unsafe fn sf_quarantine() {
@@ -902,6 +974,9 @@ unsafe fn sf_quarantine() {
     LOADED.store(false, Relaxed);
     Clock::rewind();
     crate::player::sim_video::stop();
+    if decoding() {
+        crate::player::desk::stop();
+    }
 }
 
 /// `VP_NONE` — "video cannot be displayed, but the app still runs", which is precisely the

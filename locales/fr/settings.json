@@ -300,5 +300,17 @@
   "settings.consent.placeholder.random_id": "identifiant aléatoire",
   "settings.consent.placeholder.project_key": "clé de projet",
   "settings.consent.placeholder.app_version": "version de l’application",
-  "settings.consent.placeholder.webos_codename_short": "nom de code webOS"
+  "settings.consent.placeholder.webos_codename_short": "nom de code webOS",
+  "settings.playback.auto_skip": "Passer l’intro et le générique",
+  "settings.playback.auto_skip.off": "Désactivé",
+  "settings.playback.auto_skip.intro": "Passer l’intro",
+  "settings.playback.auto_skip.intro_credits": "Passer l’intro et le générique",
+  "settings.playback.auto_skip.copy": "Passe les intros, et les génériques si vous le choisissez, dès qu’ils commencent. Gauche ou le bouton Retour à l’écran ramène au début. Les génériques ne sont jamais passés pendant le compte à rebours de l’épisode suivant.",
+  "settings.playback.screensaver": "Économiseur d’écran",
+  "settings.playback.screensaver.off": "Désactivé",
+  "settings.playback.screensaver.min2": "Après 2 minutes",
+  "settings.playback.screensaver.min5": "Après 5 minutes",
+  "settings.playback.screensaver.min10": "Après 10 minutes",
+  "settings.playback.screensaver.min20": "Après 20 minutes",
+  "settings.playback.screensaver.copy": "Lorsqu’aucune touche n’est pressée pendant un moment sur une page de navigation, l’écran passe en diaporama d’illustrations de votre bibliothèque avec l’heure. Un bouton quelconque ramène la page. Il ne démarre jamais pendant la lecture."
 }

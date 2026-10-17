@@ -29,31 +29,45 @@ the server directly over the LAN and has no remote-access path.
 
 ## Getting around
 
-It is a TV interface, so it is driven like one — with arrow keys, not the mouse.
+It is a TV interface, so it can be driven like one, with the arrow keys:
 
 | Key | Does |
 |---|---|
 | ↑ ↓ ← → | Move focus |
 | Return | Open / select |
 | Esc or Delete | Back |
+| Ctrl-Cmd-F | Fullscreen |
 | Cmd-Q | Quit |
 
-Clicking works too, on most screens.
+A **right-click** (or the mouse's back button) goes back too, including out of a playing video.
 
-## What is not here: video
+## Using the mouse
 
-**Playback does not work in this build, and pressing Play will tell you so** with a full-screen
-message. That is honest rather than broken: the decoding is done by the television's own hardware
-video pipeline (LG's StarfishMediaAPIs, bound to the TV's video plane), which does not exist on a
-Mac. Everything else is the real thing — the same interface, the same code, talking to your real
-server: browsing, libraries, search, seasons and episodes, cast, artwork, watched state, who's
-watching.
+Move the mouse and the app grows the buttons a remote would otherwise provide; press an arrow key and
+they step aside again, leaving the TV interface exactly as it is.
 
-So: this is the app to *look at* and click around. It is not a way to watch anything.
+- **Pages you open** (a film, a show, a person, a collection): a **back arrow** in the top-left
+  corner, and **Search** and **Settings** in the top-right.
+- **Rows of posters**: **‹ ›** arrows at the ends of a row page it sideways.
+- **A poster under the pointer**: **▶** plays it straight away (films and episodes), and **⋯** opens
+  its menu — mark watched, go to the show, remove from Continue Watching.
+- **While a video plays**: skip back, play/pause and skip forward in the middle of the picture (and
+  the next episode, when there is one); a back arrow top-left; **volume** (hover it for the slider,
+  click it to mute) and **fullscreen** top-right. Click the progress bar to jump, or drag it.
+
+## Watching
+
+Press Play and it plays: the app decodes with its own bundled FFmpeg, on the Mac's hardware video
+decoder (VideoToolbox), and plays the sound through the Mac's current output. H.264 and HEVC
+(including 10-bit and HDR10, tone-mapped for an ordinary display), with AAC, AC-3, E-AC-3 and DTS
+sound. Seeking, pause and resume work as they do on the television.
+
+Styled (ASS) subtitles, text subtitles and Blu-ray/DVD image subtitles are drawn by the app.
 
 ## Small print
 
-Apple Silicon Macs only (M1 and later), macOS 11 or newer.
+macOS 11 or newer. There are two downloads: `arm64` for Apple Silicon (M1 and later) and
+`x86_64` for Intel Macs.
 
 Unofficial, and not affiliated with, endorsed by, or sponsored by Plex GmbH or LG Electronics. MIT
 licensed; the licence and the third-party notices are inside the app bundle, under

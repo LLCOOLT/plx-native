@@ -297,5 +297,17 @@
   "settings.consent.placeholder.random_id": "zufällige ID",
   "settings.consent.placeholder.project_key": "Projektschlüssel",
   "settings.consent.placeholder.app_version": "App-Version",
-  "settings.consent.placeholder.webos_codename_short": "webOS-Codename"
+  "settings.consent.placeholder.webos_codename_short": "webOS-Codename",
+  "settings.playback.auto_skip": "Intro & Abspann überspringen",
+  "settings.playback.auto_skip.off": "Aus",
+  "settings.playback.auto_skip.intro": "Intro überspringen",
+  "settings.playback.auto_skip.intro_credits": "Intro & Abspann überspringen",
+  "settings.playback.auto_skip.copy": "Überspringt Intros und, wenn du möchtest, auch den Abspann, sobald sie beginnen. Links oder die Zurück-Taste auf dem Bildschirm springt zum Anfang zurück. Der Abspann wird nie übersprungen, solange „Als Nächstes“ zur nächsten Folge herunterzählt.",
+  "settings.playback.screensaver": "Bildschirmschoner",
+  "settings.playback.screensaver.off": "Aus",
+  "settings.playback.screensaver.min2": "Nach 2 Minuten",
+  "settings.playback.screensaver.min5": "Nach 5 Minuten",
+  "settings.playback.screensaver.min10": "Nach 10 Minuten",
+  "settings.playback.screensaver.min20": "Nach 20 Minuten",
+  "settings.playback.screensaver.copy": "Wenn auf einer Übersichtsseite eine Weile nichts gedrückt wird, blendet der Bildschirm zu einer Diashow mit Artwork aus deiner Bibliothek und der Uhrzeit über. Jede Taste bringt die Seite zurück. Während der Wiedergabe startet er nie."
 }

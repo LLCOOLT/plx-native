@@ -42,6 +42,15 @@ pub enum HubsCmd {
     /// no row added, removed or reordered, and every row that changed is outside the held window
     /// or is Continue Watching with the focus elsewhere.
     Publish { home_top_visible: bool, focused_hub: Option<usize>, press_live: bool },
+    /// Replace Home's On Now shelf (`livetv::on_now::rows`); an empty list removes it.
+    SetOnNow(crate::pms::ShelfRows),
+    /// Replace Home's Suggested Channels shelf (`livetv::suggested::rows`); empty removes it.
+    SetChannels(crate::pms::ShelfRows),
+    /// Add the title with this guid to the profile's watchlist, or remove it: optimistic on the
+    /// shelf and the membership at once, then performed and read back by the watchlist worker.
+    /// `row` is the library copy the press was made on (empty from a detail page), which an add
+    /// puts at the head of the shelf until the list is read back.
+    EditWatchlist { guid: String, add: bool, row: crate::pms::ShelfRows },
 }
 
 impl HubsCmd {
@@ -49,9 +58,11 @@ impl HubsCmd {
     pub fn is_paging(&self) -> bool { matches!(self, HubsCmd::Page { .. } | HubsCmd::CancelPage { .. }) }
 
     /// Commands the application sends on no one's behalf (a quiet read, the per-frame publish
-    /// check): they raise the notice only through what they changed, never because they ran.
+    /// check, the minute tick's On Now and Suggested Channels shelves, which has usually not
+    /// moved): they raise the notice only through what they changed, never because they ran.
     pub fn is_background(&self) -> bool {
-        matches!(self, HubsCmd::RefetchSourceQuiet { .. } | HubsCmd::Publish { .. })
+        matches!(self, HubsCmd::RefetchSourceQuiet { .. } | HubsCmd::Publish { .. }
+            | HubsCmd::SetOnNow(_) | HubsCmd::SetChannels(_))
     }
 
     /// Does this command raise the notice whatever it changed? Paging does not (see above), and a
@@ -244,6 +255,13 @@ impl HubsStore {
     /// Test hook: how many authoritative refetches (`RefetchHubs`) this store has started.
     #[cfg(any(test, feature = "test-support"))]
     pub fn refetch_count_for_test(&self) -> u32 { crate::pms::hub_gen_for_test(&self.state) }
+
+    /// Is any source's hub fetch still out? Unlike [`Self::owed`] this is the store's own single
+    /// flight (`Src::fetching`), which is what a caller deciding whether to ask AGAIN must read: a
+    /// landing taken but not yet applied still counts as in flight.
+    pub fn in_flight(&self) -> bool {
+        crate::pms::in_flight(&self.state)
+    }
 
     /// Test hook: how many spawned workers still owe a landing.
     #[cfg(any(test, feature = "test-support"))]

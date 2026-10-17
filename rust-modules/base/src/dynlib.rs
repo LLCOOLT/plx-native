@@ -35,8 +35,12 @@
 //! The alternative — returning a per-signature sentinel — would let a missing symbol travel as a
 //! plausible-looking value into the media pipeline, which is the harder failure to diagnose of
 //! the two, on a device where diagnosis means reading a log over ssh.
+//!
+//! The Windows desktop build uses the same tables through `LoadLibraryExW` / `GetProcAddress`;
+//! each candidate list carries that platform's DLL name beside the SONAME and the dylib.
 #![allow(dead_code)]
 
+#[cfg(unix)]
 use libc::{dlerror, dlopen, dlsym, RTLD_GLOBAL, RTLD_NOW};
 use std::ffi::CString;
 use std::os::raw::c_void;
@@ -52,7 +56,40 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 /// From `libc`, not hand-written: the flags are not the same numbers everywhere. `0x100` is
 /// RTLD_GLOBAL on glibc but RTLD_FIRST on Darwin — and this module's unit tests run on Darwin, so
 /// a hardcoded constant would have meant the tests exercised a different mode than the device.
+#[cfg(unix)]
 const RTLD_NOW_GLOBAL: libc::c_int = RTLD_NOW | RTLD_GLOBAL;
+
+/// The Windows loader, for the desktop build: `LoadLibraryExW` / `GetModuleHandleW` /
+/// `GetProcAddress` stand in for `dlopen` / `RTLD_NOLOAD` / `dlsym`. Windows binds a DLL's imports
+/// when it loads and has no global symbol scope, so NOW and GLOBAL have nothing to map onto: a DLL
+/// that loaded has resolved its own imports, and libavformat finds libavcodec through the search
+/// path rather than through a handle opened before it.
+#[cfg(windows)]
+mod win {
+    use std::os::raw::{c_char, c_void};
+
+    /// `LOAD_WITH_ALTERED_SEARCH_PATH`: resolve a DLL's OWN imports from the directory of the
+    /// absolute path being loaded, so the bundled libavformat finds the bundled libavcodec beside
+    /// it rather than whatever the default search order reaches first. Defined only for an
+    /// absolute path; a bare name is loaded with no flags.
+    pub const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x0000_0008;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
+        pub fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+        pub fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+    }
+
+    /// `s` as a NUL-terminated UTF-16 string, or `None` when it carries an interior NUL (the
+    /// refusal `CString::new` makes on the unix side).
+    pub fn wide(s: &str) -> Option<Vec<u16>> {
+        if s.contains('\0') {
+            return None;
+        }
+        Some(s.encode_utf16().chain(std::iter::once(0)).collect())
+    }
+}
 
 /// An opened library. Not `Drop` — nothing here is ever closed, deliberately: the media libraries
 /// stay mapped for the life of the process, and `dlclose` on a library with live pipeline threads
@@ -79,11 +116,27 @@ impl Handle {
     }
 
     /// The `dlopen` itself, once, so `open_in`'s two branches cannot drift.
+    #[cfg(unix)]
     fn dlopen_str(path: &str) -> *mut c_void {
         match CString::new(path) {
             Ok(c) => unsafe { dlopen(c.as_ptr(), RTLD_NOW_GLOBAL) },
             Err(_) => null_mut(),
         }
+    }
+
+    /// The Windows `dlopen`: `LoadLibraryExW`, with the bundled-directory search rule for an
+    /// absolute path (see [`win::LOAD_WITH_ALTERED_SEARCH_PATH`]).
+    #[cfg(windows)]
+    fn dlopen_str(path: &str) -> *mut c_void {
+        let Some(w) = win::wide(path) else {
+            return null_mut();
+        };
+        let flags = if Path::new(path).is_absolute() {
+            win::LOAD_WITH_ALTERED_SEARCH_PATH
+        } else {
+            0
+        };
+        unsafe { win::LoadLibraryExW(w.as_ptr(), null_mut(), flags) }
     }
 
     /// As [`open`], but resolving names inside `dir` when one is given.
@@ -122,10 +175,18 @@ impl Handle {
     /// implementation under a candidate SONAME) would answer about state that library does not
     /// own. `RTLD_NOW` because glibc requires one of LAZY/NOW alongside NOLOAD; the mode of an
     /// already-loaded object is not downgraded by it.
+    ///
+    /// On Windows this is `GetModuleHandleW`, which likewise answers only for a module already
+    /// mapped into the process and never loads one.
     pub fn open_loaded<'a>(candidates: &[&'a str]) -> Option<(Handle, &'a str)> {
         candidates.iter().find_map(|name| {
-            let c = CString::new(*name).ok()?;
-            let h = unsafe { dlopen(c.as_ptr(), RTLD_NOW | libc::RTLD_NOLOAD) };
+            #[cfg(unix)]
+            let h = {
+                let c = CString::new(*name).ok()?;
+                unsafe { dlopen(c.as_ptr(), RTLD_NOW | libc::RTLD_NOLOAD) }
+            };
+            #[cfg(windows)]
+            let h = unsafe { win::GetModuleHandleW(win::wide(name)?.as_ptr()) };
             (!h.is_null()).then_some((Handle(h), *name))
         })
     }
@@ -137,10 +198,27 @@ impl Handle {
     /// exported-window family exists only from webOS 5.0, `SDL_webOSGetPanelResolution` only from
     /// 4.4.2, and naming either at link time would make the binary demand a symbol that older
     /// televisions do not have.
+    ///
+    /// Windows has no global symbol scope: there the handle is the executable's own module
+    /// (`GetModuleHandleW(NULL)`), so a lookup finds only what the executable itself exports —
+    /// none of the webOS-only entry points this probes for, which is the honest answer there.
     pub fn self_handle() -> Handle {
-        Handle(std::ptr::null_mut()) // RTLD_DEFAULT
+        #[cfg(unix)]
+        return Handle(std::ptr::null_mut()); // RTLD_DEFAULT
+        #[cfg(windows)]
+        return Handle(unsafe { win::GetModuleHandleW(std::ptr::null()) });
     }
 
+    /// Resolve `name` in this library: `GetProcAddress`, which (unlike `dlsym`) has no
+    /// NULL-valued symbol to tell apart from a miss, so a null result is always `None`.
+    #[cfg(windows)]
+    pub fn sym(&self, name: &str) -> Option<*mut c_void> {
+        let c = CString::new(name).ok()?;
+        let p = unsafe { win::GetProcAddress(self.0, c.as_ptr()) };
+        (!p.is_null()).then_some(p)
+    }
+
+    #[cfg(unix)]
     pub fn sym(&self, name: &str) -> Option<*mut c_void> {
         let c = CString::new(name).ok()?;
         let p = unsafe {

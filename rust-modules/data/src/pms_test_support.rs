@@ -159,6 +159,8 @@ pub(super) fn shelf_in(slot: u16, sec: i64, title: &str, hub_id: &str, rks: &[&s
 pub(super) fn built(slot: u16, cw: &[(i64, &str)], shelves: Vec<Shelf>) -> SourceBuild {
     SourceBuild {
         lane: Default::default(),
+        genres: None,
+        playlists: None,
         cw: cw
             .iter()
             .map(|&(t, r)| CwItem {

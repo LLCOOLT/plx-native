@@ -163,7 +163,7 @@ fn check_refetch_window(change_profile: bool) {
     let server = std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         let mut paths = Vec::new();
-        while std::time::Instant::now() < deadline && paths.len() < 3 {
+        while std::time::Instant::now() < deadline && paths.len() < 6 {
             let (mut socket, _) = match plx_base::testnet::accept(&listener) {
                 Ok(socket) => socket,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -183,6 +183,9 @@ fn check_refetch_window(change_profile: bool) {
                 serde_json::json!({"MediaContainer":{"offset":36,"totalSize":12000,"Metadata":metadata(36,24)}})
             } else if path.starts_with("/hubs/continueWatching?") {
                 serde_json::json!({"MediaContainer":{"Hub":[]}})
+            } else if path.starts_with("/playlists") {
+                // The refetch also reads the server's video playlists (the Home playlists shelf).
+                serde_json::json!({"MediaContainer":{"Metadata":[]}})
             } else {
                 serde_json::json!({"MediaContainer":{"Hub":[{"hubIdentifier":"home.movies.recent",
                     "type":"movie","title":"Recent","key":"/hubs/home/recentlyAdded?type=1",

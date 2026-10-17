@@ -155,6 +155,8 @@ pub(super) fn request_play_intent(
         }
         plx_screens::registry::PlayIntent::Movie(m) =>
             plx_media::route::request_play_movie(session, meta, m, &super::playback::movie_ctx(m)),
+        plx_screens::registry::PlayIntent::Playlist { playlist, item, title } =>
+            plx_media::route::request_play_playlist(session, meta, playlist, item, title),
     }
 }
 
@@ -474,7 +476,8 @@ pub(crate) fn content_requests(app: &mut App, fr: &Frame) {
     drain_held_feature(app);
     home_requests(app, fr.now);
     library_requests(app, fr.now);
-    search_requests(app);
+    search_requests(app, fr.now);
+    super::livetv::requests(app, fr.now);
     // The player's overlays are surfaces on its own stack, so what they decide reaches the
     // loop the same way every other owned screen's decision does — as requests, drained here,
     // after the dispatcher and before the frame's own arms (`playback::player_requests`).
@@ -483,6 +486,19 @@ pub(crate) fn content_requests(app: &mut App, fr: &Frame) {
         matches!(app.rec, super::recorder::Recplay::Replaying(_)), app.bridge.is_controlled_replay()) {
         app.rec.refuse("replay cannot authorize sandbox repair");
     }
+    // The desktop transport's fullscreen face acts on the WINDOW, which only the loop holds — so it
+    // is performed here rather than with the playback session's requests below. A television never
+    // sends it (its transport draws no such face), and a build with no window to toggle drops it.
+    let win = app.win;
+    player_reqs.retain(|req| {
+        if !matches!(req, plx_screens::registry::PlayerReq::ToggleFullscreen) {
+            return true;
+        }
+        #[cfg(feature = "hostsim")]
+        unsafe { super::desktop_window::toggle_fullscreen(win) };
+        let _ = win;
+        false
+    });
     if !player_reqs.is_empty() {
         super::playback::player_requests(&mut app.player.repair, &mut app.player.session,
             &mut app.adapters.player,
@@ -514,6 +530,15 @@ pub(crate) fn content_requests(app: &mut App, fr: &Frame) {
                 // being re-read at the commit: the user can still move focus during the dip, and
                 // BACK must return them to where they pressed.
                 bridge::nav_push_with_return(&mut app.pages, AppArg::Content(arg), ret);
+            }
+            ContentReq::Shuffle { sid, rk } => {
+                halt_preview(app);
+                super::playback::request_shuffle(&app.player.session, sid, &rk);
+            }
+            ContentReq::PushShow { sid, rk, season } => {
+                halt_preview(app);
+                let season = (season > 0).then(|| std::os::raw::c_int::try_from(season).ok()).flatten();
+                bridge::open_detail(&mut app.pages, &mut app.bridge, sid, &rk, season, Some(ret));
             }
             ContentReq::Present(arg) => {
                 halt_preview(app);
@@ -669,6 +694,8 @@ fn home_requests(app: &mut App, now: u32) {
                 activate_home_item(app, source, entry, sid, &rk, Some(resume_ns), ret, now),
             HomeReq::Detail { sid, rk } =>
                 activate_home_item(app, source, entry, sid, &rk, None, ret, now),
+            HomeReq::Tune { number } => super::livetv::tune_number(app, &number, now),
+            HomeReq::Studio { id } => super::livetv::open_studio(app, id),
             HomeReq::ItemMenu { sid, rk } => {
                 let snapshot = app.bridge.hubs_snapshot();
                 let Some(item) = home_item(snapshot.view(), sid, &rk)
@@ -712,7 +739,7 @@ fn search_target(item: &plx_data::search::Item, request: &plx_screens::registry:
     }
 }
 
-fn search_requests(app: &mut App) {
+fn search_requests(app: &mut App, now: u32) {
     use plx_screens::registry::SearchReq;
     for (source, request, ret) in app.bridge.take_search_reqs() {
         let MachineId::Instance(instance) = source else { continue };
@@ -737,6 +764,13 @@ fn search_requests(app: &mut App) {
                 let Some((item, _)) = app.bridge.search_selection(&app.pages, entry, ret.focus) else { continue };
                 let Some(target) = search_target(&item, &request) else { continue };
                 bridge::nav_push_with_return(&mut app.pages, target, ret);
+            }
+            SearchReq::Play { sid, rk, resume_ns } => {
+                let Some((plx_data::search::Item::Media(mut item), _)) = app.bridge.search_selection(&app.pages, entry, ret.focus) else { continue };
+                if item.sid != *sid || item.rk != *rk || !plx_screens::item_menu::plays_directly(&item) { continue; }
+                item.resume_ms = (*resume_ns).max(0) / 1_000_000;
+                unsafe { activate_card(&mut app.player.session, &mut app.adapters.player, &item, true, HUD_LINGER_MS,
+                    Some(ret), &mut app.pages, &mut app.bridge, &mut app.menu_play_await, now); }
             }
             SearchReq::ItemMenu { sid, rk } => {
                 let Some((plx_data::search::Item::Media(item), opener)) = app.bridge.search_selection(&app.pages, entry, ret.focus) else { continue };
@@ -799,7 +833,7 @@ mod search_action_tests {
             tag: 7 });
         let req = |sid, rk: &str, tag| SearchReq::Collection { sid, rk: rk.into(), tag };
         assert!(search_target(&hit, &req(a, "50007", 7)) == Some(AppArg::Content(ContentArg::Collection(
-            plx_plex::plex::collections::CollectionRef { sid: a, rk: "50007".into(), sec: 1, tag: 7, name: "Shorts".into() }))));
+            plx_plex::plex::collections::CollectionRef { sid: a, rk: "50007".into(), sec: 1, tag: 7, name: "Shorts".into(), playlist: false }))));
         assert!(search_target(&hit, &req(b, "50007", 7)).is_none(), "another server's key");
         assert!(search_target(&hit, &req(a, "50008", 7)).is_none(), "a stale selection");
         assert!(search_target(&hit, &SearchReq::Detail { sid: a, rk: "50007".into() }).is_none(),

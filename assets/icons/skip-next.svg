@@ -1,0 +1,3 @@
+<!-- A play triangle against a bar — "next episode". Two subpaths of one path, both clockwise
+     (signed areas +70 and +35, y down); they do not touch, so there is no join to crease. -->
+<svg viewBox="0 0 24 24" fill="#ffffff"><path d="M5 5L15 12L5 19Z M16.5 5H19V19H16.5Z"/></svg>

@@ -314,8 +314,9 @@ two global effects (invisible to any focus fingerprint), and `tools/keytable.py`
 nothing on any screen" — its `k:0,269` (HOME) and `k:53,34` (the digit 5) rows are inert on Home,
 Library and Search in `tests/keytable.json`.
 
-**What neither covers**: the player route. The simulator has no video path, so no fingerprint in
-that table was taken with a HUD on screen. The HUD half of this invariant has been graded as a unit
+**What neither covers**: the player route. No fingerprint in that table was taken with a HUD on
+screen: the simulator could not reach the player route when it was recorded (it can now, through
+`player::desk`). The HUD half of this invariant has been graded as a unit
 test and never on a television.
 
 ---

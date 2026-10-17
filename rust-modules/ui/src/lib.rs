@@ -32,10 +32,12 @@ pub mod card_motion_metrics;
 pub mod card_probe; // `plxnative-focusx`: the focused card's drawn rect/index/art of every Shelf and Grid
 pub mod value_chip; // shared label/value/owner capsule used by menu-opening controls
 pub mod containers; // RESTRUCTURE (spec §6.2): Navigation = TabContainer → NavStack → ModalStack, the transitions, the host fold
+pub mod channel_tile; // a Live TV channel's tile: its logo contained on a plate with a number badge, or name-tinted initials
 pub mod collection_tile; // the neutral tile a thumb-less collection draws on every surface
 pub mod consts;
 pub mod decision_alert;
 pub mod decision_prompt;
+pub mod desk; // the desktop pointer chrome: back/search/settings on pushed pages, and the PointerChrome every desktop-only button reads
 pub mod detail_layout;
 pub mod dispatch; // RESTRUCTURE spike (spec §3.3): the one frame algorithm, generic over `machine::Host`
 pub mod adapters; // RESTRUCTURE (spec §2.2): the one door out of the machine world, and its test stub
@@ -59,6 +61,8 @@ pub mod icons;
 pub mod form; // declared, ordered rows with stable keys: Form / FormTable (docs/settings-form.md)
 #[cfg(test)]
 mod form_tests;
+#[cfg(test)]
+mod desk_tests; // the desktop pointer chrome through the dispatcher: gates, interception, the card buttons' click kinds
 #[cfg(test)]
 mod input_tests; // RESTRUCTURE (spec §15.1): the dispatcher's input path — engine, map, press, keyboard, legacy
 pub mod input; // RESTRUCTURE (spec §2.2): the Input machine — owner of the press (an `App` field)

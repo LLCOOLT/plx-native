@@ -455,6 +455,9 @@ fn a_session_resolved_for_a_preview_never_reports_a_timeline() {
         title: "Trailer".into(),
         ctx: plx_data::metadata::TRAILER_CONTEXT.into(),
         preview: true,
+        seed: None,
+        playlist: String::new(),
+        channel: false,
     });
     apply_plan(
         &mut ps,
@@ -515,9 +518,9 @@ fn a_stop_leaves_a_record_with_the_queue_rows_parentage_and_prior_watched_state(
     reset_session(&mut ps);
     reset_player_control_for_test(&ps);
     let _ = take_landed_stops();
-    ps.queue = vec![plx_plex::plex::QueueRow {
+    ps.queue = Some(std::sync::Arc::new(vec![plx_plex::plex::QueueRow {
         item_id: 11, rk: "7".into(), show_rk: "S".into(), season: 2, watched: false, ..Default::default()
-    }];
+    }]));
     ps.pq_item_id = "11".into();
     scrobble_stop(&mut ps, Some(("7".into(), 30_000, 60_000)), None);
     drain_scrobble();
@@ -564,4 +567,66 @@ fn a_stop_posted_after_the_identity_changed_is_dropped() {
     fresh.post(true);
     assert_eq!(take_landed_stops().len(), 1, "a stop made after the switch lands as ever");
     reset_player_control_for_test(&ps);
+}
+
+/// Virtual channels: watching one leaves the profile's history alone (the owner's decision for
+/// 0.12.0). A programme resolved for a channel reports no timeline, scrobbles nothing at the stop,
+/// and keeps the Live TV session it was tuned under, so the banner and the channel keys still work
+/// after the landing — where any other plan clears it.
+#[test]
+fn a_virtual_channel_programme_is_quiet_and_keeps_its_live_session() {
+    let mut ps = crate::route::PlaybackSession::IDLE;
+    let _g = plx_base::testlock::serial();
+    reset_player_control_for_test(&ps);
+    reset_session(&mut ps);
+    let channel = plx_data::livetv::guide::Channel { number: "900".into(), url: "plxvc:61001".into(), ..Default::default() };
+    let lineup = std::sync::Arc::new(plx_data::livetv::guide::Lineup { channels: vec![channel], ..Default::default() });
+    set_live_tuning(&mut ps, crate::live::LiveSession::tuning(std::sync::Arc::clone(&lineup), 0, None));
+    ps.request = Some(PlaybackRequest {
+        sid: ServerId::from_raw(0),
+        rk: "e1".into(),
+        part: "/library/parts/1/file.mkv".into(),
+        vcodec: "h264".into(),
+        acodec: "aac".into(),
+        title: "Frasier".into(),
+        ctx: String::new(),
+        preview: false,
+        seed: None,
+        playlist: String::new(),
+        channel: true,
+    });
+    apply_plan(
+        &mut ps,
+        Plan { sid: ServerId::from_raw(1), url: "https://example.invalid/e1.mkv".into(), sess: "logical-e1".into(), ..Default::default() },
+        "e1",
+    );
+    assert!(live(&ps).is_some(), "the channel's Live TV session survives the landing");
+    assert!(!live_stream(&ps), "but it is a library file, not a stream: no live prime, no stream rebase");
+    assert!(!preview_request(&ps), "a channel is a playback, not a preview");
+    assert!(quiet_request(&ps));
+    assert!(begin_timeline_reporting(&ps).is_none(), "a channel's programme has no timeline");
+
+    // An ordinary play after it is loud again, and is no channel.
+    ps.request = Some(PlaybackRequest {
+        sid: ServerId::from_raw(1),
+        rk: "f1".into(),
+        part: "/library/parts/2/file.mkv".into(),
+        vcodec: "h264".into(),
+        acodec: "aac".into(),
+        title: "Film".into(),
+        ctx: String::new(),
+        preview: false,
+        seed: None,
+        playlist: String::new(),
+        channel: false,
+    });
+    apply_plan(
+        &mut ps,
+        Plan { sid: ServerId::from_raw(1), url: "https://example.invalid/f1.mkv".into(), sess: "logical-f1".into(), ..Default::default() },
+        "f1",
+    );
+    assert!(live(&ps).is_none(), "an ordinary plan ends the channel");
+    assert!(!quiet_request(&ps));
+    reset_player_control_for_test(&ps);
+    reset_session(&mut ps);
 }

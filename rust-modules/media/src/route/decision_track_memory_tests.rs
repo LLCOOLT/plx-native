@@ -942,6 +942,9 @@ fn request(sid: ServerId, preview: bool) -> PlaybackRequest {
         title: "Episode".into(),
         ctx: String::new(),
         preview,
+        seed: None,
+        playlist: String::new(),
+        channel: false,
     }
 }
 

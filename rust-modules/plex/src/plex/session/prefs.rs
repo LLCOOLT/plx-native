@@ -36,8 +36,8 @@
 //! assignment. `subtitle_offsets` is the other tenant of the door and is declared the same way
 //! ([`SubtitleOffsetsPref`]).
 use super::{
-    DeckPress, DirectPlayMode, HdrOverlayBrightness, LastLibrary, LibraryViews, NextEpisodeMode, OpaqueExtensions, PlaintextConsent,
-    PlaybackQuality, ServerKeyPin, Session, SkipInterval, SubtitleOffsetEntry, SubtitleOffsets, SubtitlePosition,
+    AutoSkip, DeckPress, DirectPlayMode, HdrOverlayBrightness, LastLibrary, LibraryViews, NextEpisodeMode, OpaqueExtensions, PlaintextConsent,
+    PlaybackQuality, Screensaver, ServerKeyPin, Session, SkipInterval, SubtitleOffsetEntry, SubtitleOffsets, SubtitlePosition,
     SubtitleSize, SubtitleTone,
 };
 use serde::de::DeserializeOwned;
@@ -320,10 +320,33 @@ pub struct Preferences {
     /// (`storage::state::ACCOUNT_BOUND_PREFERENCES`). Written only through [`persist_profile_pref`].
     #[serde(default, deserialize_with = "super::de_soft_vec", skip_serializing_if = "Vec::is_empty")]
     pub profile_prefs: Vec<ProfilePrefsRecord>,
+    // ---- install-wide settings of the fork's features ----
+    /// **Whether the player skips intro / credits markers on its own** — see [`AutoSkip`].
+    /// Install-wide like [`Preferences::auto_sign_in`]: written through its own ticketed update, with
+    /// no `choose` door and no live cell. Absence is Off: the Skip pill every build before the field
+    /// offered, and nothing skipped without a press. Skipped at the default so a session predating
+    /// this field serializes exactly as it did before.
+    #[serde(default, deserialize_with = "super::de_soft_auto_skip", skip_serializing_if = "super::is_default_auto_skip")]
+    pub auto_skip: AutoSkip,
+    /// **How long a browsing page waits before the ambient screensaver** — see [`Screensaver`].
+    /// Install-wide: a TV's idle behaviour is a fact about the set. Absence is five minutes; skipped
+    /// at the default so a session predating this field serializes exactly as it did before.
+    #[serde(default, deserialize_with = "super::de_soft_screensaver", skip_serializing_if = "super::is_default_screensaver")]
+    pub screensaver: Screensaver,
+    /// **The Tunarr server Live TV reads** — its origin (`http://192.0.2.20:8000`), empty when Live
+    /// TV is not set up. Install-wide: a tuner on the LAN is a fact about the television's network,
+    /// not about whoever is watching. Skipped when empty; soft-parsed, so a malformed value costs
+    /// the setting, never the credentials.
+    #[serde(default, deserialize_with = "de_soft_string", skip_serializing_if = "String::is_empty")]
+    pub livetv_source: String,
+    /// The Live TV channel last tuned (its guide number), so the guide opens on it. Empty until a
+    /// channel has played; soft-parsed and omitted while empty, like [`Preferences::livetv_source`].
+    #[serde(default, deserialize_with = "de_soft_string", skip_serializing_if = "String::is_empty")]
+    pub livetv_channel: String,
 }
 
-/// How long a setting's value lives, and who owns the write. `auto_sign_in` and
-/// `last_hero_blur` are `Install`; the two lists sign-out clears are `Account`; the ten player
+/// How long a setting's value lives, and who owns the write. `auto_sign_in`, `last_hero_blur`,
+/// `auto_skip`, `screensaver` and the two Live TV keys are `Install`; the two lists sign-out clears are `Account`; the ten player
 /// scalars, the hero trailer autoplay switch (each with its install-wide key as the [`Fallback`]) and
 /// the library lists are `Profile`;
 /// `track_memory` is `PerShow` and `subtitle_offsets` is `PerItem`. Sign-out clears every row that
@@ -500,6 +523,32 @@ setting!(AutoSignInPref: bool = auto_sign_in, "auto_sign_in", Install,
     account false, live false, settings None, parse BoolOff);
 setting!(LastHeroBlurPref: Option<[[f32; 3]; 4]> = last_hero_blur, "last_hero_blur", Install,
     account false, live false, settings None, parse OptionalSoft);
+setting!(AutoSkipPref: AutoSkip = auto_skip, "auto_skip", Install,
+    account false, live false, settings None, parse Soft);
+setting!(ScreensaverPref: Screensaver = screensaver, "screensaver", Install,
+    account false, live false, settings None, parse Soft);
+
+/// A free-text install-wide row: not `Copy`, so a [`Row`] only (no [`Setting`] value API), like the
+/// memory-door lists. Read through `Session::livetv_source` / `livetv_channel`; written by the Live
+/// TV screens through their own ticketed update.
+pub struct LiveTvSourcePref;
+impl Row for LiveTvSourcePref {
+    const KEY: &'static str = "livetv_source";
+    const SCOPE: Scope = Scope::Install;
+    const ACCOUNT_BOUND: bool = false;
+    const LIVE: bool = false;
+    const SETTINGS: Option<SettingsWrite> = None;
+    const PARSE: Parse = Parse::Soft;
+}
+pub struct LiveTvChannelPref;
+impl Row for LiveTvChannelPref {
+    const KEY: &'static str = "livetv_channel";
+    const SCOPE: Scope = Scope::Install;
+    const ACCOUNT_BOUND: bool = false;
+    const LIVE: bool = false;
+    const SETTINGS: Option<SettingsWrite> = None;
+    const PARSE: Parse = Parse::Soft;
+}
 
 /// A row whose value is a list, so it cannot be a [`Setting`] (a `Setting` value is `Copy`): it
 /// names the item type and the field, so a test can drive the list and prove the marker names its own
@@ -581,6 +630,10 @@ pub const DESCRIPTORS: &[Descriptor] = &[
     Descriptor::of::<AutoSignInPref>(),
     Descriptor::of::<TrailerAutoplayPref>(),
     Descriptor::of::<LastHeroBlurPref>(),
+    Descriptor::of::<AutoSkipPref>(),
+    Descriptor::of::<ScreensaverPref>(),
+    Descriptor::of::<LiveTvSourcePref>(),
+    Descriptor::of::<LiveTvChannelPref>(),
     Descriptor::of::<PlaintextConsentRow>(),
     Descriptor::of::<ServerKeyPinsRow>(),
     Descriptor::of::<LastLibraryRow>(),
