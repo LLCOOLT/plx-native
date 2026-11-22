@@ -137,7 +137,12 @@ fn keys_share_an_answer_between_reruns_and_tell_films_apart_by_year() {
 
 #[test]
 fn a_lookup_with_no_servers_finds_nothing() {
-    let _g = plx_base::testlock::serial();
-    plx_plex::plex::reset_servers_for_test();
-    assert_eq!(lookup(&Want::Film { title: "Sintel".into(), year: None }), None);
+    struct NoServers;
+    impl crate::livetv::work::Reach for NoServers {
+        fn servers(&self) -> Vec<ServerId> { Vec::new() }
+        fn current(&self) -> ServerId { ServerId::from_raw(0) }
+        fn client(&self, _: ServerId) -> Option<&'static plx_plex::plex::Client> { None }
+        fn machine(&self, _: &str) -> Option<ServerId> { None }
+    }
+    assert_eq!(lookup(&NoServers, &Want::Film { title: "Sintel".into(), year: None }), None);
 }

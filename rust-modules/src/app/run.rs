@@ -252,7 +252,7 @@ impl plx_ui::dispatch::FrameRuntime<AppHost> for ProductFrameRuntime<'_> {
         // The container runs its frame: the pending navigation's commit (at `PageDip`'s floor),
         // then the owned screens' inputs, ticks, timers and effects. `app/bridge.rs` is the seam.
         let App { runtime, bridge: retained, rec, player, adapters, menu_play_await,
-            repause_at, refresh_hubs, ptr, boot_initial, pages, inputs, running, .. } = &mut *app;
+            repause_at, refresh_hubs, ptr, boot_initial, pages, inputs, running, livetv, .. } = &mut *app;
         let mut bridge = runtime.bridge(retained);
         let supplied = match rec.replay_results(|id| bridge.recorded_client(id)) {
             Ok(results) => results,
@@ -271,7 +271,7 @@ impl plx_ui::dispatch::FrameRuntime<AppHost> for ProductFrameRuntime<'_> {
             adapters, menu_play_await,
             playback: &mut super::playback::LivePlaybackResources,
             repause_at, refresh_hubs, ptr,
-            rec, boot_initial };
+            rec, boot_initial, livetv };
         let (_word, tree_report) = if let Some(results) = supplied {
             let mut stores = std::collections::BTreeSet::new();
             for (address, _) in &results {
@@ -595,7 +595,8 @@ fn publish_resources(app: &mut App, fr: &mut Frame) {
                 adapters: &mut app.adapters, menu_play_await: &mut app.menu_play_await,
                 playback: &mut super::playback::LivePlaybackResources,
                 repause_at: &mut app.repause_at, refresh_hubs: &mut app.refresh_hubs,
-                ptr: &mut app.ptr, rec: &mut app.rec, boot_initial: &mut app.boot_initial },
+                ptr: &mut app.ptr, rec: &mut app.rec, boot_initial: &mut app.boot_initial,
+                livetv: &mut app.livetv },
             fr.now, &mut report);
         fr.underlay_moving |= report.underlay_moving;
     }
@@ -2432,7 +2433,7 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         {
             // A live channel does not END: its stream dropped, or a library programme's slot ran
             // out. Re-tune instead of leaving (`livetv::stream_ended`).
-            super::livetv::stream_ended(app, fr.now);
+            super::livetv::with_app(app, |t| super::livetv::stream_ended(t, fr.now));
         } else if playback_may_run(app) && super::bridge::player(&app.pages).is_some() && plx_media::player::ended(&app.player.session) == Some(true) {
             let handed_off_to_up_next = finish_playback(&mut app.player,
                 &mut app.adapters.player,
@@ -3116,8 +3117,7 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
         // and re-tune schedule run. Route-unconditional: a guide landing while the player is up
         // still refreshes the banner's listing.
         app.runtime.bridge(&mut app.bridge).livetv_pump();
-        super::livetv::requests(app, fr.now);
-        super::livetv::pump(app, fr.now);
+        super::livetv::with_app(app, |t| super::livetv::pump(t, fr.now));
         super::resume_place::pump(app, fr.now);
         super::ambient::pump(app, fr.now, fr.player);
         // Server-side view-state WRITES (Mark as Watched / Unwatched, Remove from Deck): send
@@ -7360,7 +7360,8 @@ pub(in crate::app) mod lifecycle_regression_tests {
                 adapters: &mut app.adapters, menu_play_await: &mut app.menu_play_await,
                 playback: &mut super::playback::LivePlaybackResources,
                 repause_at: &mut app.repause_at, refresh_hubs: &mut app.refresh_hubs,
-                ptr: &mut app.ptr, rec: &mut app.rec, boot_initial: &mut app.boot_initial },
+                ptr: &mut app.ptr, rec: &mut app.rec, boot_initial: &mut app.boot_initial,
+                livetv: &mut app.livetv },
             32, &mut report);
         assert_eq!(app.pages.frame_index(), turn, "continuation is not another frame");
         assert!(report.steps_post <= plx_ui::dispatch::MAX_STEPS_POST);
@@ -7433,7 +7434,8 @@ pub(in crate::app) mod lifecycle_regression_tests {
                         adapters: &mut app.adapters, menu_play_await: &mut app.menu_play_await,
                         playback: &mut super::playback::LivePlaybackResources,
                         repause_at: &mut app.repause_at, refresh_hubs: &mut app.refresh_hubs,
-                        ptr: &mut app.ptr, rec: &mut app.rec, boot_initial: &mut app.boot_initial },
+                        ptr: &mut app.ptr, rec: &mut app.rec, boot_initial: &mut app.boot_initial,
+                livetv: &mut app.livetv },
                     now, &mut report, &mut passive);
                 assert_eq!((passive.ticks, passive.focus, passive.states, passive.presents, passive.done), (1,1,1,1,1),
                     "the passive caller survives owned recording and the POST continuation");
@@ -7588,7 +7590,8 @@ pub(in crate::app) mod lifecycle_regression_tests {
                 adapters: &mut app.adapters, menu_play_await: &mut app.menu_play_await,
                 playback: &mut super::playback::LivePlaybackResources,
                 repause_at: &mut app.repause_at, refresh_hubs: &mut app.refresh_hubs,
-                ptr: &mut app.ptr, rec: &mut app.rec, boot_initial: &mut app.boot_initial },
+                ptr: &mut app.ptr, rec: &mut app.rec, boot_initial: &mut app.boot_initial,
+                livetv: &mut app.livetv },
             32, &mut report);
         assert_eq!(report.steps_post, plx_ui::dispatch::MAX_STEPS_POST);
         assert_eq!(super::super::bridge::player(&app.pages).unwrap().hud.until,

@@ -240,25 +240,26 @@ pub const SHAPE: &str =
 
 /// Is `m` an item the menu has anything to offer? A leaf or a show/season — i.e. everything the
 /// home shelves carry. Kept as a predicate so the caller can decline to present an empty panel.
-pub fn has_actions(m: &PmsMovie) -> bool {
+pub fn has_actions(m: &PmsMovie, channel_server: plx_plex::plex::ServerId) -> bool {
     if m.rk.is_empty() {
         return false;
     }
     match m.kind {
         plx_data::pms::KIND_CHANNEL | plx_data::pms::KIND_CHANNEL_IDEA => false,
         // A collection or a playlist has no watch state; its one row is Make a Channel.
-        plx_data::pms::KIND_COLLECTION | plx_data::pms::KIND_PLAYLIST => offers_channel(m),
+        plx_data::pms::KIND_COLLECTION | plx_data::pms::KIND_PLAYLIST => offers_channel(m, channel_server),
         _ => true,
     }
 }
 
-/// Does `m` offer *Make a Channel*? A show, a season, a collection or a playlist on the server
-/// the profile's channels live on (`plex::current_server`, the server `vchannel` keeps them on):
-/// a title borrowed from another server could not be read back to air.
-pub fn offers_channel(m: &PmsMovie) -> bool {
+/// Does `m` offer *Make a Channel*? A show, a season, a collection or a playlist on
+/// `channel_server`, the server the profile's channels live on (the current one, which `vchannel`
+/// keeps them on; the caller hands it over, a screen from its `ScreenInputs`): a title borrowed
+/// from another server could not be read back to air.
+pub fn offers_channel(m: &PmsMovie, channel_server: plx_plex::plex::ServerId) -> bool {
     matches!(m.kind, 1 | 2 | plx_data::pms::KIND_COLLECTION | plx_data::pms::KIND_PLAYLIST)
         && !m.rk.is_empty()
-        && (!m.sid.is_set() || m.sid == plx_plex::plex::current_server())
+        && (!m.sid.is_set() || m.sid == channel_server)
 }
 
 /// The *Make a Channel* row for `m`. A season's channel is named for its show as well.
@@ -795,7 +796,7 @@ impl ItemMenuScreen {
     /// The rows, built ONCE at `Mount`. A hub refetch can re-order the catalog underneath an open
     /// panel, so nothing here is rebuilt while the menu is up — which is also why every [`Action`]
     /// carries the identity it needs rather than an index.
-    fn build_rows(&mut self, meta: plx_data::metadata::MetadataView<'_>, deck_press: DeckPress) {
+    fn build_rows(&mut self, meta: plx_data::metadata::MetadataView<'_>, deck_press: DeckPress, channel_server: plx_plex::plex::ServerId) {
         if self.built {
             return;
         }
@@ -809,7 +810,7 @@ impl ItemMenuScreen {
                 // A Watchlist tile with a reachable copy is a card of that copy, and Remove joins it.
                 let remove = self.arg.catalog.as_ref().map(|c| c.guid.as_str());
                 let form = build_card(row, *from_deck, deck_press, trailer.as_ref(), remove, self.face.as_ref());
-                if offers_channel(row) { form.section(make_channel_row(row)) } else { form }
+                if offers_channel(row, channel_server) { form.section(make_channel_row(row)) } else { form }
             }
             ItemMenuKind::Episode { mark, versions } => build_episode(&self.arg.rk, *mark, versions, self.face.as_ref()),
             ItemMenuKind::Season { mark, .. } => build_season(&self.arg.rk, *mark, self.face.as_ref()),
@@ -930,7 +931,8 @@ impl<H: AppLike + crate::registry::MetadataLike + crate::registry::ScreenInputsL
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
         match ev {
             ScreenEvent::Mount => {
-                self.build_rows(H::metadata(cx), H::screen_inputs(cx).preference::<plx_plex::plex::session::DeckPressPref>());
+                let inputs = H::screen_inputs(cx);
+                self.build_rows(H::metadata(cx), inputs.preference::<plx_plex::plex::session::DeckPressPref>(), inputs.current_server);
                 // The menu is the thing the Home hold hint teaches; once ANY card screen has
                 // opened one the lesson retires for this input owner, through its typed effect.
                 fx.push(Fx::HoldHint(plx_machine::machine::HoldHintEvent::Learned));
@@ -1442,11 +1444,11 @@ pub(crate) mod tests {
     fn a_collections_only_item_menu_row_is_make_a_channel() {
         let collection = PmsMovie { rk: "42".into(), kind: plx_data::pms::KIND_COLLECTION,
             ..Default::default() };
-        assert!(has_actions(&collection));
+        assert!(has_actions(&collection, plx_plex::plex::ServerId::UNSET));
         let menu = built(Form::new().section(make_channel_row(&collection)));
         assert_eq!(menu.ids(), [ItemRow::MakeChannel]);
         let borrowed = PmsMovie { sid: plx_plex::plex::ServerId::from_raw(9), ..collection };
-        assert!(!has_actions(&borrowed), "nothing to offer for another server's collection");
+        assert!(!has_actions(&borrowed, plx_plex::plex::ServerId::UNSET), "nothing to offer for another server's collection");
     }
 
     /// A show or season never offers *Play from Start* — there is no single part to start — and
@@ -1869,7 +1871,7 @@ pub(crate) mod tests {
         m.part = "/library/parts/42/file.mkv".to_string();
 
         let mut screen = ItemMenuScreen::new(EntryId(7), card_arg(&m, false));
-        screen.build_rows(test_store().view(), DeckPress::Play);
+        screen.build_rows(test_store().view(), DeckPress::Play, plx_plex::plex::ServerId::UNSET);
         let elem = first_action(&screen, |a| matches!(a, Action::PlayFromStart(_)));
         let req = commit(&mut screen, elem);
         assert_eq!(
@@ -1906,7 +1908,7 @@ pub(crate) mod tests {
                 watchlist: None,
             },
         );
-        strip.build_rows(test_store().view(), DeckPress::Play);
+        strip.build_rows(test_store().view(), DeckPress::Play, plx_plex::plex::ServerId::UNSET);
         let elem = first_action(&strip, |a| matches!(a, Action::PlayFromStart(_)));
         let req = commit(&mut strip, elem);
         assert!(
@@ -1940,7 +1942,7 @@ pub(crate) mod tests {
                 watchlist: None,
             },
         );
-        tab.build_rows(test_store().view(), DeckPress::Play);
+        tab.build_rows(test_store().view(), DeckPress::Play, plx_plex::plex::ServerId::UNSET);
         let elem = first_action(&tab, |a| matches!(a, Action::MarkWatched(_)));
         let req = commit(&mut tab, elem);
         assert!(req.item.is_none(), "the tab is no catalog row");
@@ -2750,7 +2752,7 @@ pub(crate) mod tests {
             arg("season-9", ItemMenuKind::Season { mark: PosterMark::None, show_rk: "show-1".into(), index: 4 }),
         );
         for (menu, want) in [(&mut strip, "77"), (&mut tab, "season-9")] {
-            menu.build_rows(test_store().view(), DeckPress::Play);
+            menu.build_rows(test_store().view(), DeckPress::Play, plx_plex::plex::ServerId::UNSET);
             let rows = row_subjects(menu);
             assert!(!rows.is_empty());
             for (id, subject) in &rows {
@@ -2762,7 +2764,7 @@ pub(crate) mod tests {
             EntryId(8),
             arg("", ItemMenuKind::Catalog { state: plx_data::watchlist::model::TileState::NotOnAnyServer }),
         );
-        catalog.build_rows(test_store().view(), DeckPress::Play);
+        catalog.build_rows(test_store().view(), DeckPress::Play, plx_plex::plex::ServerId::UNSET);
         let rows = row_subjects(&catalog);
         assert!(!rows.is_empty());
         for (id, subject) in &rows {

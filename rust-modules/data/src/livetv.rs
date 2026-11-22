@@ -15,11 +15,13 @@
 //! * [`native`] — Tunarr native mode: what a Tunarr channel airs, played from the Plex file.
 //! * [`plexmatch`] — whether an airing is in the viewer's Plex library, so the guide can offer it
 //!   from the start.
+//! * [`work`] — how the store's IO leaves it: [`work::Work`] on an outbox the app's runner
+//!   drains, and the [`work::LiveTvInput`] the app captures for each step.
 //!
 //! [`LiveTvState`] is the store's logical state; `stores::livetv` puts the command vocabulary and
 //! the machine in front of it, like every other store. The configured server's address is an
 //! install-wide preference (`Session::livetv_source`), restored at boot and written on the storage
-//! worker when the person picks or forgets a server.
+//! worker (as [`work::Work`]) when the person picks or forgets a server.
 
 pub mod guide;
 pub mod hdhr;
@@ -29,6 +31,7 @@ pub mod on_now;
 pub mod suggested;
 pub mod tunarr_keep;
 pub mod source;
+pub mod work;
 pub mod xmltv;
 
 use guide::Lineup;
@@ -38,6 +41,7 @@ use source::{FetchError, Found};
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
+use work::{LiveTvInput, Outbox};
 
 /// How long the virtual channels' guide window stands before it slides with the clock.
 const VIRTUAL_SLIDE_MS: i64 = 20 * 60 * 1000;
@@ -163,6 +167,10 @@ pub struct LiveTvState {
     search: Option<Receiver<Vec<Found>>>,
     matches: Matches,
     revision: u64,
+    /// What the app captured for the step being run ([`LiveTvInput`]).
+    input: LiveTvInput,
+    /// The IO the steps asked for, until the app's runner takes it ([`work`]).
+    out: Outbox,
 }
 
 impl Default for LiveTvState {
@@ -184,6 +192,8 @@ impl Default for LiveTvState {
             search: None,
             matches: Matches::default(),
             revision: 0,
+            input: LiveTvInput::default(),
+            out: Outbox::default(),
         }
     }
 }
@@ -203,6 +213,8 @@ pub enum LiveTvCmd {
     RefreshIfStale,
     /// Search the LAN for Tunarr.
     Discover,
+    /// Remember `number` as the channel last tuned (written on the storage worker).
+    Remember { number: String },
     /// Look `want` up in the viewer's Plex library, unless it already has been (for this roster
     /// and profile) or is being.
     Match(Want),
@@ -276,7 +288,7 @@ impl<'a> LiveTvView<'a> {
     /// asked, and for an answer found under another roster or profile.
     pub fn plex_match(&self, key: &str) -> Option<&'a PlexMatch> {
         let m = &self.state.matches;
-        if m.scope.as_ref() != Some(&Scope::current()) {
+        if m.scope.as_ref() != Some(&Scope::of(&self.state.input)) {
             return None;
         }
         m.answers.get(key)
@@ -285,7 +297,7 @@ impl<'a> LiveTvView<'a> {
     /// checks before it opens an item a page asked for, so a stale or forged request opens nothing.
     pub fn knows_match(&self, hit: &Hit) -> bool {
         let m = &self.state.matches;
-        m.scope.as_ref() == Some(&Scope::current()) && m.answers.values().any(|a| *a == PlexMatch::Found(hit.clone()))
+        m.scope.as_ref() == Some(&Scope::of(&self.state.input)) && m.answers.values().any(|a| *a == PlexMatch::Found(hit.clone()))
     }
     /// Moves whenever anything above moves.
     pub fn revision(&self) -> u64 {
@@ -298,19 +310,25 @@ impl LiveTvState {
         LiveTvView { state: self }
     }
 
-    /// Apply one command at `now_ms` (wall time). `true` when anything observable changed.
-    pub fn run(&mut self, cmd: LiveTvCmd, now_ms: i64) -> bool {
+    /// Apply one command at `now_ms` (wall time), under the `input` the app captured. `true` when
+    /// anything observable changed. The IO it asks for waits in [`LiveTvState::take_work`].
+    pub fn run(&mut self, cmd: LiveTvCmd, input: &LiveTvInput, now_ms: i64) -> bool {
+        self.capture(input);
         let changed = match cmd {
             LiveTvCmd::Restore { origin } => {
                 let origin = hdhr::normalise_address(&origin).unwrap_or_default();
-                self.set_source(origin)
+                self.set_source(origin, now_ms)
+            }
+            LiveTvCmd::Remember { number } => {
+                self.remember_channel(&number);
+                false
             }
             LiveTvCmd::Use { origin } => {
                 let Some(origin) = hdhr::normalise_address(&origin) else { return false };
-                persist(&origin);
+                self.persist(&origin);
                 // Always a change: even re-picking the same server starts a fresh load and closes
                 // the search results the pick was made from.
-                self.set_source(origin);
+                self.set_source(origin, now_ms);
                 self.discovery = Discovery::Idle;
                 self.start_load();
                 true
@@ -319,8 +337,8 @@ impl LiveTvState {
                 if self.source.is_empty() {
                     return false;
                 }
-                persist("");
-                self.set_source(String::new())
+                self.persist("");
+                self.set_source(String::new(), now_ms)
             }
             LiveTvCmd::Refresh => self.start_load(),
             LiveTvCmd::RefreshIfStale => {
@@ -335,7 +353,7 @@ impl LiveTvState {
             LiveTvCmd::Discover => self.start_search(),
             LiveTvCmd::Match(want) => self.start_match(want),
             LiveTvCmd::Reset => {
-                *self = LiveTvState { revision: self.revision, epoch: self.epoch + 1, ..LiveTvState::default() };
+                *self = LiveTvState { revision: self.revision, epoch: self.epoch + 1, input: self.input.clone(), ..LiveTvState::default() };
                 true
             }
             LiveTvCmd::Virtual(cmd) => {
@@ -387,7 +405,25 @@ impl LiveTvState {
         self.lineup = Arc::new(merged);
     }
 
-    fn set_source(&mut self, origin: String) -> bool {
+    /// Hand the captured input to the state and its two sub-machines.
+    fn capture(&mut self, input: &LiveTvInput) {
+        if self.input != *input {
+            self.input = input.clone();
+        }
+        self.virtuals.capture(input);
+        self.keeper.capture(input);
+    }
+
+    /// The IO the steps asked for since the last take, oldest first: the store's own, then the
+    /// virtual channels', then the keeper's. The app's runner starts each on its lane.
+    pub fn take_work(&mut self) -> Vec<work::Work> {
+        let mut all = self.out.take();
+        all.extend(self.virtuals.take_work());
+        all.extend(self.keeper.take_work());
+        all
+    }
+
+    fn set_source(&mut self, origin: String, now_ms: i64) -> bool {
         if origin == self.source {
             return false;
         }
@@ -396,7 +432,7 @@ impl LiveTvState {
         self.source = origin;
         self.device = None;
         self.tunarr = Arc::new(Lineup::default());
-        self.republish(plx_base::wallclock::now_ms());
+        self.republish(now_ms);
         self.guide_error = None;
         self.loaded_at_ms = None;
         self.status = if self.source.is_empty() { Status::Unconfigured } else { Status::Loading };
@@ -404,18 +440,14 @@ impl LiveTvState {
     }
 
     fn start_load(&mut self) -> bool {
-        if self.source.is_empty() || self.load.is_some() || crate::stores::tape::active() {
+        if self.source.is_empty() || self.load.is_some() || self.input.controlled {
             return false;
         }
         let (tx, rx) = mpsc::channel();
         let origin = self.source.clone();
-        let spawned = plx_base::task::spawn_small("livetv-load", move || {
+        self.out.worker("livetv-load", move |_| {
             let _ = tx.send(source::load(&origin, plx_base::wallclock::now_ms()));
-            plx_machine::present::wake_from_worker();
         });
-        if !spawned {
-            return false;
-        }
         self.load = Some((self.epoch, rx));
         if !matches!(self.status, Status::Ready) {
             self.status = Status::Loading;
@@ -424,24 +456,20 @@ impl LiveTvState {
     }
 
     fn start_search(&mut self) -> bool {
-        if self.search.is_some() || crate::stores::tape::active() {
+        if self.search.is_some() || self.input.controlled {
             return false;
         }
         let (tx, rx) = mpsc::channel();
-        let spawned = plx_base::task::spawn_small("livetv-search", move || {
+        self.out.worker("livetv-search", move |_| {
             let _ = tx.send(source::discover());
-            plx_machine::present::wake_from_worker();
         });
-        if !spawned {
-            return false;
-        }
         self.search = Some(rx);
         self.discovery = Discovery::Searching;
         true
     }
 
     fn start_match(&mut self, want: Want) -> bool {
-        let scope = Scope::current();
+        let scope = Scope::of(&self.input);
         let m = &mut self.matches;
         if m.scope.as_ref() != Some(&scope) {
             // Another roster or profile: every answer (and every lookup in flight) is stale.
@@ -450,20 +478,16 @@ impl LiveTvState {
             m.pending.clear();
         }
         let key = want.key();
-        if m.answers.contains_key(&key) || m.pending.len() >= MATCH_IN_FLIGHT || crate::stores::tape::active() {
+        if m.answers.contains_key(&key) || m.pending.len() >= MATCH_IN_FLIGHT || self.input.controlled {
             return false;
         }
         if m.answers.len() >= MATCH_CACHE_MAX {
             m.answers.retain(|_, v| *v == PlexMatch::Looking);
         }
         let (tx, rx) = mpsc::channel();
-        let spawned = plx_base::task::spawn_small("livetv-plexmatch", move || {
-            let _ = tx.send(plexmatch::lookup(&want));
-            plx_machine::present::wake_from_worker();
+        self.out.worker("livetv-plexmatch", move |reach| {
+            let _ = tx.send(plexmatch::lookup(reach, &want));
         });
-        if !spawned {
-            return false;
-        }
         m.answers.insert(key.clone(), PlexMatch::Looking);
         m.pending.push((key, rx));
         true
@@ -492,13 +516,15 @@ impl LiveTvState {
     /// Answer `want` without a worker (tests).
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_match_for_test(&mut self, want: &Want, answer: PlexMatch) {
-        self.matches.scope = Some(Scope::current());
+        self.matches.scope = Some(Scope::of(&self.input));
         self.matches.answers.insert(want.key(), answer);
         self.revision += 1;
     }
 
-    /// Drain the workers. `true` when a landing changed anything.
-    pub fn pump(&mut self, now_ms: i64) -> bool {
+    /// Drain the workers, under the `input` the app captured. `true` when a landing changed
+    /// anything.
+    pub fn pump(&mut self, input: &LiveTvInput, now_ms: i64) -> bool {
+        self.capture(input);
         let mut changed = false;
         if let Some((epoch, rx)) = self.load.as_ref() {
             match rx.try_recv() {
@@ -536,6 +562,11 @@ impl LiveTvState {
             }
         }
         changed |= self.pump_matches();
+        if !self.source.is_empty() {
+            // The record of the channels kept in Tunarr is read once a server is set up, so the
+            // studio's Your Channels shows them from its first open.
+            self.keeper.load();
+        }
         let (kept_changed, guide_moved) = self.keeper.pump();
         changed |= kept_changed;
         if guide_moved && !self.source.is_empty() {
@@ -633,6 +664,45 @@ impl LiveTvState {
         self.revision += 1;
     }
 
+    /// Write the configured server to the session on the storage worker: the frame must not block
+    /// on storage, and the in-memory value has already moved (a failed write costs the setting at
+    /// the next boot, never the session).
+    fn persist(&mut self, origin: &str) {
+        if self.input.controlled {
+            return;
+        }
+        let origin = origin.to_owned();
+        self.out.storage("livetv-source", move |_| {
+            let durable = plx_plex::plex::session::update_with_outcome(|s| Some(s.with_livetv_source(&origin)))
+                .is_some_and(|write| matches!(write.classify(),
+                    plx_plex::plex::session::async_persistence::CompletionOutcome::Durable(_)));
+            if !durable {
+                plx_base::eventlog::log("livetv: the Live TV server was not saved");
+            }
+        });
+    }
+
+    /// Remember `number` as the channel last tuned (`Session::livetv_channel`), so the guide opens
+    /// on it next time. Written on the storage worker; nothing to do when it is already the saved
+    /// one (the captured input says which that is).
+    fn remember_channel(&mut self, number: &str) {
+        if self.input.controlled || number.is_empty() || self.input.remembered_channel == number {
+            return;
+        }
+        let number = number.to_owned();
+        self.out.storage("livetv-channel", move |_| {
+            if plx_plex::plex::session::update_with_outcome(|s| Some(s.with_livetv_channel(&number))).is_none() {
+                plx_base::eventlog::log("livetv: the last channel was not saved");
+            }
+        });
+    }
+
+    /// The IO queued so far, by name (tests).
+    #[cfg(test)]
+    fn queued_for_test(&self) -> Vec<&'static str> {
+        self.out.names()
+    }
+
     /// Land a load result as if a worker had returned it (tests).
     #[cfg(test)]
     fn land_for_test(&mut self, result: LoadResult, now_ms: i64) {
@@ -641,43 +711,72 @@ impl LiveTvState {
     }
 }
 
-/// Write the configured server to the session on the storage worker: the frame must not block on
-/// storage, and the in-memory value has already moved (a failed write costs the setting at the
-/// next boot, never the session).
-/// Remember `number` as the channel last tuned (`Session::livetv_channel`), so the guide opens on
-/// it next time. Written on the storage worker; nothing to do when it is already the saved one.
-pub fn remember_channel(number: &str) {
-    if crate::stores::tape::active() || cfg!(test) || number.is_empty()
-        || plx_plex::plex::session::peek().livetv_channel() == number
-    {
-        return;
-    }
-    let number = number.to_owned();
-    let _ = plx_base::storage_worker::submit_retained(move || {
-        if plx_plex::plex::session::update_with_outcome(|s| Some(s.with_livetv_channel(&number))).is_none() {
-            plx_base::eventlog::log("livetv: the last channel was not saved");
-        }
-    });
-}
-
-fn persist(origin: &str) {
-    if crate::stores::tape::active() || cfg!(test) {
-        return;
-    }
-    let origin = origin.to_owned();
-    let _ = plx_base::storage_worker::submit_retained(move || {
-        let durable = plx_plex::plex::session::update_with_outcome(|s| Some(s.with_livetv_source(&origin)))
-            .is_some_and(|write| matches!(write.classify(),
-                plx_plex::plex::session::async_persistence::CompletionOutcome::Durable(_)));
-        if !durable {
-            plx_base::eventlog::log("livetv: the Live TV server was not saved");
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The input the tests step under: nothing controlled, no server, no profile.
+    const IN: LiveTvInput = LiveTvInput {
+        controlled: false,
+        server: plx_plex::plex::ServerId::from_raw(0),
+        profile: String::new(),
+        roster: 0,
+        remembered_channel: String::new(),
+    };
+
+    /// A [`work::Reach`] with no server signed in.
+    struct NoServers;
+    impl work::Reach for NoServers {
+        fn servers(&self) -> Vec<plx_plex::plex::ServerId> { Vec::new() }
+        fn current(&self) -> plx_plex::plex::ServerId { plx_plex::plex::ServerId::from_raw(0) }
+        fn client(&self, _: plx_plex::plex::ServerId) -> Option<&'static plx_plex::plex::Client> { None }
+        fn machine(&self, _: &str) -> Option<plx_plex::plex::ServerId> { None }
+    }
+
+    /// Run the queued worker items here, as the app's runner would on its threads.
+    fn run_work(s: &mut LiveTvState) {
+        for w in s.take_work() {
+            (w.body)(&NoServers);
+        }
+    }
+
+    /// **The store asks; it never starts.** Picking a server queues the session write and the
+    /// load as work for the app's runner, and nothing runs until the runner takes it.
+    #[test]
+    fn use_queues_the_write_and_the_load_as_work() {
+        let mut s = LiveTvState::default();
+        assert!(s.run(LiveTvCmd::Use { origin: "192.0.2.20".into() }, &IN, 0));
+        assert_eq!(s.queued_for_test(), ["livetv-source", "livetv-load"]);
+        let work = s.take_work();
+        assert_eq!(work.iter().map(|w| w.lane).collect::<Vec<_>>(), [work::Lane::Storage, work::Lane::Worker]);
+        assert!(s.view().loading(), "the load is in flight once asked");
+    }
+
+    /// **A controlled run starts no work** (a tape replaying): the same commands queue nothing.
+    #[test]
+    fn a_controlled_run_queues_nothing() {
+        let mut s = LiveTvState::default();
+        let controlled = LiveTvInput { controlled: true, ..IN };
+        s.run(LiveTvCmd::Use { origin: "192.0.2.20".into() }, &controlled, 0);
+        s.run(LiveTvCmd::Discover, &controlled, 0);
+        s.run(LiveTvCmd::Match(Want::Film { title: "Sintel".into(), year: None }), &controlled, 0);
+        s.run(LiveTvCmd::Remember { number: "7".into() }, &controlled, 0);
+        assert!(s.take_work().is_empty());
+        assert!(!s.view().loading());
+    }
+
+    /// **The last channel is written once**, and not at all when the session already holds it.
+    #[test]
+    fn remembering_a_channel_writes_only_a_new_one() {
+        let mut s = LiveTvState::default();
+        assert!(!s.run(LiveTvCmd::Remember { number: "7".into() }, &IN, 0), "nothing a page sees changes");
+        assert_eq!(s.queued_for_test(), ["livetv-channel"]);
+        s.take_work();
+        let holds = LiveTvInput { remembered_channel: "7".into(), ..IN };
+        s.run(LiveTvCmd::Remember { number: "7".into() }, &holds, 0);
+        s.run(LiveTvCmd::Remember { number: String::new() }, &IN, 0);
+        assert!(s.take_work().is_empty());
+    }
     use guide::Channel;
 
     fn lineup(n: usize) -> Lineup {
@@ -687,12 +786,12 @@ mod tests {
     #[test]
     fn restore_adopts_a_normalised_source_without_loading() {
         let mut s = LiveTvState::default();
-        assert!(s.run(LiveTvCmd::Restore { origin: "192.0.2.20".into() }, 0));
+        assert!(s.run(LiveTvCmd::Restore { origin: "192.0.2.20".into() }, &IN, 0));
         assert_eq!(s.view().source(), "http://192.0.2.20:8000");
         assert!(s.view().configured());
         assert!(!s.view().loading(), "boot does not fetch a guide nobody asked for");
-        assert!(!s.run(LiveTvCmd::Restore { origin: "http://192.0.2.20:8000".into() }, 0), "same source, no change");
-        assert!(s.run(LiveTvCmd::Restore { origin: "not a host".into() }, 0), "garbage restores as unset");
+        assert!(!s.run(LiveTvCmd::Restore { origin: "http://192.0.2.20:8000".into() }, &IN, 0), "same source, no change");
+        assert!(s.run(LiveTvCmd::Restore { origin: "not a host".into() }, &IN, 0), "garbage restores as unset");
         assert_eq!(*s.view().status(), Status::Unconfigured);
     }
 
@@ -703,18 +802,17 @@ mod tests {
     #[test]
     fn refresh_if_stale_loads_a_restored_server() {
         let mut s = LiveTvState::default();
-        // A port that refuses at once, so the real worker `cfg(test)` spawns ends immediately.
-        s.run(LiveTvCmd::Restore { origin: "http://127.0.0.1:9".into() }, 0);
+        s.run(LiveTvCmd::Restore { origin: "http://127.0.0.1:9".into() }, &IN, 0);
         assert!(!s.view().loading());
-        assert!(s.run(LiveTvCmd::RefreshIfStale, 0), "the restored server is fetched");
+        assert!(s.run(LiveTvCmd::RefreshIfStale, &IN, 0), "the restored server is fetched");
         assert!(s.view().loading());
-        assert!(!s.run(LiveTvCmd::RefreshIfStale, 0), "and only once while that fetch is in flight");
+        assert!(!s.run(LiveTvCmd::RefreshIfStale, &IN, 0), "and only once while that fetch is in flight");
     }
 
     #[test]
     fn a_landing_installs_the_guide_and_a_failed_reload_keeps_it() {
         let mut s = LiveTvState::default();
-        s.run(LiveTvCmd::Restore { origin: "192.0.2.20".into() }, 0);
+        s.run(LiveTvCmd::Restore { origin: "192.0.2.20".into() }, &IN, 0);
         s.land_for_test(Ok((Device::default(), lineup(3), None)), 1000);
         assert_eq!(*s.view().status(), Status::Ready);
         assert_eq!(s.view().lineup().len(), 3);
@@ -726,7 +824,7 @@ mod tests {
     #[test]
     fn a_first_load_failure_is_reported() {
         let mut s = LiveTvState::default();
-        s.run(LiveTvCmd::Restore { origin: "192.0.2.20".into() }, 0);
+        s.run(LiveTvCmd::Restore { origin: "192.0.2.20".into() }, &IN, 0);
         s.land_for_test(Err(FetchError::Status(404)), 0);
         assert_eq!(*s.view().status(), Status::Failed(FetchError::Status(404)));
     }
@@ -736,21 +834,22 @@ mod tests {
         let mut s = LiveTvState::default();
         s.install_for_test("http://192.0.2.20:8000", lineup(1), 1_000_000);
         let rev = s.view().revision();
-        // `cfg(test)` workers are real threads; `RefreshIfStale` on a fresh guide must not start one.
-        assert!(!s.run(LiveTvCmd::RefreshIfStale, 1_000_000 + STALE_MS - 1));
+        // `RefreshIfStale` on a fresh guide must not ask for a load.
+        assert!(!s.run(LiveTvCmd::RefreshIfStale, &IN, 1_000_000 + STALE_MS - 1));
         assert_eq!(s.view().revision(), rev);
         assert!(!s.view().loading());
+        assert!(s.take_work().is_empty());
     }
 
     #[test]
     fn forgetting_clears_the_guide() {
         let mut s = LiveTvState::default();
         s.install_for_test("http://192.0.2.20:8000", lineup(2), 0);
-        assert!(s.run(LiveTvCmd::Forget, 0));
+        assert!(s.run(LiveTvCmd::Forget, &IN, 0));
         assert!(!s.view().configured());
         assert!(s.view().lineup().is_empty());
         assert_eq!(*s.view().status(), Status::Unconfigured);
-        assert!(!s.run(LiveTvCmd::Forget, 0), "nothing left to forget");
+        assert!(!s.run(LiveTvCmd::Forget, &IN, 0), "nothing left to forget");
     }
 
     #[test]
@@ -760,19 +859,20 @@ mod tests {
         let mut s = LiveTvState::default();
         let want = Want::Film { title: "Sintel".into(), year: None };
         assert_eq!(s.view().plex_match(&want.key()), None, "never asked");
-        assert!(s.run(LiveTvCmd::Match(want.clone()), 0));
+        assert!(s.run(LiveTvCmd::Match(want.clone()), &IN, 0));
         assert_eq!(s.view().plex_match(&want.key()), Some(&PlexMatch::Looking));
-        assert!(!s.run(LiveTvCmd::Match(want.clone()), 0), "asked once");
+        assert!(!s.run(LiveTvCmd::Match(want.clone()), &IN, 0), "asked once");
         let other = Want::Film { title: "Big Buck Bunny".into(), year: None };
-        assert!(!s.run(LiveTvCmd::Match(other.clone()), 0), "one lookup in flight at a time");
-        // No servers are registered, so the real worker answers "not found" at once.
+        assert!(!s.run(LiveTvCmd::Match(other.clone()), &IN, 0), "one lookup in flight at a time");
+        // No servers are registered, so the lookup answers "not found" at once.
+        run_work(&mut s);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !s.pump(0) {
+        while !s.pump(&IN, 0) {
             assert!(std::time::Instant::now() < deadline, "the lookup never landed");
             std::thread::yield_now();
         }
         assert_eq!(s.view().plex_match(&want.key()), Some(&PlexMatch::None));
-        assert!(s.run(LiveTvCmd::Match(other), 0), "the slot is free again");
+        assert!(s.run(LiveTvCmd::Match(other), &IN, 0), "the slot is free again");
     }
 
     #[test]
@@ -792,7 +892,7 @@ mod tests {
     #[test]
     fn an_unusable_typed_address_changes_nothing() {
         let mut s = LiveTvState::default();
-        assert!(!s.run(LiveTvCmd::Use { origin: "  ".into() }, 0));
+        assert!(!s.run(LiveTvCmd::Use { origin: "  ".into() }, &IN, 0));
         assert!(!s.view().configured());
     }
 }

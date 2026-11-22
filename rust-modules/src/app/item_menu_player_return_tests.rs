@@ -174,6 +174,7 @@ fn chain(host: AppArg, episode: bool, accept_request: bool, accept_start: bool) 
         let mut ptr = crate::app::input::Pointer::IDLE;
         let mut rec = crate::app::recorder::Recplay::Off;
         let mut boot_initial = None;
+        let mut livetv = crate::app::livetv::LiveTuner::default();
     now += 16;
     let tick = plx_ui::fixture::tick(now);
     let sender = plx_machine::machine::MachineId::Instance(d.nav.instance_of(menu).unwrap());
@@ -182,7 +183,7 @@ fn chain(host: AppArg, episode: bool, accept_request: bool, accept_start: bool) 
         player: &mut player, adapters: &mut adapters, menu_play_await: &mut menu_play_await,
         playback: &mut resources,
                 repause_at: &mut repause_at, refresh_hubs: &mut refresh_hubs, ptr: &mut ptr,
-                rec: &mut rec, boot_initial: &mut boot_initial,
+                rec: &mut rec, boot_initial: &mut boot_initial, livetv: &mut livetv,
     }, tick, bridge::script_key(Key::Ok, tick), &mut order);
     // absorb parks screen navigation directly, so effect taps observe App commands, not Dismiss.
     assert_eq!(order.0, ["item"], "one activation reaches the product runner exactly once");
@@ -221,7 +222,7 @@ fn chain(host: AppArg, episode: bool, accept_request: bool, accept_start: bool) 
         player: &mut player, adapters: &mut adapters, menu_play_await: &mut menu_play_await,
         playback: &mut resources,
                 repause_at: &mut repause_at, refresh_hubs: &mut refresh_hubs, ptr: &mut ptr,
-                rec: &mut rec, boot_initial: &mut boot_initial,
+                rec: &mut rec, boot_initial: &mut boot_initial, livetv: &mut livetv,
     }, plx_ui::fixture::tick(now), vec![], &mut plx_ui::dispatch::NoTap);
     assert_eq!(
         resources.calls, expected,

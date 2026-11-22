@@ -1,7 +1,8 @@
 //! **Not interested**: the suggestion ids each profile dismissed, kept on the television so a
 //! dismissed idea never comes back. A small JSON map of profile key → ids, written beside the
 //! session (`plx_base::paths::vchannel_dismissed_candidates`) through the storage worker and
-//! removed by Delete all data with the app's other files.
+//! removed by Delete all data with the app's other files. Read and written off the frame thread, as
+//! work `Channels` asks for.
 
 use std::collections::BTreeMap;
 
@@ -14,7 +15,7 @@ pub fn parse(raw: &str) -> Map {
     serde_json::from_str(raw).unwrap_or_default()
 }
 
-/// The stored map, from the first candidate that reads.
+/// The stored map, from the first candidate that reads. BLOCKS: a worker body.
 pub fn load() -> Map {
     plx_base::paths::vchannel_dismissed_candidates()
         .iter()
@@ -37,20 +38,16 @@ pub fn add(map: &mut Map, profile: &str, id: &str) -> bool {
     true
 }
 
-/// Write the map on the storage worker (tmp + rename on the first writable candidate).
+/// Write the map (tmp + rename on the first writable candidate). BLOCKS: a storage-worker body
+/// (`Channels` asks for it as work; it never runs on the frame thread).
 pub fn save(map: &Map) {
-    if crate::stores::tape::active() || cfg!(test) {
-        return;
-    }
     let body = serde_json::to_string(map).unwrap_or_default();
-    let _ = plx_base::storage_worker::submit_retained(move || {
-        for path in plx_base::paths::vchannel_dismissed_candidates() {
-            let tmp = path.with_extension("json.tmp");
-            if std::fs::write(&tmp, &body).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
-                return;
-            }
+    for path in plx_base::paths::vchannel_dismissed_candidates() {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &body).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+            return;
         }
-    });
+    }
 }
 
 #[cfg(test)]

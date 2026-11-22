@@ -3,10 +3,11 @@
 //! the writes in flight. Owned by the Live TV store beside the Tunarr guide (`crate::livetv`),
 //! which merges these channels into the lineup every Live TV surface reads.
 //!
-//! Workers are plain threads answering through channels, drained by [`Channels::pump`] on the
-//! frame thread — the Live TV store's own pattern — and, like it, none starts under an active tape.
-//! Everything is scoped to the server and profile it was read for ([`Scope`]); a profile switch
-//! drops it all.
+//! Its IO leaves as [`Work`](crate::livetv::work::Work) on its outbox — the Live TV store's own
+//! pattern (`crate::livetv::work`) — whose answers come back through channels drained by
+//! [`Channels::pump`] on the frame thread; under a controlled run none is asked for. Everything is
+//! scoped to the server and profile it was read for ([`Scope`], from the captured input); a profile
+//! switch drops it all.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -19,6 +20,8 @@ use super::remote::{self, ClientReads, Stored};
 use super::schedule::{Program, Schedule};
 use super::suggest::{self, Moment, Suggestion};
 use super::dismissed;
+use crate::livetv::work::{LiveTvInput, Outbox, Reach};
+use plx_plex::plex::ServerId;
 
 /// How long the channel list is trusted before entering Live TV or Home reads it again (another
 /// television may have added or deleted a channel).
@@ -43,8 +46,9 @@ pub struct Scope {
 }
 
 impl Scope {
-    pub fn current() -> Scope {
-        Scope { sid: plx_plex::plex::current_server().raw(), profile: plx_plex::plex::session::current_profile_key() }
+    /// The scope the app captured for this step.
+    pub fn of(input: &LiveTvInput) -> Scope {
+        Scope { sid: input.server.raw(), profile: input.profile.clone() }
     }
 }
 
@@ -129,6 +133,8 @@ enum Job {
     Write(Receiver<(WriteDone, Option<Stored>)>),
     Suggest(Receiver<Vec<Suggestion>>),
     Surprise(Receiver<Option<Suggestion>>),
+    /// The "not interested" map, read from the television's storage.
+    Dismissed(Receiver<dismissed::Map>),
 }
 
 /// The state. See the module doc.
@@ -150,7 +156,15 @@ pub struct Channels {
     suggested_at: Option<i64>,
     surprise: Option<Suggestion>,
     dismissed: Option<dismissed::Map>,
+    /// Dismissals made before the stored map was read; merged into it (and written) on landing.
+    dismissed_early: dismissed::Map,
+    /// A suggestion pass asked for before the dismissed map was read: run once it lands.
+    suggest_waiting: bool,
     revision: u64,
+    /// What the app captured for the step being run.
+    input: LiveTvInput,
+    /// The IO the steps asked for, until the app's runner takes it.
+    out: Outbox,
 }
 
 impl Channels {
@@ -164,6 +178,11 @@ impl Channels {
 
     pub fn by_number(&self, number: &str) -> Option<&VChannel> {
         self.channels.iter().find(|c| c.number() == number)
+    }
+
+    /// The server the channels were read from (raw id; 0 before any read).
+    pub fn server_raw(&self) -> u16 {
+        self.scope.as_ref().map_or(0, |s| s.sid)
     }
 
     pub fn list_state(&self) -> ListState {
@@ -196,10 +215,52 @@ impl Channels {
         self.channels.iter().map(|c| c.recipe.origin.clone()).filter(|o| !o.is_empty()).collect()
     }
 
-    fn dismissed_ids(&mut self) -> Vec<String> {
+    /// The ids the profile dismissed; `None` until the map has been read (the read is asked for).
+    fn dismissed_ids(&mut self) -> Option<Vec<String>> {
         let profile = self.scope.as_ref().map(|s| s.profile.clone()).unwrap_or_default();
-        let map = self.dismissed.get_or_insert_with(dismissed::load);
-        map.get(&profile).cloned().unwrap_or_default()
+        match self.dismissed.as_ref() {
+            Some(map) => Some(map.get(&profile).cloned().unwrap_or_default()),
+            None => {
+                self.read_dismissed();
+                None
+            }
+        }
+    }
+
+    fn read_dismissed(&mut self) {
+        if self.jobs.iter().any(|j| matches!(j, Job::Dismissed(_))) {
+            return;
+        }
+        if let Some(rx) = self.spawn("vchannel-dismissed", |_| dismissed::load()) {
+            self.jobs.push(Job::Dismissed(rx));
+        }
+    }
+
+    /// The stored map arrived: merge the dismissals made before it, and write them when there were.
+    fn land_dismissed(&mut self, mut stored: dismissed::Map) {
+        let early = std::mem::take(&mut self.dismissed_early);
+        let mut added = false;
+        for (profile, ids) in early {
+            for id in ids {
+                added |= dismissed::add(&mut stored, &profile, &id);
+            }
+        }
+        if added {
+            self.save_dismissed(stored.clone());
+        }
+        self.dismissed = Some(stored);
+    }
+
+    /// Take the input the app captured for this step.
+    pub fn capture(&mut self, input: &LiveTvInput) {
+        if self.input != *input {
+            self.input = input.clone();
+        }
+    }
+
+    /// The IO asked for since the last take (`crate::livetv::work`).
+    pub fn take_work(&mut self) -> Vec<crate::livetv::work::Work> {
+        self.out.take()
     }
 
     /// The writes that finished lately, oldest first, and how many have finished in all: a page
@@ -225,11 +286,13 @@ impl Channels {
 
     /// Drop everything when the server or profile changed. `true` when it did.
     fn rescope(&mut self) -> bool {
-        let now = Scope::current();
+        let now = Scope::of(&self.input);
         if self.scope.as_ref() == Some(&now) {
             return false;
         }
-        *self = Channels { scope: Some(now), revision: self.revision + 1, ..Default::default() };
+        let input = std::mem::take(&mut self.input);
+        let out = std::mem::take(&mut self.out);
+        *self = Channels { scope: Some(now), revision: self.revision + 1, input, out, ..Default::default() };
         true
     }
 
@@ -254,11 +317,22 @@ impl Channels {
             VCmd::Suggest => self.start_suggest(now_ms),
             VCmd::Dismiss { id } => {
                 let profile = self.scope.as_ref().map(|s| s.profile.clone()).unwrap_or_default();
-                let map = self.dismissed.get_or_insert_with(dismissed::load);
-                let added = dismissed::add(map, &profile, &id);
-                if added {
-                    dismissed::save(map);
-                }
+                // Before the stored map is read, the id waits beside it: the read's landing merges
+                // it in and writes the whole (writing now would replace what was stored).
+                let added = match self.dismissed.as_mut() {
+                    Some(map) => {
+                        let added = dismissed::add(map, &profile, &id);
+                        if added {
+                            let body = map.clone();
+                            self.save_dismissed(body);
+                        }
+                        added
+                    }
+                    None => {
+                        self.read_dismissed();
+                        dismissed::add(&mut self.dismissed_early, &profile, &id)
+                    }
+                };
                 let before = self.suggestions.len();
                 self.suggestions = Arc::new(self.suggestions.iter().filter(|s| s.id != id).cloned().collect());
                 if self.surprise.as_ref().is_some_and(|s| s.id == id) {
@@ -282,28 +356,38 @@ impl Channels {
         changed || rescoped
     }
 
-    fn client() -> Option<&'static plx_plex::plex::Client> {
-        plx_plex::plex::client_for(plx_plex::plex::current_server())
+    /// The server the channels are read from (the captured input's current one).
+    fn read_server(&self) -> ServerId {
+        self.input.server
     }
 
-    fn spawn<T: Send + 'static>(name: &'static str, work: impl FnOnce() -> T + Send + 'static) -> Option<Receiver<T>> {
-        if crate::stores::tape::active() {
+    /// Ask for `work` on a worker; its answer arrives on the returned channel. `None` under a
+    /// controlled run, which asks for nothing.
+    fn spawn<T: Send + 'static>(&mut self, name: &'static str, work: impl FnOnce(&dyn Reach) -> T + Send + 'static) -> Option<Receiver<T>> {
+        if self.input.controlled {
             return None;
         }
         let (tx, rx) = mpsc::channel();
-        let spawned = plx_base::task::spawn_small(name, move || {
-            let _ = tx.send(work());
-            plx_machine::present::wake_from_worker();
+        self.out.worker(name, move |reach| {
+            let _ = tx.send(work(reach));
         });
-        spawned.then_some(rx)
+        Some(rx)
+    }
+
+    /// Write the dismissed map on the storage worker.
+    fn save_dismissed(&mut self, map: dismissed::Map) {
+        if self.input.controlled {
+            return;
+        }
+        self.out.storage("vchannel-dismissed-save", move |_| dismissed::save(&map));
     }
 
     fn start_list(&mut self) -> bool {
         if self.jobs.iter().any(|j| matches!(j, Job::List(_))) {
             return false;
         }
-        let Some(c) = Self::client() else { return false };
-        let Some(rx) = Self::spawn("vchannel-list", move || remote::list(c)) else { return false };
+        let sid = self.read_server();
+        let Some(rx) = self.spawn("vchannel-list", move |reach| remote::list(reach.client(sid)?)) else { return false };
         self.jobs.push(Job::List(rx));
         if self.list != ListState::Ready {
             self.list = ListState::Reading;
@@ -315,19 +399,20 @@ impl Channels {
         if self.jobs.iter().any(|j| matches!(j, Job::Catalog(_))) {
             return false;
         }
-        let Some(c) = Self::client() else { return false };
-        let Some(rx) = Self::spawn("vchannel-catalog", move || Catalog::fetch(c)) else { return false };
+        let sid = self.read_server();
+        let Some(rx) = self.spawn("vchannel-catalog", move |reach| Catalog::fetch(reach.client(sid)?)) else { return false };
         self.jobs.push(Job::Catalog(rx));
         // Mark it asked now, so a failed read is retried on the stale clock, not every frame.
         self.catalog_at.get_or_insert(now_ms);
         true
     }
 
-    fn build_job(&self, recipe: Recipe) -> Option<Receiver<Option<Vec<Program>>>> {
-        let c = Self::client()?;
+    fn build_job(&mut self, recipe: Recipe) -> Option<Receiver<Option<Vec<Program>>>> {
+        let sid = self.read_server();
         let catalog = self.catalog.clone();
         let cache = Arc::clone(&self.episodes);
-        Self::spawn("vchannel-build", move || {
+        self.spawn("vchannel-build", move |reach| {
+            let c = reach.client(sid)?;
             let mut reads = ClientReads { client: c, catalog: catalog.as_deref(), cache: &cache };
             programmes(&recipe, catalog.as_deref(), &mut reads)
         })
@@ -367,8 +452,11 @@ impl Channels {
             return false;
         }
         let kept = self.kept_origins();
-        let dismissed = self.dismissed_ids();
-        let Some(rx) = Self::spawn("vchannel-suggest", move || {
+        let Some(dismissed) = self.dismissed_ids() else {
+            self.suggest_waiting = true;
+            return false;
+        };
+        let Some(rx) = self.spawn("vchannel-suggest", move |_| {
             suggest::suggest_excluding(&cat, &Moment::at(now_ms), &kept, &dismissed)
         }) else { return false };
         self.jobs.push(Job::Suggest(rx));
@@ -380,9 +468,10 @@ impl Channels {
         let Some(cat) = self.catalog.clone() else { return false };
         self.jobs.retain(|j| !matches!(j, Job::Surprise(_)));
         let kept = self.kept_origins();
-        let mut exclude = self.dismissed_ids();
+        // A surprise before the dismissed map is read excludes only the last draw.
+        let mut exclude = self.dismissed_ids().unwrap_or_default();
         exclude.extend(self.surprise.iter().map(|s| s.id.clone()));
-        let Some(rx) = Self::spawn("vchannel-surprise", move || {
+        let Some(rx) = self.spawn("vchannel-surprise", move |_| {
             suggest::surprise(&cat, &Moment::at(now_ms), &kept, &exclude, seed)
         }) else { return false };
         self.jobs.push(Job::Surprise(rx));
@@ -409,10 +498,7 @@ impl Channels {
     }
 
     fn start_keep(&mut self, token: u64, mut recipe: Recipe) -> bool {
-        let Some(c) = Self::client() else {
-            self.done.push(WriteDone::Failed { token });
-            return true;
-        };
+        let sid = self.read_server();
         recipe.number = next_number(self.channels.iter().map(|ch| ch.recipe.number));
         // The programmes the preview built ride along as the playlist's first items, and seed the
         // new channel's timeline so it airs at once.
@@ -434,7 +520,8 @@ impl Channels {
         let cache = Arc::clone(&self.episodes);
         let preview_built = !programmes.is_empty();
         let held = Arc::clone(&self.episodes);
-        let Some(rx) = Self::spawn("vchannel-keep", move || {
+        let Some(rx) = self.spawn("vchannel-keep", move |reach| {
+            let Some(c) = reach.client(sid) else { return (WriteDone::Failed { token }, None) };
             // Kept straight from a suggestion's tile, with no preview: build it here first, so
             // the playlist has items and the channel airs the moment it lands.
             let order = if order.is_empty() {
@@ -475,7 +562,7 @@ impl Channels {
     }
 
     fn start_update(&mut self, playlist: String, recipe: Recipe, rebuild: bool) -> bool {
-        let Some(c) = Self::client() else { return false };
+        let sid = self.read_server();
         // The change shows at once; the write follows.
         let mut programmes: Option<Vec<Program>> = None;
         if let Some(ch) = self.channels.iter_mut().find(|ch| ch.playlist == playlist) {
@@ -490,8 +577,8 @@ impl Channels {
             ch.recipe = recipe.clone();
         }
         let p = playlist.clone();
-        if let Some(rx) = Self::spawn("vchannel-update", move || {
-            let ok = remote::update(c, &p, &recipe, programmes.as_deref());
+        if let Some(rx) = self.spawn("vchannel-update", move |reach| {
+            let ok = reach.client(sid).is_some_and(|c| remote::update(c, &p, &recipe, programmes.as_deref()));
             (if ok { WriteDone::Updated { playlist: p } } else { WriteDone::Failed { token: 0 } }, None)
         }) {
             self.jobs.push(Job::Write(rx));
@@ -500,12 +587,12 @@ impl Channels {
     }
 
     fn start_delete(&mut self, playlist: String) -> bool {
-        let Some(c) = Self::client() else { return false };
+        let sid = self.read_server();
         let before = self.channels.len();
         self.channels.retain(|ch| ch.playlist != playlist);
         let p = playlist.clone();
-        if let Some(rx) = Self::spawn("vchannel-delete", move || {
-            let ok = remote::delete(c, &p);
+        if let Some(rx) = self.spawn("vchannel-delete", move |reach| {
+            let ok = reach.client(sid).is_some_and(|c| remote::delete(c, &p));
             (if ok { WriteDone::Deleted { playlist: p } } else { WriteDone::Failed { token: 0 } }, None)
         }) {
             self.jobs.push(Job::Write(rx));
@@ -604,6 +691,17 @@ impl Channels {
                     Err(TryRecvError::Disconnected) => changed = true,
                     Err(TryRecvError::Empty) => self.jobs.push(Job::Surprise(rx)),
                 },
+                Job::Dismissed(rx) => match rx.try_recv() {
+                    Ok(stored) => {
+                        self.land_dismissed(stored);
+                        changed = true;
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        self.land_dismissed(dismissed::Map::new());
+                        changed = true;
+                    }
+                    Err(TryRecvError::Empty) => self.jobs.push(Job::Dismissed(rx)),
+                },
                 Job::Write(rx) => match rx.try_recv() {
                     Ok((done, stored)) => {
                         if let (WriteDone::Kept { token, .. }, Some(stored)) = (&done, stored) {
@@ -631,7 +729,8 @@ impl Channels {
                 },
             }
         }
-        if landed_catalog {
+        if landed_catalog || (self.suggest_waiting && self.dismissed.is_some()) {
+            self.suggest_waiting = false;
             changed |= self.start_suggest(now_ms);
         }
         if landed_catalog || changed {
@@ -679,7 +778,7 @@ impl Channels {
     /// Install channels directly (tests and the simulator's fixtures).
     #[cfg(any(test, feature = "test-support"))]
     pub fn install_for_test(&mut self, channels: Vec<VChannel>) {
-        self.scope = Some(Scope::current());
+        self.scope = Some(Scope::of(&self.input));
         self.channels = channels;
         self.list = ListState::Ready;
         self.revision += 1;
@@ -688,7 +787,7 @@ impl Channels {
     /// Install a catalog directly (tests and the simulator's fixtures).
     #[cfg(any(test, feature = "test-support"))]
     pub fn install_catalog_for_test(&mut self, catalog: Catalog) {
-        self.scope = Some(Scope::current());
+        self.scope = Some(Scope::of(&self.input));
         self.catalog = Some(Arc::new(catalog));
         self.revision += 1;
     }
@@ -702,7 +801,7 @@ impl Channels {
     /// Install a row of suggestions directly (tests and the simulator's fixtures).
     #[cfg(any(test, feature = "test-support"))]
     pub fn install_suggestions_for_test(&mut self, suggestions: Vec<Suggestion>) {
-        self.scope = Some(Scope::current());
+        self.scope = Some(Scope::of(&self.input));
         self.suggestions = Arc::new(suggestions);
         self.revision += 1;
     }

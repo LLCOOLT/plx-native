@@ -1538,7 +1538,7 @@ pub trait SearchLike: AppLike<Memory = PageMemory> + ScreenInputsLike + Sized {
 
 /// A host that publishes the Live TV store's view (the configured Tunarr server's lineup and
 /// guide) for this frame.
-pub trait LiveTvLike: AppLike<Memory = PageMemory> + Sized {
+pub trait LiveTvLike: AppLike<Memory = PageMemory> + ScreenInputsLike + Sized {
     fn livetv<'a>(cx: &Cx<'a, Self>) -> plx_data::livetv::LiveTvView<'a>;
 }
 

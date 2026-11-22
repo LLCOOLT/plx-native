@@ -682,7 +682,7 @@ impl<H: ContentLike + CollectionLike> StackPage<H> for Page {
         let Some(collection) = self.collection(cx) else { return false };
         self.item_index(collection, *elem)
             .and_then(|index| collection.item(index))
-            .is_some_and(crate::registry::item_has_menu)
+            .is_some_and(|m| crate::registry::item_has_menu(m, H::screen_inputs(cx).current_server))
     }
 
     fn focus_rect(&self, cx: &Cx<'_, H>, k: Sec, section: Rect) -> Rect {

@@ -1,9 +1,12 @@
 //! Physically owned Live TV model (`crate::livetv`) and its machine.
 //!
-//! The state's workers are plain threads answering through a channel, not `tape`-admitted content
-//! resources: nothing a recording replays reaches Live TV, and under an active tape the state
-//! refuses to start a worker at all (`LiveTvState::start_load`), so a replay stays deterministic.
+//! The state's IO leaves as work on its outbox (`crate::livetv::work`), taken by the app's runner
+//! after each step; the answers are plain channels, not `tape`-admitted content resources: nothing
+//! a recording replays reaches Live TV, and under a controlled input (an active tape) the state
+//! asks for no work at all, so a replay stays deterministic. The step reads neither the clock nor
+//! the session: both arrive as arguments.
 
+use crate::livetv::work::{LiveTvInput, Work};
 use crate::livetv::{LiveTvCmd, LiveTvState, LiveTvView};
 use plx_machine::machine::{Cx, Effects, Handled, Host, Machine};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -31,24 +34,29 @@ impl LiveTvStore {
     pub fn view(&self) -> LiveTvView<'_> {
         self.state.view()
     }
-    pub fn run(&mut self, cmd: LiveTvCmd) -> bool {
-        let changed = self.state.run(cmd, plx_base::wallclock::now_ms());
+    pub fn run(&mut self, cmd: LiveTvCmd, input: &LiveTvInput, now_ms: i64) -> bool {
+        let changed = self.state.run(cmd, input, now_ms);
         if changed {
             self.bump();
         }
         changed
     }
-    pub fn pump(&mut self) -> bool {
-        let changed = self.state.pump(plx_base::wallclock::now_ms());
+    pub fn pump(&mut self, input: &LiveTvInput, now_ms: i64) -> bool {
+        let changed = self.state.pump(input, now_ms);
         if changed {
             self.bump();
         }
         changed
     }
 
+    /// The IO the last steps asked for, for the app's runner (`crate::livetv::work`).
+    pub fn take_work(&mut self) -> Vec<Work> {
+        self.state.take_work()
+    }
+
     #[cfg(any(test, feature = "test-support"))]
-    pub fn install_for_test(&mut self, origin: &str, lineup: crate::livetv::guide::Lineup) {
-        self.state.install_for_test(origin, lineup, plx_base::wallclock::now_ms());
+    pub fn install_for_test(&mut self, origin: &str, lineup: crate::livetv::guide::Lineup, now_ms: i64) {
+        self.state.install_for_test(origin, lineup, now_ms);
         self.bump();
     }
 }
@@ -56,14 +64,12 @@ impl LiveTvStore {
 impl<H: Host> Machine<H> for LiveTvStore {
     type Ev = StoreEv<LiveTvCmd>;
     fn step(&mut self, ev: &Self::Ev, _cx: &Cx<'_, H>, _fx: &mut Effects<'_, H>) -> Handled {
-        match ev {
-            StoreEv::Cmd(cmd) => {
-                self.run(cmd.clone());
-            }
-            StoreEv::Pump { .. } => {
-                self.pump();
-            }
-        }
+        // Unreached: nothing steps this store as a Machine (`Bridge::livetv_run` and
+        // `Bridge::livetv_pump` call `run`/`pump` with the input and clock they captured, then
+        // start the work). A step reads no registry and no clock, and this one is handed neither.
+        let _ = ev;
+        debug_assert!(false, "a Live TV step was handed no input");
+        plx_base::eventlog::log("livetv: a step reached the store with no input - dropped");
         Handled::Yes
     }
 }

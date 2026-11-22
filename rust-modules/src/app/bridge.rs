@@ -704,9 +704,6 @@ pub(crate) struct BridgeRetained {
     livetv_studio: Option<String>,
     /// The channel studio is owed, making a channel from this recipe ("Make a Channel").
     livetv_make: Option<(plx_data::vchannel::recipe::Recipe, String)>,
-    /// What the Live TV page asked of the loop (`ExternalAppFx::LiveTv`), performed by
-    /// `livetv::requests` with the tuner and the player the command runner cannot reach.
-    livetv_reqs: Vec<(MachineId, plx_screens::registry::LiveTvReq, ReturnState<u32, PageMemory>)>,
     library_commands: std::collections::VecDeque<plx_screens::registry::LibraryCmd>,
     library_pages: Option<(u32, LibraryViews)>,
     library_page_visit: Option<LibraryPageVisit>,
@@ -1041,7 +1038,6 @@ impl BridgeRetained {
             livetv_setup: false,
             livetv_studio: None,
             livetv_make: None,
-            livetv_reqs: Vec::new(),
             library_commands: std::collections::VecDeque::new(),
             library_pages: None,
             library_page_visit: None,
@@ -1168,22 +1164,27 @@ impl Bridge<'_> {
     }
 
 
-    /// Hand a Live TV request to the loop (`livetv::requests` performs it this frame).
-    pub(crate) fn queue_livetv(&mut self, from: MachineId, request: plx_screens::registry::LiveTvReq,
-        ret: ReturnState<u32, PageMemory>) {
-        self.retained.livetv_reqs.push((from, request, ret));
+
+    /// The Live TV store's view (the tuner's read of the lineup and the Plex matches).
+    pub(crate) fn livetv_view(&self) -> plx_data::livetv::LiveTvView<'_> {
+        self.stores.livetv_view()
     }
 
-    pub(crate) fn take_livetv_reqs(&mut self) -> Vec<(MachineId, plx_screens::registry::LiveTvReq, ReturnState<u32, PageMemory>)> {
-        std::mem::take(&mut self.retained.livetv_reqs)
-    }
-
+    /// Step the Live TV store with the input and clock captured here, then start the work it asked
+    /// for (`adapters::livetv_work`), in one call.
     pub(crate) fn livetv_run(&mut self, cmd: plx_data::livetv::LiveTvCmd) -> bool {
-        self.stores.livetv_run(cmd)
+        let input = crate::app::adapters::livetv_work::input();
+        let changed = self.stores.livetv_run(cmd, &input, plx_base::wallclock::now_ms());
+        crate::app::adapters::livetv_work::launch(self.stores.livetv_take_work());
+        changed
     }
 
+    /// Drain the Live TV store's answers, then start what the landings asked for.
     pub(crate) fn livetv_pump(&mut self) -> bool {
-        self.stores.livetv_pump()
+        let input = crate::app::adapters::livetv_work::input();
+        let changed = self.stores.livetv_pump(&input, plx_base::wallclock::now_ms());
+        crate::app::adapters::livetv_work::launch(self.stores.livetv_take_work());
+        changed
     }
 
     pub(crate) fn search_selection(&self, d: &Dispatcher<AppHost>, entry: EntryId, focus: Option<FocusKey<u32>>)
@@ -1992,7 +1993,7 @@ impl Bridge<'_> {
         // requests, which carry the `from_deck` / `from_home` bits this arm would drop.
         if !matches!(e.arg, AppArg::Content(_)) { return None; }
         let card = real.focused_card(&cx, ret.focus, Some(At::Drawn))?;
-        let item = card.item.downcast_ref::<plx_data::pms::PmsMovie>().filter(|m| plx_screens::item_menu::has_actions(m))?;
+        let item = card.item.downcast_ref::<plx_data::pms::PmsMovie>().filter(|m| plx_screens::item_menu::has_actions(m, plx_plex::plex::current_server()))?;
         let mut arg = card_menu_arg(item, false, false, entry, ret.focus, card.rect);
         arg.watchlist = self.watchlist_card_face(item);
         Some(arg)
@@ -3109,7 +3110,7 @@ impl Bridge<'_> {
                 return Handled::Yes;
             }
             AppMsg::Store(StoreCmd::LiveTv(command)) => {
-                self.stores.livetv_run(command.clone());
+                self.livetv_run(command.clone());
                 return Handled::Yes;
             }
             AppMsg::Store(StoreCmd::ViewState(command)) => {
@@ -3289,11 +3290,12 @@ impl Bridge<'_> {
                 super::content::execute_resource_command(d, self, resources, command.from,
                     plx_screens::registry::ResourceAppFx::ItemMenu(request), command.return_state, now)
             }
-            // Live TV's requests need the tuner and the whole player, which only the loop holds:
-            // handed to it here and performed this same frame by `livetv::requests`.
+            // Live TV's requests need the tuner, the player and the pages: the resources carry them.
             Ok(ExternalAppFx::LiveTv(request)) => {
-                self.retained.livetv_reqs.push((command.from, request, command.return_state));
-                AppCommandOutcome::Completed
+                let Some(resources) = resources else { return Some((command.id, AppCommandOutcome::Refused, emitted)) };
+                let mut tune = super::livetv::Tune { pages: d, bridge: self, player: resources.player,
+                    adapters: resources.adapters, tuner: resources.livetv };
+                super::livetv::execute_livetv_command(&mut tune, command.from, request, command.return_state, now)
             }
 
         };
@@ -3804,7 +3806,7 @@ pub(crate) fn app_frame_with_tap(app: &mut super::App, tick: Tick, inputs: Vec<I
         player: &mut app.player, adapters: &mut app.adapters, menu_play_await: &mut app.menu_play_await,
         playback: &mut super::playback::LivePlaybackResources,
                 repause_at: &mut app.repause_at, refresh_hubs: &mut app.refresh_hubs, ptr: &mut app.ptr,
-                rec: &mut app.rec, boot_initial: &mut app.boot_initial,
+                rec: &mut app.rec, boot_initial: &mut app.boot_initial, livetv: &mut app.livetv,
     }, tick, inputs, tap)
 }
 

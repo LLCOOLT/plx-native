@@ -918,7 +918,7 @@ impl LibraryScreen {
         }
         let Some(key) = cx.focus.current.filter(|key| key.entry == self.entry) else { return none };
         if self.plaintext_alert.is_open()
-            || self.focused_item(Some(key), cx).is_none_or(|item| !crate::registry::item_has_menu(item))
+            || self.focused_item(Some(key), cx).is_none_or(|item| !crate::registry::item_has_menu(item, H::screen_inputs(cx).current_server))
         {
             return none;
         }

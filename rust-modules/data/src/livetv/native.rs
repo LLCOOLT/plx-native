@@ -284,7 +284,7 @@ fn get_json(origin: &Origin, path: &str) -> Result<Vec<u8>, i32> {
 /// **What to play for the Tunarr channel streamed at `stream_url`, now.** BLOCKS. `learned` maps
 /// Tunarr media-source ids to the server they turned out to be (the caller keeps it between tunes);
 /// a newly learned pair is returned beside the plan.
-pub fn resolve(stream_url: &str, learned: &HashMap<String, ServerId>) -> (Plan, Option<(String, ServerId)>) {
+pub fn resolve(reach: &dyn super::work::Reach, stream_url: &str, learned: &HashMap<String, ServerId>) -> (Plan, Option<(String, ServerId)>) {
     let Some((origin_s, channel)) = channel_of(stream_url) else { return (Plan::Stream(Why::NotPlex), None) };
     let Some(origin) = Origin::parse(&origin_s) else { return (Plan::Stream(Why::Failed), None) };
     let sent = plx_base::wallclock::now_ms();
@@ -312,16 +312,16 @@ pub fn resolve(stream_url: &str, learned: &HashMap<String, ServerId>) -> (Plan, 
             None => return (Plan::Stream(Why::NotPlex), None),
         },
     };
-    let all: Vec<ServerId> = plx_plex::plex::server_ids().collect();
-    let candidates = match named_server.as_deref().and_then(plx_plex::plex::id_of_machine) {
+    let all: Vec<ServerId> = reach.servers();
+    let candidates = match named_server.as_deref().and_then(|m| reach.machine(m)) {
         Some(sid) => vec![sid],
         // Tunarr named a server the app is not signed into: no other server's item is this one.
         None if named_server.is_some() => return (Plan::Stream(Why::NotPlex), None),
-        None => candidate_servers(learned.get(&media_source).copied(), plx_plex::plex::current_server(), &all),
+        None => candidate_servers(learned.get(&media_source).copied(), reach.current(), &all),
     };
     let named = named_server.is_some();
     for sid in candidates {
-        let Some(meta) = plx_plex::plex::client_for(sid).and_then(|c| c.metadata(&rk)) else { continue };
+        let Some(meta) = reach.client(sid).and_then(|c| c.metadata(&rk)) else { continue };
         // A server Tunarr named is trusted; one we guessed must carry the programme's title.
         if !named && !titles_match(&title, episode_title.as_deref(), &meta.title, &meta.grandparent_title) {
             continue;

@@ -30,6 +30,8 @@ pub(crate) struct CommandResources<'a> {
     pub(crate) ptr: &'a mut super::input::Pointer,
     pub(crate) rec: &'a mut super::recorder::Recplay,
     pub(crate) boot_initial: &'a mut Option<super::bootstrap::Initial>,
+    /// The Live TV tuner (`livetv::execute_livetv_command`).
+    pub(crate) livetv: &'a mut super::livetv::LiveTuner,
 }
 
 struct ScreenCommandApp<'a, 'owners> {
@@ -38,6 +40,7 @@ struct ScreenCommandApp<'a, 'owners> {
     player: &'a mut plx_media::player::machine::Player,
     adapters: &'a mut Adapters,
     menu_play_await: &'a mut Option<super::input::MenuPlayAwait>,
+    livetv: &'a mut super::livetv::LiveTuner,
 }
 
 impl ScreenCommandApp<'_, '_> {
@@ -95,7 +98,7 @@ pub(crate) fn execute_resource_command(
     use plx_machine::machine::AppCommandOutcome;
     use plx_screens::registry::ResourceAppFx;
     let mut app = ScreenCommandApp { pages, bridge, player: resources.player,
-        adapters: resources.adapters, menu_play_await: resources.menu_play_await };
+        adapters: resources.adapters, menu_play_await: resources.menu_play_await, livetv: resources.livetv };
     match effect {
         ResourceAppFx::Library(request) => library_command(&mut app, source, request, ret, now),
         ResourceAppFx::Home(request) => home_command(&mut app, source, request, ret, now),
@@ -840,10 +843,13 @@ fn home_command(app: &mut ScreenCommandApp<'_, '_>, source: MachineId, request: 
             return activate_home_item(app, source, entry, sid, &rk, Some(resume_ns), ret, now),
         HomeReq::Detail { sid, rk } =>
             return activate_home_item(app, source, entry, sid, &rk, None, ret, now),
-        // An On Now card: tune its channel by guide number, performed by the loop, which holds the
-        // tuner (`livetv::requests`).
-        HomeReq::Tune { number } => app.bridge.queue_livetv(source,
-            plx_screens::registry::LiveTvReq::Number(number), ret),
+        // An On Now card: tune its channel by guide number.
+        HomeReq::Tune { number } => {
+            let mut tune = super::livetv::Tune { pages: &mut *app.pages, bridge: &mut *app.bridge,
+                player: &mut *app.player, adapters: &mut *app.adapters, tuner: &mut *app.livetv };
+            return super::livetv::execute_livetv_command(&mut tune, source,
+                plx_screens::registry::LiveTvReq::Number(number), ret, now);
+        }
         // A Suggested Channels card: the Live TV page's channel studio, on that card.
         HomeReq::Studio { id } => {
             bridge::nav_select_tab(app.pages, AppArg::LiveTv);
@@ -852,7 +858,7 @@ fn home_command(app: &mut ScreenCommandApp<'_, '_>, source: MachineId, request: 
         HomeReq::ItemMenu { sid, rk } => {
             let snapshot = app.bridge.hubs_snapshot();
             let Some(item) = home_item(snapshot.view(), sid, &rk)
-                .filter(|item| plx_screens::item_menu::has_actions(item)) else { return AppCommandOutcome::Refused };
+                .filter(|item| plx_screens::item_menu::has_actions(item, plx_plex::plex::current_server())) else { return AppCommandOutcome::Refused };
             let from_deck = home_menu_from_deck(&ret);
             let opener = app.bridge.home_opener(app.pages, entry, ret.focus);
             let mut arg = bridge::card_menu_arg(item, from_deck, true, entry, ret.focus, opener.rect);
@@ -922,7 +928,7 @@ pub(crate) fn execute_search_command(
         SearchReq::ItemMenu { sid, rk } => {
             let Some((plx_data::search::Item::Media(item), opener)) = rig.search_selection(pages, entry, ret.focus)
                 else { return AppCommandOutcome::Refused };
-            if item.sid != *sid || item.rk != *rk || !plx_screens::item_menu::has_actions(&item) {
+            if item.sid != *sid || item.rk != *rk || !plx_screens::item_menu::has_actions(&item, plx_plex::plex::current_server()) {
                 return AppCommandOutcome::Refused;
             }
             let mut arg = bridge::card_menu_arg(&item, false, false, entry, ret.focus, opener.rect);
@@ -1139,7 +1145,7 @@ pub(crate) unsafe fn library_page_request(
         }
         LibraryReq::ItemMenu { sid, rk, from_deck } => {
             let Some((item, opener)) = bridge.library_selection(pages, entry, ret.focus) else { return };
-            if item.sid != sid || item.rk != rk || !plx_screens::item_menu::has_actions(&item) { return; }
+            if item.sid != sid || item.rk != rk || !plx_screens::item_menu::has_actions(&item, plx_plex::plex::current_server()) { return; }
             let mut arg = bridge::card_menu_arg(&item, from_deck, false, entry, ret.focus, opener.rect);
             bridge.watchlist_open_if_idle();
             arg.watchlist = bridge.watchlist_card_face(&item);

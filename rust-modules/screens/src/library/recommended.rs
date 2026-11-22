@@ -814,7 +814,7 @@ impl RecommendedScreen {
         let none = plx_ui::hold_hint::HintInput::default();
         if !self.hold_hint.wants_input(cx.press.held_ms.is_some(), cx.hold_hint) { return none; }
         let Some(key) = cx.focus.current.filter(|key| key.entry == self.entry) else { return none };
-        if self.focused_item(Some(key), cx).is_none_or(|item| !crate::registry::item_has_menu(item)) { return none; }
+        if self.focused_item(Some(key), cx).is_none_or(|item| !crate::registry::item_has_menu(item, H::screen_inputs(cx).current_server)) { return none; }
         let Some(drawn) = <Self as Focusable<H>>::place(self, &key.elem, cx, At::Drawn) else { return none };
         let still = (self.scroll.pos - self.scroll_target).abs() < 0.5 && self.scroll.vel.abs() < 0.5;
         plx_ui::hold_hint::HintInput::for_placed(key.elem, drawn, still, cx.press.held_ms)

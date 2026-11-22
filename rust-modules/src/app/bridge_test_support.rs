@@ -93,6 +93,7 @@ pub(super) struct TestCommandResources {
         ptr: crate::app::input::Pointer,
         rec: crate::app::recorder::Recplay,
         boot_initial: Option<crate::app::bootstrap::Initial>,
+        livetv: crate::app::livetv::LiveTuner,
 }
 
 impl TestCommandResources {
@@ -103,13 +104,14 @@ impl TestCommandResources {
             player: plx_media::player::adapter::PlayerAdapter::new(mt),
         }, menu_play_await: None, playback: crate::app::playback::LivePlaybackResources,
                     repause_at: 0, refresh_hubs: false, ptr: crate::app::input::Pointer::IDLE,
-                    rec: crate::app::recorder::Recplay::Off, boot_initial: None }
+                    rec: crate::app::recorder::Recplay::Off, boot_initial: None,
+                    livetv: Default::default() }
     }
     pub(super) fn borrow(&mut self) -> crate::app::content::CommandResources<'_> {
         crate::app::content::CommandResources { player: &mut self.player,
             adapters: &mut self.adapters, menu_play_await: &mut self.menu_play_await, playback: &mut self.playback,
                         repause_at: &mut self.repause_at, refresh_hubs: &mut self.refresh_hubs, ptr: &mut self.ptr,
-                        rec: &mut self.rec, boot_initial: &mut self.boot_initial }
+                        rec: &mut self.rec, boot_initial: &mut self.boot_initial, livetv: &mut self.livetv }
     }
 }
 

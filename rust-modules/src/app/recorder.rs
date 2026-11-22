@@ -2859,7 +2859,12 @@ mod tests {
         // `ProductResolutionV2` (the by-id `Id` resolution row, a11y-ids D6) moves the full census
         // from 0xea74_3865_5115_46c5, which `the_pre_content_navigation_recording_shape_is_refused`
         // keeps refused at the shape boundary like every older value.
-        assert_eq!(state_fp(), 0x7f1d_280c_909c_8603, "current V13 producer census");
+        // The fork's Live TV moves it from 0x7f1d_280c_909c_8603: `LiveTvScreen` joins the screen
+        // inventory, `ARG_SHAPE` gains `AppArg::LiveTv`, and the player's shape gains its live
+        // fields. A schema transition, not a rebaseline: recordings taken against the old value
+        // are refused at the shape boundary and must be re-recorded in the simulator.
+        assert_eq!(state_fp(), 0x3b48_e987_8d58_4002, "current V13 producer census");
+        assert_ne!(state_fp(), 0x7f1d_280c_909c_8603, "the census without Live TV");
         assert_ne!(state_fp(), 0xea74_3865_5115_46c5, "the census without the `Id` resolution row");
         assert_ne!(state_fp(), 0x3ed9_2e0f_25bd_7f8e, "V12 cannot describe captured positive-swap presentation inputs");
     }

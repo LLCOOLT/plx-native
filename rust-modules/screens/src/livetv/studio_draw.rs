@@ -132,8 +132,9 @@ fn act_row(st: &Studio, card: &Card<'_>, yours: bool, measure: &dyn plx_machine:
 
 
 /// The picture a card stands for: what is on it right now, else the suggestion's backdrop, else
-/// the channel playlist's composite.
-pub fn card_art<'a>(card: &Card<'a>, schedule: Option<&'a Schedule>, now: i64) -> Option<(u16, &'a str)> {
+/// the channel playlist's composite (on `channels_server`, the server the channel list was read
+/// from: `Channels::server_raw`).
+pub fn card_art<'a>(card: &Card<'a>, schedule: Option<&'a Schedule>, now: i64, channels_server: u16) -> Option<(u16, &'a str)> {
     if let Some(p) = schedule.and_then(|s| s.at(now).map(|slot| &s.programs()[slot.program])) {
         let path = if p.art.is_empty() { p.thumb.as_str() } else { p.art.as_str() };
         if !path.is_empty() {
@@ -141,7 +142,7 @@ pub fn card_art<'a>(card: &Card<'a>, schedule: Option<&'a Schedule>, now: i64) -
         }
     }
     match card {
-        Card::Channel(c) if !c.composite.is_empty() => Some((plx_plex::plex::current_server().raw(), c.composite.as_str())),
+        Card::Channel(c) if !c.composite.is_empty() => Some((channels_server, c.composite.as_str())),
         _ => card.suggestion().and_then(|s| s.art.as_ref()).map(|(sid, p)| (*sid, p.as_str())),
     }
 }
@@ -175,7 +176,7 @@ impl LiveTvScreen {
         let card = card.unwrap_or(Card::Surprise(None));
         let schedule = st.schedule(&card, view);
         // The billboard's picture, full bleed, darkened where the copy and the rows stand.
-        let (t, tw, th) = texture(p, card_art(&card, schedule, now), ART_REQ.0, ART_REQ.1);
+        let (t, tw, th) = texture(p, card_art(&card, schedule, now, view.virtuals().server_raw()), ART_REQ.0, ART_REQ.1);
         if t != 0 && th > 0.0 {
             p.tex_uv(t, Rect::FULL.cover_uv(tw, th, Crop::Centre), Rect::FULL, 0.0, [1.0, 1.0, 1.0, ART_A]);
         }
@@ -312,7 +313,7 @@ impl LiveTvScreen {
     #[allow(clippy::too_many_arguments)]
     fn draw_card(&self, p: Painter, view: LiveTvView<'_>, card: &Card<'_>, r: Rect, on: bool, sel: bool, now: i64, measure: &dyn plx_machine::machine::Measure) {
         let schedule = self.studio.schedule(card, view);
-        let (t, tw, th) = texture(p, card_art(card, schedule, now), CARD_W as i32 * 2, CARD_H as i32 * 2);
+        let (t, tw, th) = texture(p, card_art(card, schedule, now, view.virtuals().server_raw()), CARD_W as i32 * 2, CARD_H as i32 * 2);
         let f = if on { 1.0 } else { 0.0 };
         if t != 0 && th > 0.0 {
             p.tex_carded(t, r.cover_uv(tw, th, Crop::Centre), r, CARD_RAD, theme::TINT_WHITE, f);

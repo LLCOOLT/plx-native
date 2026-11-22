@@ -639,11 +639,9 @@ impl Records {
         serde_json::from_str(raw).unwrap_or_default()
     }
 
-    /// The stored record, from the first candidate that reads.
+    /// The stored record, from the first candidate that reads. BLOCKS: a worker body (the
+    /// [`Keeper`] asks for it as work).
     pub fn load() -> Records {
-        if cfg!(test) {
-            return Records::default();
-        }
         plx_base::paths::tunarr_kept_candidates()
             .iter()
             .find_map(|p| std::fs::read_to_string(p).ok())
@@ -651,20 +649,15 @@ impl Records {
             .unwrap_or_default()
     }
 
-    /// Write the record on the storage worker (tmp + rename on the first writable candidate).
-    pub fn save(&self) {
-        if crate::stores::tape::active() || cfg!(test) {
-            return;
-        }
-        let body = serde_json::to_string(self).unwrap_or_default();
-        let _ = plx_base::storage_worker::submit_retained(move || {
-            for path in plx_base::paths::tunarr_kept_candidates() {
-                let tmp = path.with_extension("json.tmp");
-                if std::fs::write(&tmp, &body).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
-                    return;
-                }
+    /// Write the record (tmp + rename on the first writable candidate). BLOCKS: a storage-worker
+    /// body.
+    pub fn write(body: &str) {
+        for path in plx_base::paths::tunarr_kept_candidates() {
+            let tmp = path.with_extension("json.tmp");
+            if std::fs::write(&tmp, body).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+                return;
             }
-        });
+        }
     }
 
     /// The channels kept in the Tunarr server `origin`, by number.
@@ -700,21 +693,60 @@ pub enum TunarrDone {
 /// How many outcomes [`Keeper::done`] holds.
 pub const DONE_KEPT: usize = 8;
 
-type Job = std::sync::mpsc::Receiver<(TunarrDone, Option<Kept>, Option<String>)>;
+type Landing = (TunarrDone, Option<Kept>, Option<String>);
+type Job = std::sync::mpsc::Receiver<Landing>;
 
 /// The channels this television kept in Tunarr, and the writes in flight. Owned by the Live TV
-/// store; workers answer through channels drained by [`Keeper::pump`] on the frame thread.
+/// store; its IO leaves as work on its outbox (`crate::livetv::work`), and the answers come back
+/// through channels drained by [`Keeper::pump`] on the frame thread.
 #[derive(Default)]
 pub struct Keeper {
+    /// The stored record; `None` until its read lands.
     records: Option<Records>,
+    /// The record's read, in flight.
+    reading: Option<std::sync::mpsc::Receiver<Records>>,
     jobs: Vec<Job>,
+    /// Writes that finished before the record was read: they land with it.
+    early: Vec<Landing>,
     done: Vec<TunarrDone>,
     done_seq: u64,
+    input: super::work::LiveTvInput,
+    out: super::work::Outbox,
 }
 
 impl Keeper {
-    fn records(&mut self) -> &mut Records {
-        self.records.get_or_insert_with(Records::load)
+    /// Ask for the stored record, unless it is read or being read.
+    fn read_records(&mut self) {
+        if self.records.is_some() || self.reading.is_some() || self.input.controlled {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.out.worker("tunarr-kept-read", move |_| {
+            let _ = tx.send(Records::load());
+        });
+        self.reading = Some(rx);
+    }
+
+    /// Write the record on the storage worker.
+    fn save_records(&mut self) {
+        let Some(r) = self.records.as_ref() else { return };
+        if self.input.controlled {
+            return;
+        }
+        let body = serde_json::to_string(r).unwrap_or_default();
+        self.out.storage("tunarr-kept-save", move |_| Records::write(&body));
+    }
+
+    /// Take the input the app captured for this step.
+    pub fn capture(&mut self, input: &super::work::LiveTvInput) {
+        if self.input != *input {
+            self.input = input.clone();
+        }
+    }
+
+    /// The IO asked for since the last take.
+    pub fn take_work(&mut self) -> Vec<super::work::Work> {
+        self.out.take()
     }
 
     /// The channels kept in `origin`, by number (empty until the record is first read).
@@ -726,15 +758,16 @@ impl Keeper {
         self.records.as_ref()?.kept.get(channel_id)
     }
 
-    /// Read the record if it has not been (the studio calls this when it opens).
+    /// Ask for the record if it has not been read (the studio calls this when it opens). `true`
+    /// when the read was asked for now.
     pub fn load(&mut self) -> bool {
-        let fresh = self.records.is_none();
-        self.records();
-        fresh
+        let fresh = self.records.is_none() && self.reading.is_none();
+        self.read_records();
+        fresh && self.reading.is_some()
     }
 
     pub fn busy(&self) -> bool {
-        !self.jobs.is_empty()
+        !self.jobs.is_empty() || self.reading.is_some()
     }
 
     /// The outcomes so far and how many there have been in all (see `Channels::done`).
@@ -756,25 +789,23 @@ impl Keeper {
         }
     }
 
-    fn spawn(&mut self, name: &'static str, work: impl FnOnce() -> (TunarrDone, Option<Kept>, Option<String>) + Send + 'static) -> bool {
-        if crate::stores::tape::active() {
+    /// Ask for `work` on a worker. `false` under a controlled run, which asks for nothing.
+    fn spawn(&mut self, name: &'static str, work: impl FnOnce(&dyn super::work::Reach) -> Landing + Send + 'static) -> bool {
+        if self.input.controlled {
             return false;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        let spawned = plx_base::task::spawn_small(name, move || {
-            let _ = tx.send(work());
-            plx_machine::present::wake_from_worker();
+        self.out.worker(name, move |reach| {
+            let _ = tx.send(work(reach));
         });
-        if spawned {
-            self.jobs.push(rx);
-        }
-        spawned
+        self.jobs.push(rx);
+        true
     }
 
     /// Start `cmd` against the Tunarr server `origin`. `programmes` is the preview the Keep is of
     /// (none: the draft has not been built yet, and the Keep fails as [`KeepError::Empty`]).
     pub fn run(&mut self, cmd: TunarrCmd, origin: &str, programmes: Option<Vec<Program>>, now_ms: i64) -> bool {
-        self.records();
+        self.read_records();
         let origin = origin.to_owned();
         match cmd {
             TunarrCmd::Keep { token, recipe } => {
@@ -782,10 +813,9 @@ impl Keeper {
                     self.finish(TunarrDone::Failed { token, error: KeepError::Empty });
                     return true;
                 };
-                let machine = plx_plex::plex::client_for(plx_plex::plex::current_server())
-                    .map(|c| c.machine_id().to_owned())
-                    .unwrap_or_default();
-                let started = self.spawn("tunarr-keep", move || {
+                let sid = self.input.server;
+                let started = self.spawn("tunarr-keep", move |reach| {
+                    let machine = reach.client(sid).map(|c| c.machine_id().to_owned()).unwrap_or_default();
                     let mut http = Live { origin: origin.clone() };
                     match keep(&mut http, &origin, &recipe, &programmes, &machine, now_ms) {
                         Ok(k) => (
@@ -805,7 +835,7 @@ impl Keeper {
             TunarrCmd::Reorder { channel_id, style } => self.rewrite(channel_id, |r| r.style = style),
             TunarrCmd::Delete { channel_id } => {
                 let Some(kept) = self.get(&channel_id).cloned() else { return false };
-                let started = self.spawn("tunarr-delete", move || {
+                let started = self.spawn("tunarr-delete", move |_| {
                     let mut http = Live { origin: kept.origin.clone() };
                     match delete(&mut http, &kept) {
                         Ok(()) => (TunarrDone::Deleted { channel_id: kept.channel_id.clone() }, None, Some(kept.channel_id)),
@@ -824,7 +854,7 @@ impl Keeper {
         let Some(kept) = self.get(&channel_id).cloned() else { return false };
         let mut recipe = kept.recipe.clone();
         change(&mut recipe);
-        let started = self.spawn("tunarr-rewrite", move || {
+        let started = self.spawn("tunarr-rewrite", move |_| {
             let mut http = Live { origin: kept.origin.clone() };
             match apply(&mut http, &kept, &recipe) {
                 Ok(k) => (TunarrDone::Updated { channel_id: k.channel_id.clone() }, Some(k), None),
@@ -842,7 +872,22 @@ impl Keeper {
     pub fn pump(&mut self) -> (bool, bool) {
         let mut changed = false;
         let mut guide = false;
-        let mut landed = Vec::new();
+        if let Some(rx) = self.reading.as_ref() {
+            match rx.try_recv() {
+                Ok(r) => {
+                    self.records = Some(r);
+                    self.reading = None;
+                    changed = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.records = Some(Records::default());
+                    self.reading = None;
+                    changed = true;
+                }
+            }
+        }
+        let mut landed = std::mem::take(&mut self.early);
         self.jobs.retain(|rx| match rx.try_recv() {
             Ok(out) => {
                 landed.push(out);
@@ -854,20 +899,29 @@ impl Keeper {
                 false
             }
         });
+        if self.records.is_none() {
+            // The record is not read yet: a landing would replace it. Hold them until it is.
+            if !landed.is_empty() {
+                self.read_records();
+            }
+            self.early = landed;
+            return (changed, guide);
+        }
         for (done, kept, removed) in landed {
             let mut save = false;
+            let records = self.records.get_or_insert_with(Records::default);
             if let Some(k) = kept {
                 guide |= matches!(done, TunarrDone::Kept { .. });
-                self.records().kept.insert(k.channel_id.clone(), k);
+                records.kept.insert(k.channel_id.clone(), k);
                 save = true;
             }
             if let Some(id) = removed {
-                self.records().kept.remove(&id);
+                records.kept.remove(&id);
                 guide = true;
                 save = true;
             }
             if save {
-                self.records().save();
+                self.save_records();
             }
             self.finish(done);
             changed = true;

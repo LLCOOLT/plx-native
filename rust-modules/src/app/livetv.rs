@@ -34,8 +34,7 @@
 //! before; flex is asked about again when it ends.
 
 use super::bridge::{self, AppHost};
-use super::App;
-use plx_machine::machine::{InputOwner, MachineId};
+use plx_machine::machine::{AppCommandOutcome, InputOwner, MachineId};
 use plx_data::livetv::native::{self, Plan, Why};
 use plx_media::live::{LiveSession, ProbeError, StreamFacts};
 use plx_plex::plex::ServerId;
@@ -91,93 +90,128 @@ pub(crate) struct LiveTuner {
     known: std::collections::HashMap<String, StreamFacts>,
 }
 
+/// What the tuner works on: the pages, the Bridge, the player and its adapters, and the tuner's
+/// own state. The command runner builds one from its `CommandResources` to perform a request; the
+/// loop builds one from the `App` for the per-frame pump.
+pub(crate) struct Tune<'a, 'o> {
+    pub(crate) pages: &'a mut plx_ui::dispatch::Dispatcher<AppHost>,
+    pub(crate) bridge: &'a mut bridge::Bridge<'o>,
+    pub(crate) player: &'a mut plx_media::player::machine::Player,
+    pub(crate) adapters: &'a mut super::Adapters,
+    pub(crate) tuner: &'a mut LiveTuner,
+}
+
+impl Tune<'_, '_> {
+    /// Which page is on top (`App::route`).
+    fn route(&self) -> AppArg {
+        self.pages.top_arg().cloned().unwrap_or(AppArg::Home)
+    }
+
+    /// The tuner changed what the page shows (`App::note_presentation_damage`).
+    fn note_presentation_damage(&mut self, why: plx_machine::present::Provenance) {
+        self.pages.present.note_in_scope(plx_machine::present::Scope::Page,
+            plx_machine::present::PresentEvent::Damage(why));
+    }
+}
+
+/// Run `f` on the loop's [`Tune`] over `app` (the per-frame pump and the stream's end).
+pub(crate) fn with_app<R>(app: &mut super::App, f: impl FnOnce(&mut Tune<'_, '_>) -> R) -> R {
+    let mut bridge = app.runtime.bridge(&mut app.bridge);
+    let mut t = Tune { pages: &mut app.pages, bridge: &mut bridge, player: &mut app.player,
+        adapters: &mut app.adapters, tuner: &mut app.livetv };
+    f(&mut t)
+}
+
 /// The declaration a tune of `url` may start with, skipping the probe: one already measured,
 /// unless this is a re-tune after a failure (`retries > 0`), which must not trust it.
 fn known_facts(known: &std::collections::HashMap<String, StreamFacts>, url: &str, retries: u32) -> Option<StreamFacts> {
     (retries == 0).then(|| known.get(url).copied()).flatten()
 }
 
-/// Drain the Live TV requests the screens raised this frame.
-pub(crate) fn requests(app: &mut App, now: u32) {
-    for (source, request, ret) in app.runtime.bridge(&mut app.bridge).take_livetv_reqs() {
-        // Settings > Live TV comes from a page inside the Settings surface, whose inner stack is
-        // not the container's entry; it only navigates, so it needs no owner check.
-        if request == LiveTvReq::OpenSetup {
-            bridge::dismiss_settings(&mut app.pages);
-            open_page(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), true);
-            continue;
-        }
-        let MachineId::Instance(instance) = source else { continue };
-        let Some(entry) = app.pages.nav.entry_of_instance(instance) else { continue };
-        if app.pages.nav.input_owner() != Some(InputOwner::Entry(entry)) { continue; }
-        match request {
-            LiveTvReq::Tab(tab) => {
-                if !app.runtime.bridge(&mut app.bridge).search_tab_available(tab) || matches!(tab, HomeTab::LiveTv) { continue; }
-                match tab {
-                    HomeTab::Home => bridge::nav_home_pill(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), Some(ret)),
-                    other => bridge::nav_tab(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), other, None, Some(ret)),
-                }
-            }
-            LiveTvReq::Account => bridge::open_account_menu(&mut app.pages),
-            LiveTvReq::Back => bridge::nav_tab(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), HomeTab::Home, None, Some(ret)),
-            LiveTvReq::Tune { index } => {
-                let lineup = Arc::clone(app.runtime.livetv_view().lineup());
-                if index < lineup.len() {
-                    let previous = plx_media::route::live(&app.player.session).map(|l| l.index).filter(|&p| p != index);
-                    tune(app, lineup, index, previous, now);
-                }
-            }
-            LiveTvReq::Step(delta) => {
-                let Some(live) = plx_media::route::live(&app.player.session).cloned() else { continue };
-                if let Some(next) = live.lineup.step(live.index, delta) {
-                    tune(app, Arc::clone(&live.lineup), next, Some(live.index), now);
-                }
-            }
-            LiveTvReq::Previous => {
-                let Some(live) = plx_media::route::live(&app.player.session).cloned() else { continue };
-                if let Some(prev) = live.previous.filter(|&p| p < live.lineup.len()) {
-                    tune(app, Arc::clone(&live.lineup), prev, Some(live.index), now);
-                }
-            }
-            LiveTvReq::Typed(number) => {
-                let Some(live) = plx_media::route::live(&app.player.session).cloned() else { continue };
-                if let Some(index) = live.lineup.index_for_typed(&number) {
-                    if index != live.index {
-                        tune(app, Arc::clone(&live.lineup), index, Some(live.index), now);
-                    }
-                }
-            }
-            LiveTvReq::Number(number) => tune_number(app, &number, now),
-            LiveTvReq::Detail { sid, rk } => {
-                let hit = plx_data::livetv::plexmatch::Hit { sid, rk };
-                if !app.runtime.livetv_view().knows_match(&hit) { continue; }
-                let arg = AppArg::Content(plx_screens::registry::ContentArg::Detail { sid: hit.sid, rk: hit.rk });
-                bridge::nav_push_with_return(&mut app.pages, arg, ret);
-            }
-            LiveTvReq::Retry => retry(app, now),
-            LiveTvReq::OpenSetup => {}
-        }
+/// **Perform one Live TV request a screen raised** (`ExternalAppFx::LiveTv`, and Home's On Now
+/// card), in the command runner that took it: the tuner, the player and the pages arrive in `t`.
+/// A request from a page that no longer holds the input is refused.
+pub(crate) fn execute_livetv_command(t: &mut Tune<'_, '_>, source: MachineId, request: LiveTvReq,
+    ret: plx_ui::screen::ReturnState<u32, plx_screens::registry::PageMemory>, now: u32,
+) -> AppCommandOutcome {
+    // Settings > Live TV comes from a page inside the Settings surface, whose inner stack is not
+    // the container's entry; it only navigates, so it needs no owner check.
+    if request == LiveTvReq::OpenSetup {
+        bridge::dismiss_settings(&mut *t.pages);
+        open_page(&mut *t.pages, &mut *t.bridge, true);
+        return AppCommandOutcome::Completed;
     }
+    let MachineId::Instance(instance) = source else { return AppCommandOutcome::Refused };
+    let Some(entry) = t.pages.nav.entry_of_instance(instance) else { return AppCommandOutcome::Refused };
+    if t.pages.nav.input_owner() != Some(InputOwner::Entry(entry)) { return AppCommandOutcome::Refused; }
+    match request {
+        LiveTvReq::Tab(tab) => {
+            if !t.bridge.search_tab_available(tab) || matches!(tab, HomeTab::LiveTv) { return AppCommandOutcome::Refused; }
+            match tab {
+                HomeTab::Home => bridge::nav_home_pill(&mut *t.pages, &mut *t.bridge, Some(ret)),
+                other => bridge::nav_tab(&mut *t.pages, &mut *t.bridge, other, None, Some(ret)),
+            }
+        }
+        LiveTvReq::Account => bridge::open_account_menu(&mut *t.pages),
+        LiveTvReq::Back => bridge::nav_tab(&mut *t.pages, &mut *t.bridge, HomeTab::Home, None, Some(ret)),
+        LiveTvReq::Tune { index } => {
+            let lineup = Arc::clone(t.bridge.livetv_view().lineup());
+            if index < lineup.len() {
+                let previous = plx_media::route::live(&t.player.session).map(|l| l.index).filter(|&p| p != index);
+                tune(t, lineup, index, previous, now);
+            }
+        }
+        LiveTvReq::Step(delta) => {
+            let Some(live) = plx_media::route::live(&t.player.session).cloned() else { return AppCommandOutcome::Refused };
+            if let Some(next) = live.lineup.step(live.index, delta) {
+                tune(t, Arc::clone(&live.lineup), next, Some(live.index), now);
+            }
+        }
+        LiveTvReq::Previous => {
+            let Some(live) = plx_media::route::live(&t.player.session).cloned() else { return AppCommandOutcome::Refused };
+            if let Some(prev) = live.previous.filter(|&p| p < live.lineup.len()) {
+                tune(t, Arc::clone(&live.lineup), prev, Some(live.index), now);
+            }
+        }
+        LiveTvReq::Typed(number) => {
+            let Some(live) = plx_media::route::live(&t.player.session).cloned() else { return AppCommandOutcome::Refused };
+            if let Some(index) = live.lineup.index_for_typed(&number) {
+                if index != live.index {
+                    tune(t, Arc::clone(&live.lineup), index, Some(live.index), now);
+                }
+            }
+        }
+        LiveTvReq::Number(number) => tune_number(t, &number, now),
+        LiveTvReq::Detail { sid, rk } => {
+            let hit = plx_data::livetv::plexmatch::Hit { sid, rk };
+            if !t.bridge.livetv_view().knows_match(&hit) { return AppCommandOutcome::Refused; }
+            let arg = AppArg::Content(plx_screens::registry::ContentArg::Detail { sid: hit.sid, rk: hit.rk });
+            bridge::nav_push_with_return(&mut *t.pages, arg, ret);
+        }
+        LiveTvReq::Retry => retry(t, now),
+        LiveTvReq::OpenSetup => {}
+    }
+    AppCommandOutcome::Completed
 }
 
 /// Tune the channel numbered `number` in the loaded guide — OK on Home's On Now card
 /// (`HomeReq::Tune`). A number the guide no longer lists (it reloaded under the card) does nothing.
-pub(crate) fn tune_number(app: &mut App, number: &str, now: u32) {
-    let lineup = Arc::clone(app.runtime.livetv_view().lineup());
+pub(crate) fn tune_number(t: &mut Tune<'_, '_>, number: &str, now: u32) {
+    let lineup = Arc::clone(t.bridge.livetv_view().lineup());
     let Some(index) = lineup.index_of_number(number) else { return };
-    let previous = plx_media::route::live(&app.player.session).map(|l| l.index).filter(|&p| p != index);
-    tune(app, lineup, index, previous, now);
+    let previous = plx_media::route::live(&t.player.session).map(|l| l.index).filter(|&p| p != index);
+    tune(t, lineup, index, previous, now);
 }
 
 /// Tune the playing channel again — the failure read-out's *Try again* and the banner's OK on a
 /// failed tune.
-pub(crate) fn retry(app: &mut App, now: u32) {
-    let Some(live) = plx_media::route::live(&app.player.session).cloned() else { return };
-    app.livetv.retries = 0;
+pub(crate) fn retry(t: &mut Tune<'_, '_>, now: u32) {
+    let Some(live) = plx_media::route::live(&t.player.session).cloned() else { return };
+    t.tuner.retries = 0;
     if let Some(ch) = live.channel() {
-        app.livetv.known.remove(&ch.url);
+        t.tuner.known.remove(&ch.url);
     }
-    tune(app, live.lineup, live.index, live.previous, now);
+    tune(t, live.lineup, live.index, live.previous, now);
 }
 
 /// Should a tune of `url` ask Tunarr for native mode first? Only a Tunarr lineup URL on an origin
@@ -189,70 +223,70 @@ fn native_wanted(tuner: &LiveTuner, url: &str, any_server: bool) -> bool {
         && native::channel_of(url).is_some_and(|(origin, _)| !tuner.native_unsupported.contains(&origin))
 }
 
-fn tune(app: &mut App, lineup: Arc<plx_data::livetv::guide::Lineup>, index: usize, previous: Option<usize>, now: u32) {
+fn tune(t: &mut Tune<'_, '_>, lineup: Arc<plx_data::livetv::guide::Lineup>, index: usize, previous: Option<usize>, now: u32) {
     let Some(channel) = lineup.channels.get(index) else { return };
     let url = channel.url.clone();
     let virtual_playlist = plx_data::livetv::virtual_playlist(&url).map(str::to_owned);
     plx_base::eventlog::log(&format!("livetv: tune channel={} index={index}", channel.number));
     // Step 1: stop what plays, and show the channel tuning.
-    super::content::halt_preview_now(&mut app.player.session, &mut app.adapters.player);
-    plx_media::route::cancel_play(&mut app.player.session);
-    super::playback::close_player_overlays(&mut app.pages);
-    plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
+    super::content::halt_preview_now(&mut t.player.session, &mut t.adapters.player);
+    plx_media::route::cancel_play(&mut t.player.session);
+    super::playback::close_player_overlays(&mut *t.pages);
+    plx_media::player::stop_bufferfeed(&mut t.player.session, &mut t.adapters.player);
     plx_media::player::report::clear_error_trace();
     let session = LiveSession::tuning(lineup, index, previous);
-    plx_media::route::set_live_tuning(&mut app.player.session, session);
-    let in_player = app.route() == AppArg::Player;
+    plx_media::route::set_live_tuning(&mut t.player.session, session);
+    let in_player = t.route() == AppArg::Player;
     if in_player {
-        bridge::send_player_message(&mut app.pages,
+        bridge::send_player_message(&mut *t.pages,
             plx_screens::registry::AppMsg::PlayerStart { now, hud_ms: plx_screens::player::LIVE_BANNER_MS });
     } else {
-        super::playback::enter_player(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), super::playback::Origin::Here, None);
-        app.runtime.bridge(&mut app.bridge).seed_player_hud(plx_screens::player::LIVE_BANNER_MS);
+        super::playback::enter_player(&mut *t.pages, &mut *t.bridge, super::playback::Origin::Here, None);
+        t.bridge.seed_player_hud(plx_screens::player::LIVE_BANNER_MS);
     }
-    plx_media::player::commit_paused(&mut app.player.session, &mut app.adapters.player, false);
-    app.livetv.native_program = None;
-    app.livetv.native_end_ms = None;
-    app.livetv.native_recheck_at = None;
-    app.livetv.native_pending = None;
+    plx_media::player::commit_paused(&mut t.player.session, &mut t.adapters.player, false);
+    t.tuner.native_program = None;
+    t.tuner.native_end_ms = None;
+    t.tuner.native_recheck_at = None;
+    t.tuner.native_pending = None;
     if let Some(playlist) = virtual_playlist {
-        app.livetv.epoch += 1;
-        app.livetv.retry_at = None;
-        app.livetv.pending = None;
-        tune_virtual(app, &playlist, now);
-        app.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
+        t.tuner.epoch += 1;
+        t.tuner.retry_at = None;
+        t.tuner.pending = None;
+        tune_virtual(t, &playlist, now);
+        t.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
         return;
     }
-    app.livetv.epoch += 1;
-    app.livetv.retry_at = None;
+    t.tuner.epoch += 1;
+    t.tuner.retry_at = None;
     let any_server = plx_plex::plex::server_ids().next().is_some();
-    if native_wanted(&app.livetv, &url, any_server) {
+    if native_wanted(&t.tuner, &url, any_server) {
         let (tx, rx) = mpsc::channel();
         let ask_url = url.clone();
-        let learned = app.livetv.native_sources.clone();
+        let learned = t.tuner.native_sources.clone();
         let spawned = plx_base::task::spawn_small("livetv-native", move || {
-            let _ = tx.send(native::resolve(&ask_url, &learned));
+            let _ = tx.send(native::resolve(&crate::app::adapters::livetv_work::Registry, &ask_url, &learned));
             plx_machine::present::wake_from_worker();
         });
         if spawned {
-            app.livetv.pending = None;
-            app.livetv.native_pending = Some(NativePending { epoch: app.livetv.epoch, url, rx });
+            t.tuner.pending = None;
+            t.tuner.native_pending = Some(NativePending { epoch: t.tuner.epoch, url, rx });
             return;
         }
     }
-    tune_stream(app, url);
+    tune_stream(t, url);
 }
 
 /// Steps 2 and 3 for a Tunarr channel's `.ts` stream: start it at once on a declaration measured
 /// before, else probe it on a worker.
-fn tune_stream(app: &mut App, url: String) {
+fn tune_stream(t: &mut Tune<'_, '_>, url: String) {
     // A channel measured before starts at once.
-    if let Some(facts) = known_facts(&app.livetv.known, &url, app.livetv.retries) {
-        app.livetv.pending = None;
-        start(app, url, facts);
+    if let Some(facts) = known_facts(&t.tuner.known, &url, t.tuner.retries) {
+        t.tuner.pending = None;
+        start(t, url, facts);
         return;
     }
-    app.livetv.known.remove(&url);
+    t.tuner.known.remove(&url);
     // Step 2: probe on a worker.
     let (tx, rx) = mpsc::channel();
     let probe_url = url.clone();
@@ -261,21 +295,21 @@ fn tune_stream(app: &mut App, url: String) {
         plx_machine::present::wake_from_worker();
     });
     if spawned {
-        app.livetv.pending = Some(Pending { epoch: app.livetv.epoch, url, rx });
+        t.tuner.pending = Some(Pending { epoch: t.tuner.epoch, url, rx });
     } else {
         // No worker: play with Tunarr's default declaration rather than not at all.
-        start(app, url, StreamFacts::TUNARR_DEFAULT);
+        start(t, url, StreamFacts::TUNARR_DEFAULT);
     }
-    app.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
+    t.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
 }
 
 /// Steps 2 and 3 for a virtual channel: what its timeline airs now, played from where the channel
 /// is in it. A channel whose timeline is not built yet (the store is still reading its programmes)
 /// is retried shortly, like a probe that failed.
-fn tune_virtual(app: &mut App, playlist: &str, now: u32) {
+fn tune_virtual(t: &mut Tune<'_, '_>, playlist: &str, now: u32) {
     let wall = plx_base::wallclock::now_ms();
     let airing = {
-        let view = app.runtime.livetv_view();
+        let view = t.bridge.livetv_view();
         view.virtuals()
             .channel(playlist)
             .and_then(|vc| vc.schedule.as_ref())
@@ -283,8 +317,8 @@ fn tune_virtual(app: &mut App, playlist: &str, now: u32) {
     };
     let Some((slot, programme)) = airing else {
         plx_base::eventlog::log(&format!("livetv: virtual channel {playlist} has no timeline yet"));
-        fail(app);
-        schedule_retry(app, now);
+        fail(t);
+        schedule_retry(t, now);
         return;
     };
     let offset_ns = (wall - slot.start_ms).max(0) * 1_000_000;
@@ -303,9 +337,9 @@ fn tune_virtual(app: &mut App, playlist: &str, now: u32) {
         airing_start_ms: slot.start_ms,
         library_item: false,
     };
-    if !play_programme(app, item, offset_ns) {
-        fail(app);
-        schedule_retry(app, now);
+    if !play_programme(t, item, offset_ns) {
+        fail(t);
+        schedule_retry(t, now);
     }
 }
 
@@ -327,16 +361,16 @@ struct Programme<'a> {
 /// Play `item` from `offset_ns` under the Live TV session being tuned — quietly
 /// (`route::request_play_channel`: no PlayQueue, no timeline, no scrobble). `false` when the
 /// request could not be made.
-fn play_programme(app: &mut App, item: Programme<'_>, offset_ns: i64) -> bool {
-    let Some(mut session) = plx_media::route::live(&app.player.session).cloned() else { return false };
+fn play_programme(t: &mut Tune<'_, '_>, item: Programme<'_>, offset_ns: i64) -> bool {
+    let Some(mut session) = plx_media::route::live(&t.player.session).cloned() else { return false };
     session.facts = Some(StreamFacts::TUNARR_DEFAULT);
     session.failed = false;
     session.airing_start_ms = Some(item.airing_start_ms);
     session.library_item = item.library_item;
-    plx_media::route::set_live_tuning(&mut app.player.session, session);
+    plx_media::route::set_live_tuning(&mut t.player.session, session);
     let requested = plx_media::route::request_play_channel(
-        &mut app.player.session,
-        app.runtime.metadata_mut(),
+        &mut t.player.session,
+        t.bridge.metadata_mut(),
         super::playback::start_caps(),
         item.sid,
         item.rk,
@@ -350,23 +384,23 @@ fn play_programme(app: &mut App, item: Programme<'_>, offset_ns: i64) -> bool {
         return false;
     }
     super::playback::start_playback(
-        &mut app.player.session,
-        &mut app.adapters.player,
+        &mut t.player.session,
+        &mut t.adapters.player,
         offset_ns,
         super::playback::Origin::Here,
         plx_screens::player::LIVE_BANNER_MS,
         None,
-        &mut app.pages,
-        &mut app.runtime.bridge(&mut app.bridge),
+        &mut *t.pages,
+        &mut *t.bridge,
     );
-    if let Some(channel) = plx_media::route::live(&app.player.session).and_then(|l| l.channel()) {
-        plx_data::livetv::remember_channel(&channel.number);
+    if let Some(channel) = plx_media::route::live(&t.player.session).and_then(|l| l.channel()) {
+        t.bridge.livetv_run(plx_data::livetv::LiveTvCmd::Remember { number: channel.number.clone() });
     }
     true
 }
 
 /// Native mode's step 3: the programme Tunarr airs, from its Plex file at the channel's point.
-fn tune_native(app: &mut App, url: String, d: native::Direct) {
+fn tune_native(t: &mut Tune<'_, '_>, url: String, d: native::Direct) {
     let wall = plx_base::wallclock::now_ms();
     let offset_ms = native::file_offset_at(&d.clock, d.seek_offset_ms, wall);
     plx_base::eventlog::log(&format!(
@@ -384,18 +418,18 @@ fn tune_native(app: &mut App, url: String, d: native::Direct) {
         airing_start_ms: d.airing_start_ms(),
         library_item: true,
     };
-    if play_programme(app, item, offset_ms * 1_000_000) {
-        app.livetv.native_program = Some(d.program_id);
-        app.livetv.native_end_ms = Some(d.end_offset_ms);
+    if play_programme(t, item, offset_ms * 1_000_000) {
+        t.tuner.native_program = Some(d.program_id);
+        t.tuner.native_end_ms = Some(d.end_offset_ms);
     } else {
         plx_base::eventlog::log("livetv: native request refused; playing the channel's stream");
-        if let Some(mut session) = plx_media::route::live(&app.player.session).cloned() {
+        if let Some(mut session) = plx_media::route::live(&t.player.session).cloned() {
             session.library_item = false;
             session.airing_start_ms = None;
             session.facts = None;
-            plx_media::route::set_live_tuning(&mut app.player.session, session);
+            plx_media::route::set_live_tuning(&mut t.player.session, session);
         }
-        tune_stream(app, url);
+        tune_stream(t, url);
     }
 }
 
@@ -433,194 +467,194 @@ fn virtual_titles(p: &plx_data::vchannel::schedule::Program) -> (String, String)
 }
 
 /// Step 3: install the channel and start the engine.
-fn start(app: &mut App, url: String, facts: StreamFacts) {
-    let Some(mut session) = plx_media::route::live(&app.player.session).cloned() else { return };
+fn start(t: &mut Tune<'_, '_>, url: String, facts: StreamFacts) {
+    let Some(mut session) = plx_media::route::live(&t.player.session).cloned() else { return };
     session.facts = Some(facts);
     session.failed = false;
     plx_base::eventlog::log(&format!(
         "livetv: start vcodec={} acodec={} fps={:.3}",
         facts.vcodec, facts.acodec, facts.fps
     ));
-    if !plx_media::route::install_live_stream(&mut app.player.session, session, &url) {
-        fail(app);
+    if !plx_media::route::install_live_stream(&mut t.player.session, session, &url) {
+        fail(t);
         return;
     }
-    if !plx_media::player::start_bufferfeed(&mut app.player.session, &mut app.adapters.player) {
+    if !plx_media::player::start_bufferfeed(&mut t.player.session, &mut t.adapters.player) {
         plx_base::eventlog::log("livetv: the engine refused to start");
-        fail(app);
+        fail(t);
         return;
     }
-    plx_media::player::commit_paused(&mut app.player.session, &mut app.adapters.player, false);
-    if let Some(channel) = plx_media::route::live(&app.player.session).and_then(|l| l.channel()) {
-        plx_data::livetv::remember_channel(&channel.number);
+    plx_media::player::commit_paused(&mut t.player.session, &mut t.adapters.player, false);
+    if let Some(channel) = plx_media::route::live(&t.player.session).and_then(|l| l.channel()) {
+        t.bridge.livetv_run(plx_data::livetv::LiveTvCmd::Remember { number: channel.number.clone() });
     }
-    app.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
+    t.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
 }
 
-fn fail(app: &mut App) {
-    if let Some(mut session) = plx_media::route::live(&app.player.session).cloned() {
+fn fail(t: &mut Tune<'_, '_>) {
+    if let Some(mut session) = plx_media::route::live(&t.player.session).cloned() {
         session.failed = true;
-        plx_media::route::set_live_tuning(&mut app.player.session, session);
+        plx_media::route::set_live_tuning(&mut t.player.session, session);
     }
-    app.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
+    t.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
 }
 
 /// Once a frame: land the native-mode answer and the probe, and run the automatic re-tune schedule.
-pub(crate) fn pump(app: &mut App, now: u32) {
-    if let Some(pending) = app.livetv.native_pending.as_ref() {
+pub(crate) fn pump(t: &mut Tune<'_, '_>, now: u32) {
+    if let Some(pending) = t.tuner.native_pending.as_ref() {
         match pending.rx.try_recv() {
             Ok((plan, learnt)) => {
-                let NativePending { epoch, url, .. } = app.livetv.native_pending.take().expect("checked above");
+                let NativePending { epoch, url, .. } = t.tuner.native_pending.take().expect("checked above");
                 if let Some((source, sid)) = learnt {
-                    app.livetv.native_sources.insert(source, sid);
+                    t.tuner.native_sources.insert(source, sid);
                 }
-                let current = epoch == app.livetv.epoch && plx_media::route::live(&app.player.session).is_some();
+                let current = epoch == t.tuner.epoch && plx_media::route::live(&t.player.session).is_some();
                 if current {
-                    let ended = app.livetv.native_ended.take();
+                    let ended = t.tuner.native_ended.take();
                     match native_step(plan, ended.as_deref(), plx_base::wallclock::now_ms()) {
-                        NativeStep::Native(d) => tune_native(app, url, d),
+                        NativeStep::Native(d) => tune_native(t, url, d),
                         NativeStep::Stream { recheck_at, unsupported } => {
                             if unsupported {
                                 if let Some((origin, _)) = native::channel_of(&url) {
                                     plx_base::eventlog::log(&format!("livetv: {origin} has no native-playback route"));
-                                    app.livetv.native_unsupported.insert(origin);
+                                    t.tuner.native_unsupported.insert(origin);
                                 }
                             }
-                            app.livetv.native_recheck_at = recheck_at;
-                            tune_stream(app, url);
+                            t.tuner.native_recheck_at = recheck_at;
+                            tune_stream(t, url);
                         }
                     }
                 }
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
-                let NativePending { epoch, url, .. } = app.livetv.native_pending.take().expect("checked above");
-                if epoch == app.livetv.epoch && plx_media::route::live(&app.player.session).is_some() {
-                    tune_stream(app, url);
+                let NativePending { epoch, url, .. } = t.tuner.native_pending.take().expect("checked above");
+                if epoch == t.tuner.epoch && plx_media::route::live(&t.player.session).is_some() {
+                    tune_stream(t, url);
                 }
             }
         }
     }
-    if let Some(pending) = app.livetv.pending.as_ref() {
+    if let Some(pending) = t.tuner.pending.as_ref() {
         match pending.rx.try_recv() {
             Ok(result) => {
-                let Pending { epoch, url, .. } = app.livetv.pending.take().expect("checked above");
-                let current = epoch == app.livetv.epoch && plx_media::route::live(&app.player.session).is_some();
+                let Pending { epoch, url, .. } = t.tuner.pending.take().expect("checked above");
+                let current = epoch == t.tuner.epoch && plx_media::route::live(&t.player.session).is_some();
                 if current {
                     match result {
                         Ok(facts) => {
-                            app.livetv.known.insert(url.clone(), facts);
-                            start(app, url, facts)
+                            t.tuner.known.insert(url.clone(), facts);
+                            start(t, url, facts)
                         }
                         // A stream that answered but could not be read — the probe found no PMT in
                         // the bytes it got, say — may still play: try with the default declaration.
                         Err(ProbeError::NotPlayable(why)) => {
                             plx_base::eventlog::log(&format!("livetv: probe inconclusive ({why}); playing with the default declaration"));
-                            start(app, url, StreamFacts::TUNARR_DEFAULT);
+                            start(t, url, StreamFacts::TUNARR_DEFAULT);
                         }
                         Err(e) => {
                             plx_base::eventlog::log(&format!("livetv: probe failed ({e})"));
-                            fail(app);
-                            schedule_retry(app, now);
+                            fail(t);
+                            schedule_retry(t, now);
                         }
                     }
                 }
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
-                app.livetv.pending = None;
-                fail(app);
+                t.tuner.pending = None;
+                fail(t);
             }
         }
     }
-    let Some(live) = plx_media::route::live(&app.player.session).cloned() else {
-        app.livetv.retry_at = None;
+    let Some(live) = plx_media::route::live(&t.player.session).cloned() else {
+        t.tuner.retry_at = None;
         return;
     };
     // Native mode: the channel leaves the programme at a FILE position (Tunarr's schedule cut), live
     // or paused behind; then it is asked what is on next. A stream playing over flex is asked again
     // once the flex is over.
-    if live.library_item && app.route() == AppArg::Player {
-        if let Some(end_ms) = app.livetv.native_end_ms {
-            if plx_media::player::seen_frame(&app.player.session).unwrap_or(false)
-                && plx_media::player::playpos_ns(&app.player.session).unwrap_or(0) / 1_000_000 >= end_ms
+    if live.library_item && t.route() == AppArg::Player {
+        if let Some(end_ms) = t.tuner.native_end_ms {
+            if plx_media::player::seen_frame(&t.player.session).unwrap_or(false)
+                && plx_media::player::playpos_ns(&t.player.session).unwrap_or(0) / 1_000_000 >= end_ms
             {
                 plx_base::eventlog::log("livetv: the channel left the programme; asking Tunarr what is on");
-                advance_native(app, &live, now);
+                advance_native(t, &live, now);
                 return;
             }
         }
     }
-    if !live.library_item && app.route() == AppArg::Player {
-        if app.livetv.native_recheck_at.is_some_and(|at| plx_base::wallclock::now_ms() >= at) {
-            app.livetv.native_recheck_at = None;
+    if !live.library_item && t.route() == AppArg::Player {
+        if t.tuner.native_recheck_at.is_some_and(|at| plx_base::wallclock::now_ms() >= at) {
+            t.tuner.native_recheck_at = None;
             plx_base::eventlog::log("livetv: the flex is over; asking Tunarr what is on");
-            plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
-            app.livetv.retries = 0;
-            tune(app, live.lineup, live.index, live.previous, now);
+            plx_media::player::stop_bufferfeed(&mut t.player.session, &mut t.adapters.player);
+            t.tuner.retries = 0;
+            tune(t, live.lineup, live.index, live.previous, now);
             return;
         }
     }
     // A channel that has shown a picture has proven itself: its retry budget is whole again.
-    if live.facts.is_some() && plx_media::player::seen_frame(&app.player.session).unwrap_or(false) {
-        app.livetv.retries = 0;
+    if live.facts.is_some() && plx_media::player::seen_frame(&t.player.session).unwrap_or(false) {
+        t.tuner.retries = 0;
     }
     // An engine that failed on a live channel is re-tuned before the read-out is left standing.
-    if app.livetv.retry_at.is_none()
+    if t.tuner.retry_at.is_none()
         && live.facts.is_some()
-        && plx_appkit::player_hud::transport_hidden(&super::player_presentation::capture(&app.player.session))
+        && plx_appkit::player_hud::transport_hidden(&super::player_presentation::capture(&t.player.session))
     {
-        schedule_retry(app, now);
+        schedule_retry(t, now);
     }
-    if app.livetv.retry_at.is_some_and(|at| now.wrapping_sub(at) < u32::MAX / 2) {
-        app.livetv.retry_at = None;
-        if app.route() == AppArg::Player {
-            plx_base::eventlog::log(&format!("livetv: automatic re-tune {}/{}", app.livetv.retries, AUTO_RETRIES));
-            tune(app, live.lineup, live.index, live.previous, now);
+    if t.tuner.retry_at.is_some_and(|at| now.wrapping_sub(at) < u32::MAX / 2) {
+        t.tuner.retry_at = None;
+        if t.route() == AppArg::Player {
+            plx_base::eventlog::log(&format!("livetv: automatic re-tune {}/{}", t.tuner.retries, AUTO_RETRIES));
+            tune(t, live.lineup, live.index, live.previous, now);
         }
     }
 }
 
-fn schedule_retry(app: &mut App, now: u32) {
-    if app.livetv.retries < AUTO_RETRIES {
-        app.livetv.retries += 1;
-        app.livetv.retry_at = Some(now.wrapping_add(RETRY_DELAY_MS));
+fn schedule_retry(t: &mut Tune<'_, '_>, now: u32) {
+    if t.tuner.retries < AUTO_RETRIES {
+        t.tuner.retries += 1;
+        t.tuner.retry_at = Some(now.wrapping_add(RETRY_DELAY_MS));
     }
 }
 
 /// A Tunarr channel in native mode moves on from the programme it played: what is on now is asked
 /// again, and the programme is remembered so a reply still naming it does not re-tune into its end.
-fn advance_native(app: &mut App, live: &LiveSession, now: u32) {
-    app.livetv.native_ended = app.livetv.native_program.take();
-    app.livetv.native_end_ms = None;
-    plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
-    app.livetv.retries = 0;
-    tune(app, Arc::clone(&live.lineup), live.index, live.previous, now);
+fn advance_native(t: &mut Tune<'_, '_>, live: &LiveSession, now: u32) {
+    t.tuner.native_ended = t.tuner.native_program.take();
+    t.tuner.native_end_ms = None;
+    plx_media::player::stop_bufferfeed(&mut t.player.session, &mut t.adapters.player);
+    t.tuner.retries = 0;
+    tune(t, Arc::clone(&live.lineup), live.index, live.previous, now);
 }
 
 /// The live stream drained to its end: a channel does not end, so this is a dropped connection.
 /// Re-tune it (bounded); when the budget is spent, leave the banner saying it is unavailable.
-pub(crate) fn stream_ended(app: &mut App, now: u32) {
+pub(crate) fn stream_ended(t: &mut Tune<'_, '_>, now: u32) {
     // A Tunarr programme played natively ended (its file is done): the channel moves on.
-    if let Some(live) = plx_media::route::live(&app.player.session).cloned().filter(|l| l.library_item) {
+    if let Some(live) = plx_media::route::live(&t.player.session).cloned().filter(|l| l.library_item) {
         plx_base::eventlog::log("livetv: the programme's file ended; asking Tunarr what is on");
-        advance_native(app, &live, now);
+        advance_native(t, &live, now);
         return;
     }
     // A virtual channel's programme ended: the channel moves on to the next one, at once.
-    if let Some(live) = plx_media::route::live(&app.player.session).cloned().filter(|l| l.is_virtual()) {
+    if let Some(live) = plx_media::route::live(&t.player.session).cloned().filter(|l| l.is_virtual()) {
         plx_base::eventlog::log("livetv: the programme ended; the virtual channel moves on");
-        plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
-        app.livetv.retries = 0;
-        tune(app, live.lineup, live.index, live.previous, now);
+        plx_media::player::stop_bufferfeed(&mut t.player.session, &mut t.adapters.player);
+        t.tuner.retries = 0;
+        tune(t, live.lineup, live.index, live.previous, now);
         return;
     }
     plx_base::eventlog::log("livetv: the stream ended; re-tuning");
-    plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
-    if app.livetv.retries < AUTO_RETRIES {
-        schedule_retry(app, now);
+    plx_media::player::stop_bufferfeed(&mut t.player.session, &mut t.adapters.player);
+    if t.tuner.retries < AUTO_RETRIES {
+        schedule_retry(t, now);
     } else {
-        fail(app);
+        fail(t);
     }
 }
 

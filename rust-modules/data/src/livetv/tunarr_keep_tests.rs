@@ -384,3 +384,61 @@ fn records_round_trip_and_list_by_server() {
     assert_eq!(r.on("o1").iter().map(|k| k.number).collect::<Vec<_>>(), vec![901, 902]);
     assert!(Records::parse("garbage").kept.is_empty());
 }
+
+/// A [`crate::livetv::work::Reach`] with no server signed in.
+struct NoServers;
+impl crate::livetv::work::Reach for NoServers {
+    fn servers(&self) -> Vec<plx_plex::plex::ServerId> { Vec::new() }
+    fn current(&self) -> plx_plex::plex::ServerId { plx_plex::plex::ServerId::from_raw(0) }
+    fn client(&self, _: plx_plex::plex::ServerId) -> Option<&'static plx_plex::plex::Client> { None }
+    fn machine(&self, _: &str) -> Option<plx_plex::plex::ServerId> { None }
+}
+
+/// **The keeper asks; it never starts.** Opening the studio asks for the stored record as work,
+/// once, and a controlled run (a tape) asks for nothing at all.
+#[test]
+fn the_record_is_read_as_work_once_and_never_under_a_controlled_run() {
+    let mut keeper = Keeper::default();
+    keeper.capture(&crate::livetv::work::LiveTvInput::default());
+    assert!(keeper.load(), "the read is asked for");
+    assert!(!keeper.load(), "and only once while it is in flight");
+    let work = keeper.take_work();
+    assert_eq!(work.iter().map(|w| w.name).collect::<Vec<_>>(), ["tunarr-kept-read"]);
+    assert!(keeper.busy());
+
+    let mut controlled = Keeper::default();
+    controlled.capture(&crate::livetv::work::LiveTvInput { controlled: true, ..Default::default() });
+    assert!(!controlled.load());
+    assert!(!controlled.run(TunarrCmd::Delete { channel_id: "x".into() }, "http://192.0.2.1:8000", None, 0));
+    assert!(controlled.take_work().is_empty());
+}
+
+/// **A write that lands before the record is read waits for it**, so it never replaces what was
+/// stored: the read lands, the write joins it, and only then is the record written back.
+#[test]
+fn a_write_landing_before_the_record_waits_for_it() {
+    let mut keeper = Keeper::default();
+    keeper.capture(&crate::livetv::work::LiveTvInput::default());
+    // A Keep whose preview has programmes but no Tunarr to reach: the body answers Failed.
+    let programmes = vec![crate::vchannel::schedule::Program::default()];
+    assert!(keeper.run(TunarrCmd::Keep { token: 7, recipe: recipe(Source::Library, Style::Random) },
+        "http://127.0.0.1:9", Some(programmes), 0));
+    let work = keeper.take_work();
+    let names: Vec<_> = work.iter().map(|w| w.name).collect();
+    assert_eq!(names, ["tunarr-kept-read", "tunarr-keep"]);
+    let mut work = work.into_iter();
+    let read = work.next().unwrap();
+    for w in work {
+        (w.body)(&NoServers);
+    }
+    // The keep has answered; the record has not been read: nothing lands yet.
+    let (changed, _) = keeper.pump();
+    assert!(!changed, "nothing lands before the record is read");
+    assert_eq!(keeper.done().0, 0);
+    assert_eq!(keeper.early.len(), 1, "the answer is held");
+    (read.body)(&NoServers);
+    let (changed, _) = keeper.pump();
+    assert!(changed);
+    assert_eq!(keeper.done().0, 1, "the held write lands with the record");
+    assert!(matches!(keeper.done().1.last(), Some(TunarrDone::Failed { token: 7, .. })));
+}

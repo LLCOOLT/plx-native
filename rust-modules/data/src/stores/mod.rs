@@ -265,9 +265,15 @@ pub fn person_run(&mut self, cmd: person::PersonCmd, input: &crate::person::Pers
         self.subtitle_search.view()
     }
 
-    pub fn livetv_run(&mut self, cmd: crate::livetv::LiveTvCmd) -> bool { self.livetv.run(cmd) }
+    pub fn livetv_run(&mut self, cmd: crate::livetv::LiveTvCmd, input: &crate::livetv::work::LiveTvInput, now_ms: i64) -> bool {
+        self.livetv.run(cmd, input, now_ms)
+    }
 
-    pub fn livetv_pump(&mut self) -> bool { self.livetv.pump() }
+    pub fn livetv_pump(&mut self, input: &crate::livetv::work::LiveTvInput, now_ms: i64) -> bool {
+        self.livetv.pump(input, now_ms)
+    }
+    /// The Live TV store's queued IO, for the app's runner.
+    pub fn livetv_take_work(&mut self) -> Vec<crate::livetv::work::Work> { self.livetv.take_work() }
 
     pub fn livetv_view(&self) -> crate::livetv::LiveTvView<'_> { self.livetv.view() }
 

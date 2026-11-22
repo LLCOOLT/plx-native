@@ -4245,7 +4245,7 @@ impl DetailScreen {
                 }
                 let has_menu = self
                     .focused_related(Some(key), <H as crate::registry::MetadataLike>::metadata(cx))
-                    .is_some_and(crate::registry::item_has_menu);
+                    .is_some_and(|m| crate::registry::item_has_menu(m, H::screen_inputs(cx).current_server));
                 if !has_menu {
                     return none;
                 }

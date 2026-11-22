@@ -1161,7 +1161,7 @@ impl<H: ContentLike + PersonLike> StackPage<H> for Page {
 
     fn card_has_menu(&self, cx: &Cx<'_, H>, _k: Sec, elem: &u32) -> bool {
         let key = plx_machine::machine::FocusKey { entry: self.entry, elem: *elem };
-        self.focused_item(Some(key), cx).is_some_and(crate::registry::item_has_menu)
+        self.focused_item(Some(key), cx).is_some_and(|m| crate::registry::item_has_menu(m, H::screen_inputs(cx).current_server))
     }
 
     /// The pill is part of the head's block: focusing it reveals the whole band.

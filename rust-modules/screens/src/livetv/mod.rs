@@ -262,7 +262,7 @@ impl LiveTvScreen {
             typed: String::new(),
             typed_at: 0,
             searched: false,
-            remembered: plx_plex::plex::session::peek().livetv_channel().to_owned(),
+            remembered: String::new(),
             seated: false,
             filter: Filter::All,
             on_strip: false,
@@ -738,7 +738,7 @@ impl LiveTvScreen {
         if face == Face::Studio {
             let rows = studio::rows(view, self.studio.made());
             let card = self.studio.focus(&rows);
-            let art = card.and_then(|c| studio_draw::card_art(&c, self.studio.schedule(&c, view), plx_base::wallclock::now_ms()));
+            let art = card.and_then(|c| studio_draw::card_art(&c, self.studio.schedule(&c, view), plx_base::wallclock::now_ms(), view.virtuals().server_raw()));
             match art {
                 Some((srv, path)) => {
                     let corners = plx_ui::tex::corners_on(srv, path, studio_draw::CARD_W as i32 * 2, studio_draw::CARD_H as i32 * 2, false);
@@ -798,6 +798,10 @@ impl<H: LiveTvLike> Machine<H> for LiveTvScreen {
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
         match ev {
             ScreenEvent::Mount => {
+                // The channel last tuned, as the host captured the session for this frame.
+                if !self.seated {
+                    H::screen_inputs(cx).session.livetv_channel().clone_into(&mut self.remembered);
+                }
                 Self::refresh(cx, fx);
                 self.reseat(fx);
                 Handled::Yes
@@ -1056,7 +1060,7 @@ mod tests {
     fn the_face_follows_the_store() {
         let mut s = LiveTvState::default();
         assert_eq!(Face::of(s.view(), false), Face::Setup, "no server: setup");
-        s.run(LiveTvCmd::Restore { origin: "192.0.2.20".into() }, 0);
+        s.run(LiveTvCmd::Restore { origin: "192.0.2.20".into() }, &plx_data::livetv::work::LiveTvInput::default(), 0);
         assert_eq!(Face::of(s.view(), false), Face::Loading, "a restored server loads at once");
         s.install_for_test("http://192.0.2.20:8000", Default::default(), 0);
         assert_eq!(Face::of(s.view(), false), Face::Guide);

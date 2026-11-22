@@ -210,15 +210,15 @@ const LIMIT: i64 = 10;
 
 /// **The blocking lookup** (a worker's): every query on every registered server until a rule
 /// matches, then — for an episode with known numbers — the show's episode list.
-pub fn lookup(want: &Want) -> Option<Hit> {
-    let servers: Vec<ServerId> = plx_plex::plex::server_ids().collect();
+pub fn lookup(reach: &dyn super::work::Reach, want: &Want) -> Option<Hit> {
+    let servers: Vec<ServerId> = reach.servers();
     let mut candidates: Vec<Candidate> = Vec::new();
     for query in want.queries() {
         if query.chars().count() < 2 {
             continue;
         }
         for &sid in &servers {
-            let Some(client) = plx_plex::plex::client_for(sid) else { continue };
+            let Some(client) = reach.client(sid) else { continue };
             let Some(mc) = client.search(&query, LIMIT, 0) else { continue };
             for hub in &mc.hub {
                 candidates.extend(hub.metadata.iter().map(|m| Candidate::from_metadata(sid, m)));
@@ -231,7 +231,7 @@ pub fn lookup(want: &Want) -> Option<Hit> {
     // The show is in the library but the search did not surface the episode: walk its episodes.
     if let (Want::Episode { season: Some(_), episode: Some(_), .. }, Some(show)) = (want, show_of(want, &candidates)) {
         let sid = show.sid?;
-        let leaves = plx_plex::plex::client_for(sid)?.all_leaves(&show.rk)?;
+        let leaves = reach.client(sid)?.all_leaves(&show.rk)?;
         let mut rows: Vec<Candidate> = leaves.metadata.iter().map(|m| Candidate::from_metadata(sid, m)).collect();
         // `allLeaves` rows of one show may omit the show title on some servers: it is implied.
         for r in &mut rows {
@@ -253,8 +253,9 @@ pub struct Scope {
 }
 
 impl Scope {
-    pub fn current() -> Scope {
-        Scope { roster: plx_plex::plex::server_roster_gen(), profile: plx_plex::plex::session::current_profile_key() }
+    /// The scope the app captured for this step.
+    pub fn of(input: &super::work::LiveTvInput) -> Scope {
+        Scope { roster: input.roster, profile: input.profile.clone() }
     }
 }
 
