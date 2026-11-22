@@ -83,5 +83,19 @@
   "livetv.studio.made_from": "De {title}",
   "livetv.studio.made_library": "De la teva biblioteca",
   "livetv.studio.genre_any": "Qualsevol gènere",
-  "livetv.studio.decade_any": "Qualsevol dècada"
+  "livetv.studio.decade_any": "Qualsevol dècada",
+  "livetv.studio.keep_tunarr": "Desa a Tunarr",
+  "livetv.studio.keep_here": "Desa en aquesta app",
+  "livetv.studio.in_tunarr": "A Tunarr",
+  "livetv.studio.kept_tunarr": "El canal {number} és a la guia de Tunarr",
+  "livetv.studio.kept_tunarr_missing": "El canal {number} és a la guia de Tunarr, sense {count} títols que Tunarr encara no ha escanejat",
+  "livetv.studio.tunarr_building": "Espera la vista prèvia i després desa-la a Tunarr",
+  "livetv.studio.tunarr_gap_style": "Tunarr alterna sèries i aquest canal té pel·lícules. Desa'l en aquesta app.",
+  "livetv.studio.tunarr_gap_shows": "Massa sèries perquè Tunarr les alterni. Desa'l en aquesta app.",
+  "livetv.studio.tunarr_gap_unwatched": "Tunarr no pot seguir el que has vist. Desa'l en aquesta app.",
+  "livetv.studio.tunarr_gap_recent": "Tunarr no pot limitar un canal a les novetats. Desa'l en aquesta app.",
+  "livetv.studio.tunarr_password": "Tunarr demana una contrasenya. Desa'l en aquesta app.",
+  "livetv.studio.tunarr_no_source": "Tunarr no té aquest servidor Plex. Afegeix-lo primer a Tunarr.",
+  "livetv.studio.tunarr_not_scanned": "Tunarr encara no ha escanejat aquests títols. Escaneja la biblioteca a Tunarr.",
+  "livetv.studio.tunarr_failed": "No s'ha pogut desar el canal a Tunarr."
 }

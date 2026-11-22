@@ -943,6 +943,23 @@ pub fn vchannel_dismissed_candidates() -> Vec<PathBuf> {
     v
 }
 
+/// Candidate locations of the record of the channels this television kept in Tunarr
+/// (`plx_data::livetv::tunarr_keep`): each channel's recipe and the Tunarr ids it was made of, so
+/// Reshuffle, Order and Delete can act on it. Same resolution as [`resume_place_candidates`].
+pub fn tunarr_kept_candidates() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if ENV_STEERABLE {
+        v.push(in_runtime_dir("tunarr-kept.json"));
+    }
+    let id = app_id();
+    v.extend([
+        PathBuf::from(format!("/media/developer/{id}-tunarr-kept.json")),
+        PathBuf::from(format!("/media/internal/.{id}-tunarr-kept.json")),
+        in_app_dir("tunarr-kept.json"),
+    ]);
+    v
+}
+
 /// Candidate locations of the retired **last place** bookmark (`coldstart`).
 ///
 /// Builds before 2026-09-01 wrote into these persistent locations. The current build only removes

@@ -282,3 +282,108 @@ fn an_option_only_offers_values_that_still_air_something() {
     assert_eq!(genre_choices(&cat, &seventies), ["Horror"]);
     assert_eq!(library_decades(&cat), [1970, 1980, 1990]);
 }
+
+fn kept(id: &str, number: u32) -> Kept {
+    Kept {
+        origin: "http://tunarr:8000".into(),
+        channel_id: id.into(),
+        number,
+        recipe: Recipe { name: format!("Tunarr {number}"), number, seed: 5, ..Default::default() },
+        programs: Vec::new(),
+        lists: Default::default(),
+        missing: 0,
+    }
+}
+
+/// A Tunarr server set up, idea `a`'s preview built as `token` from `progs`, and `channels` kept.
+fn tunarr_state(progs: Vec<Program>, recipe_of: impl FnOnce(&mut Recipe), channels: Vec<Kept>) -> (LiveTvState, Studio, u64) {
+    let mut s = state(&["a"], Vec::new());
+    let mut st = Studio::default();
+    let mut out = Vec::new();
+    st.tick(s.view(), 0, NOW, true, &mut out);
+    st.tick(s.view(), PREVIEW_DWELL_MS, NOW, true, &mut out);
+    let Some(Out::Store(VCmd::Preview { token, mut recipe })) = out.pop() else { panic!("{out:?}") };
+    recipe_of(&mut recipe);
+    if let Some(s_) = rows(s.view(), None)[ROW_SUGGESTED][0].suggestion().cloned() {
+        st.drafts.insert(s_.id, recipe.clone());
+    }
+    let schedule = Schedule::new(progs, recipe.style, recipe.seed, recipe.epoch_ms);
+    let preview = plx_data::vchannel::channels::Preview { token, recipe, schedule: Some(schedule), failed: false };
+    s.install_tunarr_for_test("http://tunarr:8000", Some(preview), channels);
+    (s, st, token)
+}
+
+#[test]
+fn with_tunarr_set_up_a_draft_offers_keep_in_tunarr_first_and_keep_here_beside_it() {
+    let (s, mut st, _) = tunarr_state(vec![programme("1", "Frasier")], |_| {}, Vec::new());
+    let r = rows(s.view(), None);
+    st.tick(s.view(), PREVIEW_DWELL_MS + 1, NOW, true, &mut Vec::new());
+    assert_eq!(&st.acts(&r[ROW_SUGGESTED][0])[..2], &[Act::KeepTunarr, Act::Keep]);
+    assert!(!acts(&r[ROW_SUGGESTED][0]).contains(&Act::KeepTunarr), "without Tunarr, no Tunarr action");
+    let plain = state(&["a"], Vec::new());
+    let mut st2 = Studio::default();
+    st2.tick(plain.view(), 0, NOW, true, &mut Vec::new());
+    assert!(!st2.acts(&rows(plain.view(), None)[ROW_SUGGESTED][0]).contains(&Act::KeepTunarr));
+}
+
+#[test]
+fn keep_in_tunarr_sends_the_previewed_draft_once() {
+    let (s, mut st, token) = tunarr_state(vec![programme("1", "Frasier")], |_| {}, Vec::new());
+    let mut out = Vec::new();
+    st.tick(s.view(), PREVIEW_DWELL_MS + 1, NOW, true, &mut out);
+    st.zone = Zone::Actions;
+    st.act = 0;
+    st.activate(s.view(), NOW, &mut out);
+    assert!(matches!(out.pop(), Some(Out::Tunarr(TunarrCmd::Keep { token: t, .. })) if t == token), "{out:?}");
+    st.activate(s.view(), NOW, &mut out);
+    assert!(out.is_empty(), "one Keep in Tunarr in flight");
+}
+
+#[test]
+fn what_tunarr_cannot_carry_is_said_and_nothing_is_sent() {
+    let progs = vec![programme("1", "Frasier"), Program { rk: "f".into(), title: "Film".into(), dur_ms: 90 * 60_000, ..Default::default() }];
+    let (s, mut st, _) = tunarr_state(progs, |r| r.style = Style::RoundRobin, Vec::new());
+    let mut out = Vec::new();
+    st.tick(s.view(), PREVIEW_DWELL_MS + 1, NOW, true, &mut out);
+    st.zone = Zone::Actions;
+    st.act = 0;
+    st.activate(s.view(), NOW, &mut out);
+    assert!(out.is_empty(), "{out:?}");
+    assert_eq!(st.toast.as_ref().map(|t| t.0.as_str()), Some(gap_text(Gap::StyleNeedsShows(Style::RoundRobin))));
+    assert!(st.keeping_tunarr.is_none());
+    // Keep in this app is still there, beside it.
+    assert_eq!(st.acts(&rows(s.view(), None)[ROW_SUGGESTED][0])[1], Act::Keep);
+}
+
+#[test]
+fn a_channel_kept_in_tunarr_is_a_card_whose_actions_write_to_tunarr() {
+    let (s, mut st, _) = tunarr_state(vec![programme("1", "Frasier")], |_| {}, vec![kept("ch-9", 909)]);
+    let rows_ = rows(s.view(), None);
+    assert_eq!(rows_[ROW_YOURS].iter().map(|c| c.id()).collect::<Vec<_>>(), ["tn:ch-9"]);
+    let mut out = Vec::new();
+    st.tick(s.view(), 1, NOW, false, &mut out);
+    st.row = ROW_YOURS;
+    st.zone = Zone::Actions;
+    st.act = 0;
+    st.activate(s.view(), NOW, &mut out);
+    assert_eq!(out.pop(), Some(Out::Tune("909".into())));
+    st.act = 1;
+    st.activate(s.view(), NOW, &mut out);
+    assert!(matches!(out.pop(), Some(Out::Tunarr(TunarrCmd::Reshuffle { ref channel_id, seed })) if channel_id == "ch-9" && seed != 5));
+    st.act = 2;
+    st.activate(s.view(), NOW, &mut out);
+    assert!(matches!(out.pop(), Some(Out::Tunarr(TunarrCmd::Reorder { ref channel_id, style: Style::RoundRobin })) if channel_id == "ch-9"));
+    st.act = 3;
+    st.activate(s.view(), NOW, &mut out);
+    assert!(out.is_empty() && st.confirm_delete.as_deref() == Some("tn:ch-9"), "the first press asks");
+    st.activate(s.view(), NOW, &mut out);
+    assert_eq!(out.pop(), Some(Out::Tunarr(TunarrCmd::Delete { channel_id: "ch-9".into() })));
+}
+
+#[test]
+fn every_keep_error_has_words() {
+    for e in [KeepError::NeedsPassword, KeepError::NoMediaSource, KeepError::NothingInTunarr, KeepError::Empty, KeepError::Failed, KeepError::Gaps(vec![Gap::UnwatchedOnly])] {
+        assert!(!keep_error_text(&e).is_empty(), "{e:?}");
+    }
+    assert_eq!(keep_error_text(&KeepError::Gaps(vec![Gap::AddedRecently])), gap_text(Gap::AddedRecently));
+}

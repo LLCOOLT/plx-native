@@ -84,5 +84,19 @@
   "livetv.studio.made_from": "З «{title}»",
   "livetv.studio.made_library": "З вашай бібліятэкі",
   "livetv.studio.genre_any": "Любы жанр",
-  "livetv.studio.decade_any": "Любое дзесяцігоддзе"
+  "livetv.studio.decade_any": "Любое дзесяцігоддзе",
+  "livetv.studio.keep_tunarr": "Захаваць у Tunarr",
+  "livetv.studio.keep_here": "Захаваць у праграме",
+  "livetv.studio.in_tunarr": "У Tunarr",
+  "livetv.studio.kept_tunarr": "Канал {number} у праграме перадач Tunarr",
+  "livetv.studio.kept_tunarr_missing": "Канал {number} у праграме перадач Tunarr, без {count} назваў, якія Tunarr яшчэ не прасканаваў",
+  "livetv.studio.tunarr_building": "Пачакайце папярэдні прагляд, потым захавайце ў Tunarr",
+  "livetv.studio.tunarr_gap_style": "Tunarr чаргуе серыялы, а ў гэтым канале ёсць фільмы. Захавайце яго ў праграме.",
+  "livetv.studio.tunarr_gap_shows": "Занадта шмат серыялаў, каб Tunarr іх чаргаваў. Захавайце яго ў праграме.",
+  "livetv.studio.tunarr_gap_unwatched": "Tunarr не ведае, што вы ўжо глядзелі. Захавайце яго ў праграме.",
+  "livetv.studio.tunarr_gap_recent": "Tunarr не можа абмежаваць канал нядаўна дададзеным. Захавайце яго ў праграме.",
+  "livetv.studio.tunarr_password": "Tunarr патрабуе пароль. Захавайце яго ў праграме.",
+  "livetv.studio.tunarr_no_source": "У Tunarr няма гэтага сервера Plex. Спачатку дадайце яго ў Tunarr.",
+  "livetv.studio.tunarr_not_scanned": "Tunarr яшчэ не прасканаваў гэтыя назвы. Прасканіруйце бібліятэку ў Tunarr.",
+  "livetv.studio.tunarr_failed": "Не ўдалося захаваць канал у Tunarr."
 }

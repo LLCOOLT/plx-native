@@ -358,5 +358,68 @@
   "livetv.studio.decade_any": {
     "value": "Any Decade",
     "description": "Live TV channel option: no decade limit"
+  },
+  "livetv.studio.keep_tunarr": {
+    "value": "Keep in Tunarr",
+    "description": "Live TV channel studio: button that keeps the previewed channel as a channel in the viewer's Tunarr server, so every app Tunarr serves shows it. Tunarr is a product name."
+  },
+  "livetv.studio.keep_here": {
+    "value": "Keep in This App",
+    "description": "Live TV channel studio: button that keeps the previewed channel in this app (saved on the Plex server), shown beside Keep in Tunarr when a Tunarr server is set up."
+  },
+  "livetv.studio.in_tunarr": {
+    "value": "In Tunarr",
+    "description": "Live TV channel studio: line on a channel card kept in the Tunarr server rather than in this app. Tunarr is a product name."
+  },
+  "livetv.studio.kept_tunarr": {
+    "value": "Channel {number} is in Tunarr’s guide",
+    "description": "Live TV channel studio: confirmation after a channel was kept in Tunarr. {number} is its channel number.",
+    "args": {
+      "number": "str"
+    }
+  },
+  "livetv.studio.kept_tunarr_missing": {
+    "value": "Channel {number} is in Tunarr’s guide, without {count} titles Tunarr hasn’t scanned",
+    "description": "Live TV channel studio: confirmation after a channel was kept in Tunarr when some of its titles are not in Tunarr's library yet and were left out. {number} is the channel number, {count} how many titles were left out.",
+    "args": {
+      "number": "str",
+      "count": "str"
+    }
+  },
+  "livetv.studio.tunarr_building": {
+    "value": "Wait for the preview, then keep it in Tunarr",
+    "description": "Live TV channel studio: Keep in Tunarr was pressed before the channel's preview was ready."
+  },
+  "livetv.studio.tunarr_gap_style": {
+    "value": "Tunarr rotates shows, and this channel has films. Keep it in this app.",
+    "description": "Live TV channel studio: the channel's order (rotation or blocks) cannot be made in Tunarr because the channel includes films."
+  },
+  "livetv.studio.tunarr_gap_shows": {
+    "value": "Too many shows for Tunarr to rotate. Keep it in this app.",
+    "description": "Live TV channel studio: the channel rotates more shows than a Tunarr channel can hold slots for."
+  },
+  "livetv.studio.tunarr_gap_unwatched": {
+    "value": "Tunarr can’t follow what you’ve watched. Keep it in this app.",
+    "description": "Live TV channel studio: the channel shows only unwatched titles, which Tunarr cannot keep track of."
+  },
+  "livetv.studio.tunarr_gap_recent": {
+    "value": "Tunarr can’t keep a channel to recent additions. Keep it in this app.",
+    "description": "Live TV channel studio: the channel shows only recently added titles, which a Tunarr channel cannot follow."
+  },
+  "livetv.studio.tunarr_password": {
+    "value": "Tunarr asks for a password. Keep it in this app.",
+    "description": "Live TV channel studio: the Tunarr server requires a username and password, which this app cannot send."
+  },
+  "livetv.studio.tunarr_no_source": {
+    "value": "Tunarr doesn’t have this Plex server. Add it in Tunarr first.",
+    "description": "Live TV channel studio: the Tunarr server has no media source for the Plex server the channel is drawn from."
+  },
+  "livetv.studio.tunarr_not_scanned": {
+    "value": "Tunarr hasn’t scanned these titles yet. Scan the library in Tunarr.",
+    "description": "Live TV channel studio: none of the channel's titles are in the Tunarr server's library yet."
+  },
+  "livetv.studio.tunarr_failed": {
+    "value": "Couldn’t save the channel to Tunarr.",
+    "description": "Live TV channel studio: the Tunarr server could not be reached or refused the change. Tunarr is a product name."
   }
 }

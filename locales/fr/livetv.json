@@ -83,5 +83,19 @@
   "livetv.studio.made_from": "D’après {title}",
   "livetv.studio.made_library": "D’après votre bibliothèque",
   "livetv.studio.genre_any": "Tous genres",
-  "livetv.studio.decade_any": "Toutes décennies"
+  "livetv.studio.decade_any": "Toutes décennies",
+  "livetv.studio.keep_tunarr": "Garder dans Tunarr",
+  "livetv.studio.keep_here": "Garder dans cette app",
+  "livetv.studio.in_tunarr": "Dans Tunarr",
+  "livetv.studio.kept_tunarr": "La chaîne {number} est dans le guide de Tunarr",
+  "livetv.studio.kept_tunarr_missing": "La chaîne {number} est dans le guide de Tunarr, sans {count} titres que Tunarr n’a pas encore analysés",
+  "livetv.studio.tunarr_building": "Attendez l’aperçu, puis gardez-la dans Tunarr",
+  "livetv.studio.tunarr_gap_style": "Tunarr alterne des séries, et cette chaîne contient des films. Gardez-la dans cette app.",
+  "livetv.studio.tunarr_gap_shows": "Trop de séries pour que Tunarr les alterne. Gardez-la dans cette app.",
+  "livetv.studio.tunarr_gap_unwatched": "Tunarr ne peut pas suivre ce que vous avez regardé. Gardez-la dans cette app.",
+  "livetv.studio.tunarr_gap_recent": "Tunarr ne peut pas limiter une chaîne aux ajouts récents. Gardez-la dans cette app.",
+  "livetv.studio.tunarr_password": "Tunarr demande un mot de passe. Gardez-la dans cette app.",
+  "livetv.studio.tunarr_no_source": "Tunarr ne connaît pas ce serveur Plex. Ajoutez-le d’abord dans Tunarr.",
+  "livetv.studio.tunarr_not_scanned": "Tunarr n’a pas encore analysé ces titres. Analysez la bibliothèque dans Tunarr.",
+  "livetv.studio.tunarr_failed": "Impossible d’enregistrer la chaîne dans Tunarr."
 }

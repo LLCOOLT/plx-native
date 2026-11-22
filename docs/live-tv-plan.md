@@ -313,3 +313,26 @@ instead.
   `.ts` stream unchanged. Over flex, Tunarr is asked again when the flex ends (at least 5 s later).
 - **Not verified** against a real Tunarr or on a television yet; host tests only.
 
+
+## Keeping a channel in Tunarr
+
+With a Tunarr server set up, the channel studio's drafts (suggestions, *Surprise me*, *Make a
+Channel*, *New Channel*) lead with **Keep in Tunarr**, beside **Keep in This App**
+(`rust-modules/data/src/livetv/tunarr_keep.rs`, `screens/src/livetv/studio.rs`). The previewed
+programmes are looked up in Tunarr by Plex ratingKey (`POST /api/programming/batch/lookup`, after
+`GET /api/media-sources` picks the source whose `clientIdentifier` is the Plex server; only `id`,
+`type` and `clientIdentifier` are read), and the channel is created with Tunarr's own defaults
+(`GET /api/transcode_configs`, `GET /api/channels` for a free number, `POST /api/channels`), then
+programmed as random slots with `rebuildEachCycle` on and a 7-day cycle
+(`POST /api/channels/{id}/programming`). A show or a season with no other rule becomes `show`
+slots (new episodes join); anything else a Tunarr custom show (`POST /api/custom-shows`), one per
+show for Rotation and Blocks. Rotation or Blocks over films, more than 48 shows to rotate, "only
+unwatched" and "added recently" cannot be carried, and the studio says so on the press instead of
+keeping something different from the preview. Titles Tunarr has not scanned are left out and
+counted in the confirmation.
+
+The television keeps the record of what it kept (`paths::tunarr_kept_candidates`, removed by
+Delete all data): Reshuffle and Order rewrite the channel's programming, Delete removes the channel
+and its custom shows. Another television sees the channel in Tunarr's guide but cannot manage it.
+A Tunarr with basic auth set answers 401, and the studio offers keeping the channel in this app.
+None of this has been run against a real Tunarr.

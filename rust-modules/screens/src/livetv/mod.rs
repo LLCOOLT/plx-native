@@ -295,6 +295,7 @@ impl LiveTvScreen {
         for out in outs {
             match out {
                 studio::Out::Store(cmd) => Self::store(LiveTvCmd::Virtual(cmd), fx),
+                studio::Out::Tunarr(cmd) => Self::store(LiveTvCmd::Tunarr(cmd), fx),
                 studio::Out::Tune(number) => {
                     if let Some(index) = view.lineup().index_of_number(&number) {
                         Self::ask(LiveTvReq::Tune { index }, fx);

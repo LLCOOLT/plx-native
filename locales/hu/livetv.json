@@ -82,5 +82,19 @@
   "livetv.studio.made_from": "Forrás: {title}",
   "livetv.studio.made_library": "A könyvtáradból",
   "livetv.studio.genre_any": "Bármilyen műfaj",
-  "livetv.studio.decade_any": "Bármilyen évtized"
+  "livetv.studio.decade_any": "Bármilyen évtized",
+  "livetv.studio.keep_tunarr": "Mentés a Tunarrba",
+  "livetv.studio.keep_here": "Mentés ebben az appban",
+  "livetv.studio.in_tunarr": "A Tunarrban",
+  "livetv.studio.kept_tunarr": "A(z) {number}. csatorna a Tunarr műsorújságjában van",
+  "livetv.studio.kept_tunarr_missing": "A(z) {number}. csatorna a Tunarr műsorújságjában van, {count} cím nélkül, amelyet a Tunarr még nem vizsgált be",
+  "livetv.studio.tunarr_building": "Várd meg az előnézetet, aztán mentsd a Tunarrba",
+  "livetv.studio.tunarr_gap_style": "A Tunarr sorozatokat váltogat, ezen a csatornán pedig filmek vannak. Mentsd ebben az appban.",
+  "livetv.studio.tunarr_gap_shows": "Túl sok sorozat a Tunarr számára. Mentsd ebben az appban.",
+  "livetv.studio.tunarr_gap_unwatched": "A Tunarr nem tudja követni, mit néztél meg. Mentsd ebben az appban.",
+  "livetv.studio.tunarr_gap_recent": "A Tunarr nem tud egy csatornát a friss újdonságokra korlátozni. Mentsd ebben az appban.",
+  "livetv.studio.tunarr_password": "A Tunarr jelszót kér. Mentsd ebben az appban.",
+  "livetv.studio.tunarr_no_source": "A Tunarr nem ismeri ezt a Plex-szervert. Először add hozzá a Tunarrban.",
+  "livetv.studio.tunarr_not_scanned": "A Tunarr még nem vizsgálta be ezeket a címeket. Vizsgáld be a könyvtárat a Tunarrban.",
+  "livetv.studio.tunarr_failed": "Nem sikerült a csatornát a Tunarrba menteni."
 }

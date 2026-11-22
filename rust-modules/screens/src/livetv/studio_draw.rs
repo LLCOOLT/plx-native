@@ -66,11 +66,15 @@ fn act_label(st: &Studio, act: Act, card: &Card<'_>) -> String {
     use plx_os::i18n::msg;
     match act {
         Act::Keep if st.keeping.is_some() => msg::livetv_studio_keeping().to_owned(),
+        Act::Keep if st.acts(card).contains(&Act::KeepTunarr) => msg::livetv_studio_keep_here().to_owned(),
         Act::Keep => msg::livetv_studio_keep().to_owned(),
+        Act::KeepTunarr if st.keeping_tunarr.is_some() => msg::livetv_studio_keeping().to_owned(),
+        Act::KeepTunarr => msg::livetv_studio_keep_tunarr().to_owned(),
         Act::Reshuffle => msg::livetv_studio_reshuffle().to_owned(),
         Act::Order => {
             let style = match card {
                 Card::Channel(c) => c.recipe.style,
+                Card::Kept(k) => k.recipe.style,
                 _ => card.suggestion().and_then(|s| st.draft_of(s)).map(|r| r.style).or(card.suggestion().map(|s| s.style)).unwrap_or_default(),
             };
             msg::livetv_studio_order(studio::style_name(style))
@@ -80,6 +84,8 @@ fn act_label(st: &Studio, act: Act, card: &Card<'_>) -> String {
         Act::Surprise => msg::livetv_studio_surprise().to_owned(),
         Act::Watch => msg::livetv_studio_watch().to_owned(),
         Act::Delete if matches!(card, Card::Channel(c) if st.confirm_delete.as_deref() == Some(c.playlist.as_str())) =>
+            msg::livetv_studio_delete_confirm().to_owned(),
+        Act::Delete if matches!(card, Card::Kept(_)) && st.confirm_delete.as_deref() == Some(card.id().as_str()) =>
             msg::livetv_studio_delete_confirm().to_owned(),
         Act::Delete => msg::livetv_studio_delete().to_owned(),
         Act::Edit => msg::livetv_studio_edit().to_owned(),
@@ -121,7 +127,7 @@ fn act_row(st: &Studio, card: &Card<'_>, yours: bool, measure: &dyn plx_machine:
                 .collect();
         }
     }
-    studio::acts(card).into_iter().map(|a| place(act_label(st, a, card), false)).collect()
+    st.acts(card).into_iter().map(|a| place(act_label(st, a, card), false)).collect()
 }
 
 
@@ -232,6 +238,7 @@ impl LiveTvScreen {
             Card::Surprise(Some(s)) => (msg::livetv_studio_surprise().to_owned(), &s.name, &s.why, self.studio.estimate_of(s).map_or_else(|| s.tagline.clone(), studio::estimate_line)),
             Card::Surprise(None) => (String::new(), msg::livetv_studio_surprise(), msg::livetv_studio_surprise_body(), String::new()),
             Card::Channel(c) => (msg::livetv_studio_number(&c.number()), &c.recipe.name, &c.recipe.tagline, String::new()),
+            Card::Kept(k) => (msg::livetv_studio_number(&k.number.to_string()), &k.recipe.name, &k.recipe.tagline, msg::livetv_studio_in_tunarr().to_owned()),
         };
         let cap = measure.line_h(theme::size::CAPTION);
         if !over.is_empty() {
@@ -253,7 +260,8 @@ impl LiveTvScreen {
             y += label_h;
         }
         y += theme::space::SM;
-        if matches!(card, Card::Surprise(None) | Card::Create) {
+        // A channel kept in Tunarr airs on Tunarr's clock: the guide shows what is on it.
+        if matches!(card, Card::Surprise(None) | Card::Create | Card::Kept(_)) {
             return;
         }
         let Some(s) = schedule.filter(|s| !s.is_empty()) else {
@@ -320,14 +328,19 @@ impl LiveTvScreen {
             Card::Surprise(Some(s)) => &s.name,
             Card::Surprise(None) => plx_os::i18n::msg::livetv_studio_surprise(),
             Card::Channel(c) => &c.recipe.name,
+            Card::Kept(k) => &k.recipe.name,
             Card::Create => plx_os::i18n::msg::livetv_studio_new_channel(),
         };
         let pad = theme::space::SM;
         let lh = measure.line_h(theme::size::LABEL);
         line(p, measure, name, theme::size::LABEL, theme::TEXT_PRIMARY, true,
             Rect::new(r.x + pad, r.y + r.h - pad - lh, r.w - 2.0 * pad, lh), HAlign::Left);
-        if let Card::Channel(c) = card {
-            let num = c.number();
+        let number = match card {
+            Card::Channel(c) => Some(c.number()),
+            Card::Kept(k) => Some(k.number.to_string()),
+            _ => None,
+        };
+        if let Some(num) = number {
             let w = measure.width_str(&num, theme::size::MICRO, true) + 2.0 * theme::space::XS;
             let badge = Rect::new(r.x + theme::space::XS, r.y + theme::space::XS, w, measure.line_h(theme::size::MICRO));
             p.rect(badge, theme::space::XS, theme::scrim(0.7), theme::scrim(0.7), 0.0);

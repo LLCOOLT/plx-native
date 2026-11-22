@@ -28,10 +28,18 @@
 //! **Keep** writes the draft as a channel (`VCmd::Keep`); the store reports the outcome
 //! (`Channels::done`), and the studio confirms it and moves focus to the new channel. Delete asks
 //! for a second press. Nothing here writes view state: a channel only reads the library.
+//!
+//! **Keep in Tunarr.** With a Tunarr server set up, a draft's actions lead with *Keep in Tunarr*
+//! (and *Keep* reads *Keep in This App*): the previewed programmes become a real Tunarr channel
+//! (`plx_data::livetv::tunarr_keep`, `TunarrCmd::Keep`), in Tunarr's guide for every app it
+//! serves. What Tunarr's programming cannot carry ([`tunarr_keep::gaps`]) is said on the press
+//! instead, and the draft stays to be kept in this app. Channels kept in Tunarr from here are
+//! cards of *Your Channels* too ([`Card::Kept`]): Watch, Reshuffle, Order and Delete act on Tunarr.
 
 use std::collections::HashMap;
 
 use plx_data::livetv::suggested::SURPRISE_ID;
+use plx_data::livetv::tunarr_keep::{self, Gap, KeepError, Kept, TunarrCmd, TunarrDone};
 use plx_data::livetv::LiveTvView;
 use plx_data::vchannel::channels::{VChannel, VCmd, WriteDone};
 use plx_data::vchannel::catalog::Estimate;
@@ -57,6 +65,8 @@ pub enum Card<'a> {
     /// *Surprise me*, with the channel it last drew.
     Surprise(Option<&'a Suggestion>),
     Channel(&'a VChannel),
+    /// A channel this television kept in the Tunarr server.
+    Kept(&'a Kept),
     /// *New Channel*: OK starts a channel built from the library by the viewer's own options.
     Create,
 }
@@ -68,6 +78,7 @@ impl<'a> Card<'a> {
             Card::Idea(s) => s.id.clone(),
             Card::Surprise(_) => SURPRISE_ID.to_owned(),
             Card::Channel(c) => format!("pl:{}", c.playlist),
+            Card::Kept(k) => format!("tn:{}", k.channel_id),
             Card::Create => CREATE_ID.to_owned(),
         }
     }
@@ -82,7 +93,7 @@ impl<'a> Card<'a> {
         match self {
             Card::Idea(s) => Some(s),
             Card::Surprise(s) => *s,
-            Card::Channel(_) | Card::Create => None,
+            Card::Channel(_) | Card::Kept(_) | Card::Create => None,
         }
     }
 }
@@ -97,6 +108,8 @@ pub const MADE_PREFIX: &str = "made:";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Act {
     Keep,
+    /// Keep the draft as a channel in the Tunarr server.
+    KeepTunarr,
     Reshuffle,
     Order,
     NotInterested,
@@ -267,15 +280,55 @@ pub fn estimate_line(e: &Estimate) -> String {
     parts.join(" \u{b7} ")
 }
 
-/// The actions of `card`, left to right.
+/// The actions of `card`, left to right, with no Tunarr server set up.
 pub fn acts(card: &Card<'_>) -> Vec<Act> {
+    acts_with(card, false)
+}
+
+/// The actions of `card`, left to right; `tunarr`: a Tunarr server is set up, so a draft can be
+/// kept there (first) or in this app.
+pub fn acts_with(card: &Card<'_>, tunarr: bool) -> Vec<Act> {
+    let mut list = acts_here(card);
+    if tunarr && card.suggestion().is_some() {
+        if let Some(i) = list.iter().position(|a| *a == Act::Keep) {
+            list.insert(i, Act::KeepTunarr);
+        }
+    }
+    list
+}
+
+fn acts_here(card: &Card<'_>) -> Vec<Act> {
     match card {
         c @ Card::Idea(_) if c.is_made() => vec![Act::Keep, Act::Reshuffle, Act::Order, Act::Edit, Act::Discard],
         Card::Idea(_) => vec![Act::Keep, Act::Reshuffle, Act::Order, Act::Edit, Act::NotInterested],
         Card::Create => Vec::new(),
         Card::Surprise(None) => vec![Act::Surprise],
         Card::Surprise(Some(_)) => vec![Act::Keep, Act::Surprise, Act::Reshuffle, Act::Order, Act::Edit],
-        Card::Channel(_) => vec![Act::Watch, Act::Reshuffle, Act::Order, Act::Delete],
+        Card::Channel(_) | Card::Kept(_) => vec![Act::Watch, Act::Reshuffle, Act::Order, Act::Delete],
+    }
+}
+
+/// What the studio says when a press of *Keep in Tunarr* cannot make the channel.
+pub fn gap_text(g: Gap) -> &'static str {
+    use plx_os::i18n::msg;
+    match g {
+        Gap::StyleNeedsShows(_) => msg::livetv_studio_tunarr_gap_style(),
+        Gap::TooManyShows => msg::livetv_studio_tunarr_gap_shows(),
+        Gap::UnwatchedOnly => msg::livetv_studio_tunarr_gap_unwatched(),
+        Gap::AddedRecently => msg::livetv_studio_tunarr_gap_recent(),
+    }
+}
+
+/// What the studio says when Tunarr did not take a write.
+pub fn keep_error_text(e: &KeepError) -> String {
+    use plx_os::i18n::msg;
+    match e {
+        KeepError::Gaps(g) => g.first().map_or(msg::livetv_studio_tunarr_failed(), |g| gap_text(*g)).to_owned(),
+        KeepError::NeedsPassword => msg::livetv_studio_tunarr_password().to_owned(),
+        KeepError::NoMediaSource => msg::livetv_studio_tunarr_no_source().to_owned(),
+        KeepError::NothingInTunarr => msg::livetv_studio_tunarr_not_scanned().to_owned(),
+        KeepError::Empty => msg::livetv_studio_tunarr_building().to_owned(),
+        KeepError::Failed => msg::livetv_studio_tunarr_failed().to_owned(),
     }
 }
 
@@ -307,6 +360,7 @@ pub fn rows<'a>(view: LiveTvView<'a>, made: Option<&'a Suggestion>) -> [Vec<Card
         suggested.push(Card::Surprise(v.surprise()));
     }
     let mut yours: Vec<Card<'a>> = v.channels().iter().map(Card::Channel).collect();
+    yours.extend(view.tunarr_kept().into_iter().map(Card::Kept));
     if v.catalog().is_some() {
         yours.push(Card::Create);
     }
@@ -351,6 +405,8 @@ pub enum Zone {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Out {
     Store(VCmd),
+    /// A write to the Tunarr server (`LiveTvCmd::Tunarr`).
+    Tunarr(TunarrCmd),
     /// Tune the lineup channel with this number.
     Tune(String),
     /// Leave the studio (to the guide, or off the page when the studio is the page).
@@ -396,6 +452,14 @@ pub struct Studio {
     made_count: u64,
     /// The Keep in flight is of the channel being made (it leaves the row once kept).
     keeping_made: bool,
+    /// A Keep in Tunarr is in flight, with its token.
+    pub keeping_tunarr: Option<u64>,
+    /// How many Tunarr outcomes this page has read (`Keeper::done`).
+    seen_tunarr: u64,
+    /// A Tunarr server is set up (read from the view on every tick and key).
+    tunarr: bool,
+    /// The tick clock at the last tick, for a toast a press raises.
+    now_ms: u32,
 }
 
 impl Default for Studio {
@@ -420,6 +484,10 @@ impl Default for Studio {
             made: None,
             made_count: 0,
             keeping_made: false,
+            keeping_tunarr: None,
+            seen_tunarr: 0,
+            tunarr: false,
+            now_ms: 0,
         }
     }
 }
@@ -431,6 +499,13 @@ impl Studio {
         self.zone = Zone::Cards;
         self.want = want.filter(|w| !w.is_empty());
         self.seen_done = view.virtuals().done().0;
+        self.seen_tunarr = view.keeper().done().0;
+        self.tunarr = view.tunarr_configured();
+    }
+
+    /// The focused card's actions, as this page offers them.
+    pub fn acts(&self, card: &Card<'_>) -> Vec<Act> {
+        acts_with(card, self.tunarr)
     }
 
     /// The channel being made, if any.
@@ -453,6 +528,8 @@ impl Studio {
         self.zone = Zone::Cards;
         self.want = Some(id);
         self.seen_done = view.virtuals().done().0;
+        self.seen_tunarr = view.keeper().done().0;
+        self.tunarr = view.tunarr_configured();
     }
 
     /// *New Channel*: a channel built from the whole library, its options open at once.
@@ -508,7 +585,7 @@ impl Studio {
             }
         }
         if let Some(card) = self.focus(rows) {
-            self.act = self.act.min(acts(&card).len().saturating_sub(1));
+            self.act = self.act.min(self.acts(&card).len().saturating_sub(1));
         } else {
             self.zone = Zone::Cards;
         }
@@ -559,7 +636,7 @@ impl Studio {
             }
             EditItem::Done => {
                 self.zone = Zone::Actions;
-                self.act = acts(&card).iter().position(|a| *a == Act::Edit).unwrap_or(0);
+                self.act = self.acts(&card).iter().position(|a| *a == Act::Edit).unwrap_or(0);
                 return;
             }
         }
@@ -582,6 +659,7 @@ impl Studio {
     pub fn schedule<'a>(&self, card: &Card<'a>, view: LiveTvView<'a>) -> Option<&'a Schedule> {
         match card {
             Card::Channel(c) => c.schedule.as_ref(),
+            Card::Kept(_) => None,
             _ => {
                 let s = card.suggestion()?;
                 let (id, token) = self.previewed.as_ref()?;
@@ -603,6 +681,39 @@ impl Studio {
     /// focus has rested on a suggestion whose draft has none.
     pub fn tick(&mut self, view: LiveTvView<'_>, now_ms: u32, wall_ms: i64, focused: bool, out: &mut Vec<Out>) -> bool {
         let mut changed = false;
+        self.now_ms = now_ms;
+        self.tunarr = view.tunarr_configured();
+        let keeper = view.keeper();
+        for done in keeper.done_since(self.seen_tunarr) {
+            match done {
+                TunarrDone::Kept { token, channel_id, number, missing } if self.keeping_tunarr == Some(*token) => {
+                    self.keeping_tunarr = None;
+                    if self.keeping_made {
+                        self.drop_made();
+                        self.keeping_made = false;
+                    }
+                    let n = number.to_string();
+                    let text = if *missing > 0 {
+                        plx_os::i18n::msg::livetv_studio_kept_tunarr_missing(&n, &missing.to_string())
+                    } else {
+                        plx_os::i18n::msg::livetv_studio_kept_tunarr(&n)
+                    };
+                    self.toast = Some((text, now_ms));
+                    self.want = Some(format!("tn:{channel_id}"));
+                    self.zone = Zone::Cards;
+                    changed = true;
+                }
+                TunarrDone::Failed { token, error } if self.keeping_tunarr == Some(*token) || *token == 0 => {
+                    if self.keeping_tunarr == Some(*token) {
+                        self.keeping_tunarr = None;
+                    }
+                    self.toast = Some((keep_error_text(error), now_ms));
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+        self.seen_tunarr = keeper.done().0;
         let v = view.virtuals();
         for done in v.done_since(self.seen_done) {
             match done {
@@ -678,7 +789,8 @@ impl Studio {
         let made = self.made.clone();
         let rows = rows(view, made.as_ref());
         let Some(card) = self.focus(&rows) else { return };
-        let list = acts(&card);
+        self.tunarr = view.tunarr_configured();
+        let list = self.acts(&card);
         let Some(act) = list.get(self.act.min(list.len().saturating_sub(1))).copied() else { return };
         if act != Act::Delete {
             self.confirm_delete = None;
@@ -703,6 +815,48 @@ impl Studio {
                 self.keeping = Some(token);
                 self.keeping_made = s.id.starts_with(MADE_PREFIX);
                 out.push(Out::Store(VCmd::Keep { token, recipe }));
+            }
+            (Act::KeepTunarr, card) => {
+                let Some(s) = card.suggestion().cloned() else { return };
+                if self.keeping_tunarr.is_some() {
+                    return;
+                }
+                // Tunarr is made of the programmes the preview built: without them there is
+                // nothing to look up yet.
+                let built = match (&self.previewed, view.virtuals().preview()) {
+                    (Some((id, token)), Some(p)) if *id == s.id && p.token == *token => p.schedule.as_ref().map(|sch| (*token, sch)),
+                    _ => None,
+                };
+                let Some((token, sch)) = built else {
+                    self.toast = Some((plx_os::i18n::msg::livetv_studio_tunarr_building().to_owned(), self.now_ms));
+                    return;
+                };
+                let recipe = self.draft(&s, wall_ms).clone();
+                if let Some(g) = tunarr_keep::gaps(&recipe, sch.programs()).first() {
+                    self.toast = Some((gap_text(*g).to_owned(), self.now_ms));
+                    return;
+                }
+                self.keeping_tunarr = Some(token);
+                self.keeping_made = s.id.starts_with(MADE_PREFIX);
+                out.push(Out::Tunarr(TunarrCmd::Keep { token, recipe }));
+            }
+            (Act::Watch, Card::Kept(k)) => out.push(Out::Tune(k.number.to_string())),
+            (Act::Reshuffle, Card::Kept(k)) => {
+                let seed = fresh_seed(None, k.recipe.seed, wall_ms);
+                out.push(Out::Tunarr(TunarrCmd::Reshuffle { channel_id: k.channel_id.clone(), seed }));
+            }
+            (Act::Order, Card::Kept(k)) => {
+                out.push(Out::Tunarr(TunarrCmd::Reorder { channel_id: k.channel_id.clone(), style: next_style(k.recipe.style) }));
+            }
+            (Act::Delete, Card::Kept(k)) => {
+                let id = format!("tn:{}", k.channel_id);
+                if self.confirm_delete.as_deref() == Some(id.as_str()) {
+                    self.confirm_delete = None;
+                    self.zone = Zone::Cards;
+                    out.push(Out::Tunarr(TunarrCmd::Delete { channel_id: k.channel_id.clone() }));
+                } else {
+                    self.confirm_delete = Some(id);
+                }
             }
             (Act::Reshuffle, Card::Channel(c)) => {
                 let mut recipe = c.recipe.clone();
@@ -778,7 +932,8 @@ impl Studio {
                 _ => true,
             };
         };
-        let n_acts = acts(&card).len();
+        self.tunarr = view.tunarr_configured();
+        let n_acts = self.acts(&card).len();
         match (self.zone, key) {
             (Zone::Actions, Key::Left) => self.act = self.act.saturating_sub(1),
             (Zone::Actions, Key::Right) => self.act = (self.act + 1).min(n_acts.saturating_sub(1)),

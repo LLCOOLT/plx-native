@@ -83,5 +83,19 @@
   "livetv.studio.made_from": "De {title}",
   "livetv.studio.made_library": "De tu biblioteca",
   "livetv.studio.genre_any": "Cualquier género",
-  "livetv.studio.decade_any": "Cualquier década"
+  "livetv.studio.decade_any": "Cualquier década",
+  "livetv.studio.keep_tunarr": "Guardar en Tunarr",
+  "livetv.studio.keep_here": "Guardar en esta app",
+  "livetv.studio.in_tunarr": "En Tunarr",
+  "livetv.studio.kept_tunarr": "El canal {number} está en la guía de Tunarr",
+  "livetv.studio.kept_tunarr_missing": "El canal {number} está en la guía de Tunarr, sin {count} títulos que Tunarr aún no ha escaneado",
+  "livetv.studio.tunarr_building": "Espera a la vista previa y guárdalo en Tunarr",
+  "livetv.studio.tunarr_gap_style": "Tunarr rota series y este canal tiene películas. Guárdalo en esta app.",
+  "livetv.studio.tunarr_gap_shows": "Demasiadas series para que Tunarr las rote. Guárdalo en esta app.",
+  "livetv.studio.tunarr_gap_unwatched": "Tunarr no puede seguir lo que has visto. Guárdalo en esta app.",
+  "livetv.studio.tunarr_gap_recent": "Tunarr no puede limitar un canal a lo añadido recientemente. Guárdalo en esta app.",
+  "livetv.studio.tunarr_password": "Tunarr pide una contraseña. Guárdalo en esta app.",
+  "livetv.studio.tunarr_no_source": "Tunarr no tiene este servidor de Plex. Añádelo primero en Tunarr.",
+  "livetv.studio.tunarr_not_scanned": "Tunarr aún no ha escaneado estos títulos. Escanea la biblioteca en Tunarr.",
+  "livetv.studio.tunarr_failed": "No se pudo guardar el canal en Tunarr."
 }

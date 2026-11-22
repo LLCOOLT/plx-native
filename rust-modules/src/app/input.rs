@@ -1746,6 +1746,7 @@ pub(crate) fn delete_all_local_data(meta: &mut plx_data::stores::metadata::Metad
             .into_iter()
             .chain(plx_base::paths::resume_place_candidates())
             .chain(plx_base::paths::vchannel_dismissed_candidates())
+            .chain(plx_base::paths::tunarr_kept_candidates())
             .chain(plx_base::paths::telemetry_candidates())
             .chain(plx_base::paths::telemetry_spool_candidates())
             .chain(plx_base::paths::telemetry_crashmark_candidates())

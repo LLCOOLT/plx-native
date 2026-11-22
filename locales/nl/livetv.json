@@ -82,5 +82,19 @@
   "livetv.studio.made_from": "Van {title}",
   "livetv.studio.made_library": "Uit je bibliotheek",
   "livetv.studio.genre_any": "Elk genre",
-  "livetv.studio.decade_any": "Elk decennium"
+  "livetv.studio.decade_any": "Elk decennium",
+  "livetv.studio.keep_tunarr": "Bewaren in Tunarr",
+  "livetv.studio.keep_here": "Bewaren in deze app",
+  "livetv.studio.in_tunarr": "In Tunarr",
+  "livetv.studio.kept_tunarr": "Kanaal {number} staat in de gids van Tunarr",
+  "livetv.studio.kept_tunarr_missing": "Kanaal {number} staat in de gids van Tunarr, zonder {count} titels die Tunarr nog niet heeft gescand",
+  "livetv.studio.tunarr_building": "Wacht op het voorbeeld en bewaar het daarna in Tunarr",
+  "livetv.studio.tunarr_gap_style": "Tunarr wisselt series af en dit kanaal bevat films. Bewaar het in deze app.",
+  "livetv.studio.tunarr_gap_shows": "Te veel series voor Tunarr om af te wisselen. Bewaar het in deze app.",
+  "livetv.studio.tunarr_gap_unwatched": "Tunarr kan niet bijhouden wat je hebt gekeken. Bewaar het in deze app.",
+  "livetv.studio.tunarr_gap_recent": "Tunarr kan een kanaal niet beperken tot recente toevoegingen. Bewaar het in deze app.",
+  "livetv.studio.tunarr_password": "Tunarr vraagt om een wachtwoord. Bewaar het in deze app.",
+  "livetv.studio.tunarr_no_source": "Tunarr kent deze Plex-server niet. Voeg hem eerst toe in Tunarr.",
+  "livetv.studio.tunarr_not_scanned": "Tunarr heeft deze titels nog niet gescand. Scan de bibliotheek in Tunarr.",
+  "livetv.studio.tunarr_failed": "Kan het kanaal niet opslaan in Tunarr."
 }

@@ -84,5 +84,19 @@
   "livetv.studio.made_from": "Z: {title}",
   "livetv.studio.made_library": "Z Twojej biblioteki",
   "livetv.studio.genre_any": "Dowolny gatunek",
-  "livetv.studio.decade_any": "Dowolna dekada"
+  "livetv.studio.decade_any": "Dowolna dekada",
+  "livetv.studio.keep_tunarr": "Zachowaj w Tunarr",
+  "livetv.studio.keep_here": "Zachowaj w tej aplikacji",
+  "livetv.studio.in_tunarr": "W Tunarr",
+  "livetv.studio.kept_tunarr": "Kanał {number} jest w przewodniku Tunarr",
+  "livetv.studio.kept_tunarr_missing": "Kanał {number} jest w przewodniku Tunarr, bez tytułów nieprzeskanowanych przez Tunarr: {count}",
+  "livetv.studio.tunarr_building": "Poczekaj na podgląd, a potem zachowaj go w Tunarr",
+  "livetv.studio.tunarr_gap_style": "Tunarr przeplata seriale, a ten kanał ma filmy. Zachowaj go w tej aplikacji.",
+  "livetv.studio.tunarr_gap_shows": "Za dużo seriali, by Tunarr je przeplatał. Zachowaj go w tej aplikacji.",
+  "livetv.studio.tunarr_gap_unwatched": "Tunarr nie śledzi, co już obejrzałeś. Zachowaj go w tej aplikacji.",
+  "livetv.studio.tunarr_gap_recent": "Tunarr nie ograniczy kanału do nowości. Zachowaj go w tej aplikacji.",
+  "livetv.studio.tunarr_password": "Tunarr wymaga hasła. Zachowaj go w tej aplikacji.",
+  "livetv.studio.tunarr_no_source": "Tunarr nie ma tego serwera Plex. Najpierw dodaj go w Tunarr.",
+  "livetv.studio.tunarr_not_scanned": "Tunarr nie przeskanował jeszcze tych tytułów. Przeskanuj bibliotekę w Tunarr.",
+  "livetv.studio.tunarr_failed": "Nie udało się zapisać kanału w Tunarr."
 }

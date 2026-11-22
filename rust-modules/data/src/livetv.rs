@@ -27,6 +27,7 @@ pub mod native;
 pub mod plexmatch;
 pub mod on_now;
 pub mod suggested;
+pub mod tunarr_keep;
 pub mod source;
 pub mod xmltv;
 
@@ -148,6 +149,8 @@ pub struct LiveTvState {
     tunarr: Arc<Lineup>,
     /// The profile's virtual channels (`crate::vchannel`).
     virtuals: crate::vchannel::channels::Channels,
+    /// The channels this television kept in the Tunarr server ([`tunarr_keep`]).
+    keeper: tunarr_keep::Keeper,
     /// The start of the window the virtual channels' guide was last drawn for.
     virtual_window_ms: i64,
     guide_error: Option<FetchError>,
@@ -171,6 +174,7 @@ impl Default for LiveTvState {
             lineup: Arc::new(Lineup::default()),
             tunarr: Arc::new(Lineup::default()),
             virtuals: crate::vchannel::channels::Channels::default(),
+            keeper: tunarr_keep::Keeper::default(),
             virtual_window_ms: 0,
             guide_error: None,
             loaded_at_ms: None,
@@ -206,6 +210,9 @@ pub enum LiveTvCmd {
     Reset,
     /// A virtual-channel command (`crate::vchannel::channels::VCmd`).
     Virtual(crate::vchannel::channels::VCmd),
+    /// Keep, reshuffle, reorder or delete a channel in the Tunarr server
+    /// ([`tunarr_keep::TunarrCmd`]).
+    Tunarr(tunarr_keep::TunarrCmd),
 }
 
 /// Read access, borrowed for one frame.
@@ -235,6 +242,14 @@ impl<'a> LiveTvView<'a> {
     /// The profile's virtual channels, their suggestions and the builder's preview.
     pub fn virtuals(&self) -> &'a crate::vchannel::channels::Channels {
         &self.state.virtuals
+    }
+    /// The channels this television kept in the configured Tunarr server, and their writes.
+    pub fn keeper(&self) -> &'a tunarr_keep::Keeper {
+        &self.state.keeper
+    }
+    /// The channels kept in the configured Tunarr server, by number.
+    pub fn tunarr_kept(&self) -> Vec<&'a tunarr_keep::Kept> {
+        self.state.keeper.on(&self.state.source)
     }
     pub fn status(&self) -> &'a Status {
         &self.state.status
@@ -329,6 +344,22 @@ impl LiveTvState {
                     self.republish(now_ms);
                 }
                 changed
+            }
+            LiveTvCmd::Tunarr(cmd) => {
+                if self.source.is_empty() {
+                    return false;
+                }
+                let programmes = match &cmd {
+                    tunarr_keep::TunarrCmd::Keep { token, .. } => self
+                        .virtuals
+                        .preview()
+                        .filter(|p| p.token == *token)
+                        .and_then(|p| p.schedule.as_ref())
+                        .map(|s| s.programs().to_vec()),
+                    _ => None,
+                };
+                let source = self.source.clone();
+                self.keeper.run(cmd, &source, programmes, now_ms)
             }
         };
         if changed {
@@ -505,6 +536,15 @@ impl LiveTvState {
             }
         }
         changed |= self.pump_matches();
+        let (kept_changed, guide_moved) = self.keeper.pump();
+        changed |= kept_changed;
+        if guide_moved && !self.source.is_empty() {
+            // A channel was kept or deleted in Tunarr: read its lineup again so the guide shows it
+            // (a load already in flight may predate the write, so the next stale check reloads).
+            if !self.start_load() {
+                self.loaded_at_ms = None;
+            }
+        }
         let virtual_changed = self.virtuals.pump(now_ms);
         // The virtual channels' guide is drawn for a window; slide it as time passes.
         if virtual_changed || (!self.virtuals.channels().is_empty() && now_ms - self.virtual_window_ms >= VIRTUAL_SLIDE_MS) {
@@ -566,6 +606,23 @@ impl LiveTvState {
         self.virtuals.install_for_test(channels);
         self.virtuals.install_suggestions_for_test(suggestions);
         self.republish(now_ms);
+        self.revision += 1;
+    }
+
+    /// Set the Tunarr server without loading it, install the studio's preview and the channels
+    /// this television kept in Tunarr (the studio's tests).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_tunarr_for_test(
+        &mut self,
+        origin: &str,
+        preview: Option<crate::vchannel::channels::Preview>,
+        kept: Vec<tunarr_keep::Kept>,
+    ) {
+        self.source = origin.to_owned();
+        if let Some(p) = preview {
+            self.virtuals.install_preview_for_test(p);
+        }
+        self.keeper.install_for_test(kept);
         self.revision += 1;
     }
 

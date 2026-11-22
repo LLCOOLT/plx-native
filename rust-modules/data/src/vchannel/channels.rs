@@ -693,6 +693,12 @@ impl Channels {
         self.revision += 1;
     }
 
+    /// Install the builder's preview directly (the studio's tests).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_preview_for_test(&mut self, preview: Preview) {
+        self.preview = Some(preview);
+    }
+
     /// Install a row of suggestions directly (tests and the simulator's fixtures).
     #[cfg(any(test, feature = "test-support"))]
     pub fn install_suggestions_for_test(&mut self, suggestions: Vec<Suggestion>) {

@@ -84,5 +84,19 @@
   "livetv.studio.made_from": "Из «{title}»",
   "livetv.studio.made_library": "Из вашей библиотеки",
   "livetv.studio.genre_any": "Любой жанр",
-  "livetv.studio.decade_any": "Любое десятилетие"
+  "livetv.studio.decade_any": "Любое десятилетие",
+  "livetv.studio.keep_tunarr": "Сохранить в Tunarr",
+  "livetv.studio.keep_here": "Сохранить в этом приложении",
+  "livetv.studio.in_tunarr": "В Tunarr",
+  "livetv.studio.kept_tunarr": "Канал {number} есть в телегиде Tunarr",
+  "livetv.studio.kept_tunarr_missing": "Канал {number} есть в телегиде Tunarr, без названий, которые Tunarr ещё не просканировал: {count}",
+  "livetv.studio.tunarr_building": "Дождитесь предпросмотра, затем сохраните в Tunarr",
+  "livetv.studio.tunarr_gap_style": "Tunarr чередует сериалы, а на этом канале есть фильмы. Сохраните его в этом приложении.",
+  "livetv.studio.tunarr_gap_shows": "Слишком много сериалов для Tunarr. Сохраните канал в этом приложении.",
+  "livetv.studio.tunarr_gap_unwatched": "Tunarr не знает, что вы уже посмотрели. Сохраните канал в этом приложении.",
+  "livetv.studio.tunarr_gap_recent": "Tunarr не умеет ограничивать канал новинками. Сохраните его в этом приложении.",
+  "livetv.studio.tunarr_password": "Tunarr запрашивает пароль. Сохраните канал в этом приложении.",
+  "livetv.studio.tunarr_no_source": "В Tunarr нет этого сервера Plex. Сначала добавьте его в Tunarr.",
+  "livetv.studio.tunarr_not_scanned": "Tunarr ещё не просканировал эти названия. Просканируйте медиатеку в Tunarr.",
+  "livetv.studio.tunarr_failed": "Не удалось сохранить канал в Tunarr."
 }

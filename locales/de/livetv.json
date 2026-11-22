@@ -82,5 +82,19 @@
   "livetv.studio.made_from": "Aus {title}",
   "livetv.studio.made_library": "Aus deiner Mediathek",
   "livetv.studio.genre_any": "Jedes Genre",
-  "livetv.studio.decade_any": "Jedes Jahrzehnt"
+  "livetv.studio.decade_any": "Jedes Jahrzehnt",
+  "livetv.studio.keep_tunarr": "In Tunarr behalten",
+  "livetv.studio.keep_here": "In dieser App behalten",
+  "livetv.studio.in_tunarr": "In Tunarr",
+  "livetv.studio.kept_tunarr": "Kanal {number} ist in Tunarrs Programmführer",
+  "livetv.studio.kept_tunarr_missing": "Kanal {number} ist in Tunarrs Programmführer, ohne {count} Titel, die Tunarr noch nicht gescannt hat",
+  "livetv.studio.tunarr_building": "Warte auf die Vorschau und behalte ihn dann in Tunarr",
+  "livetv.studio.tunarr_gap_style": "Tunarr wechselt Serien ab, und dieser Kanal enthält Filme. Behalte ihn in dieser App.",
+  "livetv.studio.tunarr_gap_shows": "Zu viele Serien für Tunarr. Behalte ihn in dieser App.",
+  "livetv.studio.tunarr_gap_unwatched": "Tunarr kann nicht verfolgen, was du gesehen hast. Behalte ihn in dieser App.",
+  "livetv.studio.tunarr_gap_recent": "Tunarr kann einen Kanal nicht auf Neuzugänge beschränken. Behalte ihn in dieser App.",
+  "livetv.studio.tunarr_password": "Tunarr verlangt ein Passwort. Behalte ihn in dieser App.",
+  "livetv.studio.tunarr_no_source": "Tunarr kennt diesen Plex-Server nicht. Füge ihn zuerst in Tunarr hinzu.",
+  "livetv.studio.tunarr_not_scanned": "Tunarr hat diese Titel noch nicht gescannt. Scanne die Mediathek in Tunarr.",
+  "livetv.studio.tunarr_failed": "Der Kanal konnte nicht in Tunarr gespeichert werden."
 }
