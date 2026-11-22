@@ -17,12 +17,18 @@ the channel last tuned (`Session::livetv_channel`).
 Since 0.12.0 Live TV also airs **virtual channels** the app makes from the viewer's own library,
 with or without Tunarr — see [Virtual channels](#virtual-channels) at the end.
 
+A Tunarr channel whose programme is a Plex item the app can reach is played **natively**: the app
+asks Tunarr what is on (`/api/channels/{uuid}/native-playback`) and plays the Plex file itself at
+the channel's point, falling back to the `.ts` stream for anything else — see
+[Native mode](#native-mode) at the end.
+
 ## The decision
 
 PlxNative gets Live TV by being a client of **[Tunarr](https://github.com/chrisbenincasa/tunarr)**,
 exactly as Plex, Jellyfin and IPTV players are: Tunarr presents itself as an HDHomeRun tuner and
-publishes an XMLTV guide, and we consume those two surfaces directly. Plex Media Server is not in
-the path — no `/livetv/*`, no Plex DVR, no Plex Pass. Tunarr builds its channels from the same
+publishes an XMLTV guide, and we consume those two surfaces directly. Plex's Live TV is not in
+the path — no `/livetv/*`, no Plex DVR, no Plex Pass (native mode, below, reads a programme's file
+from Plex Media Server, but as an ordinary library item). Tunarr builds its channels from the same
 libraries this app already browses, so nothing Plex offers here is lost that this path needed.
 
 Not in scope: Plex's free FAST channels, Plex DVR, recording, and a real (broadcast) HDHomeRun.
@@ -278,3 +284,32 @@ module doc indexes the parts), the lineup merge in `plx_data::livetv` (`virtual_
   quietly (`route::request_play_channel`: no PlayQueue, timeline or scrobble — a channel never
   touches the profile's history), under the Live TV session, so the banner and the channel keys
   work. The next programme follows when one ends; a pause falls behind live and OK jumps back.
+
+## Native mode
+
+`plx_data::livetv::native`, driven by `src/app/livetv.rs`. Tunarr's own stream is a re-encode of
+its scheduled programmes; when the programme on now is a Plex item, the app can play the original
+instead.
+
+- **Asking.** A tune of a Tunarr lineup URL (`/stream/channels/{uuid}.ts`) first calls
+  `GET /api/channels/{uuid}/native-playback` (Tunarr `server/src/api/nativePlaybackApi.ts`), which
+  answers `{serverTimeMs, current, next}`; a content item carries `seekOffsetMs` (the FILE position
+  at `serverTimeMs`) and `remainingMs` (how long the channel stays on it). `next` is not trusted:
+  the channel is asked again at each boundary, so no drift accumulates.
+- **Which item.** Newer Tunarr builds add `source: {type, mediaSourceId, serverIdentifier?,
+  externalKey}` to a content item; `serverIdentifier` is the Plex `machineIdentifier`. Without it the
+  programme is read from `GET /api/programs/{id}` (`sourceType: "plex"`, `externalId` = ratingKey) and
+  the signed-in servers are asked for the ratingKey, keeping the one whose item carries the
+  programme's title (the answer is remembered per Tunarr media source). Tunarr's media-source list
+  is never read: it carries the Plex tokens Tunarr holds.
+- **Clock.** `serverTimeMs` is taken as the request's midpoint on the local clock; the file offset is
+  `seekOffsetMs` plus the local time since then, and `airing_start_ms` (BEHIND, jump to live) is the
+  midpoint minus `seekOffsetMs`.
+- **Leaving a programme.** At the file position `seekOffsetMs + remainingMs` (live or paused behind)
+  or at the file's end, Tunarr is asked again. A reply still naming the programme that just ended
+  plays its tail from the stream instead of re-tuning into the same end.
+- **Falling back.** Flex, error items, Jellyfin/Emby/local programmes, a server not signed in, a
+  route that 404s (an older Tunarr; remembered per origin) and any re-tune after a failure play the
+  `.ts` stream unchanged. Over flex, Tunarr is asked again when the flex ends (at least 5 s later).
+- **Not verified** against a real Tunarr or on a television yet; host tests only.
+

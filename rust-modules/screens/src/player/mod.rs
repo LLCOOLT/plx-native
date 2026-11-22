@@ -788,10 +788,11 @@ impl PlayerScreen {
                 self.hud.extend(now, LIVE_BANNER_MS);
                 fx.invalidate(plx_machine::present::Provenance::Input);
             }
-            // A virtual channel plays a library item the app holds itself, so it pauses: it falls
+            // A virtual channel (or a Tunarr channel in native mode) plays a library item the app
+            // holds itself, so it pauses: it falls
             // behind live, and OK (below) jumps back.
             consts::Key::Play | consts::Key::Pause | consts::Key::PlayPause
-                if edge == Edge::Down && live.is_some_and(|l| l.is_virtual()) =>
+                if edge == Edge::Down && live.is_some_and(|l| l.plays_library_item()) =>
             {
                 let play = match key {
                     consts::Key::Play => Some(true),

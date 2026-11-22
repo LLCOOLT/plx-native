@@ -1,7 +1,8 @@
 //! **Live TV** — the channels and guide of a Tunarr server, consumed exactly the way Plex and
 //! Jellyfin consume one: Tunarr presents itself as an HDHomeRun tuner (`discover.json`,
-//! `lineup.json`, one continuous MPEG-TS stream per channel) and publishes an XMLTV guide; Plex
-//! Media Server is not in the path for those channels. The profile's virtual channels
+//! `lineup.json`, one continuous MPEG-TS stream per channel) and publishes an XMLTV guide; Plex's
+//! Live TV is not in the path for those channels (native mode, [`native`], plays a programme's own
+//! Plex file when Tunarr names one, as an ordinary library item). The profile's virtual channels
 //! (`crate::vchannel` — library items the app airs itself, kept as Plex playlists) are merged into
 //! the same lineup ([`virtual_channel`]). The design record is `docs/live-tv-plan.md`.
 //!
@@ -11,6 +12,7 @@
 //! * [`on_now`] — Home's live shelf: one card per channel, the last-tuned first.
 //! * [`suggested`] — Home's Suggested Channels shelf, from the library (`crate::vchannel`).
 //! * [`source`] — the blocking reads and the LAN search, run by the store's workers.
+//! * [`native`] — Tunarr native mode: what a Tunarr channel airs, played from the Plex file.
 //! * [`plexmatch`] — whether an airing is in the viewer's Plex library, so the guide can offer it
 //!   from the start.
 //!
@@ -21,6 +23,7 @@
 
 pub mod guide;
 pub mod hdhr;
+pub mod native;
 pub mod plexmatch;
 pub mod on_now;
 pub mod suggested;

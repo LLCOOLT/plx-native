@@ -24,11 +24,21 @@
 //! the same Live TV session, so the banner, CH▲/▼, the surf list and *last channel* all work. A
 //! programme that ends is the channel moving on: it is tuned again at once, which plays the next
 //! one. A pause falls behind live; tuning the channel again is *Jump to live*.
+//!
+//! A **Tunarr channel in native mode** (`plx_data::livetv::native`) is played the same way. Before
+//! its stream is probed, Tunarr is asked what the channel airs now; when that is an item on a Plex
+//! server the app is signed into, the item's own file plays from the channel's point (Tunarr's
+//! clock, mapped onto ours), and when the channel leaves it (the FILE position Tunarr's schedule
+//! cuts it at, or the file's end) Tunarr is asked again. Anything else — flex, another media source,
+//! an older Tunarr without the route, a re-tune after a failure — plays the `.ts` stream exactly as
+//! before; flex is asked about again when it ends.
 
 use super::bridge::{self, AppHost};
 use super::App;
 use plx_machine::machine::{InputOwner, MachineId};
+use plx_data::livetv::native::{self, Plan, Why};
 use plx_media::live::{LiveSession, ProbeError, StreamFacts};
+use plx_plex::plex::ServerId;
 use plx_screens::registry::{AppArg, HomeTab, LiveTvReq};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
@@ -45,11 +55,32 @@ struct Pending {
     rx: Receiver<Result<StreamFacts, ProbeError>>,
 }
 
+/// A native-mode question in flight: what a Tunarr channel airs, and whether the app can play it.
+struct NativePending {
+    epoch: u64,
+    url: String,
+    rx: Receiver<(Plan, Option<(String, ServerId)>)>,
+}
+
 /// The tuner: the probe in flight, and the automatic re-tune schedule.
 #[derive(Default)]
 pub(crate) struct LiveTuner {
     epoch: u64,
     pending: Option<Pending>,
+    native_pending: Option<NativePending>,
+    /// Tunarr origins that answered `native-playback` with 404/405: an older Tunarr, asked no more.
+    native_unsupported: std::collections::HashSet<String>,
+    /// Which signed-in server each Tunarr media source turned out to be (`native::resolve`).
+    native_sources: std::collections::HashMap<String, ServerId>,
+    /// The Tunarr programme playing natively, and the FILE position (ms) the channel leaves it at.
+    native_program: Option<String>,
+    native_end_ms: Option<i64>,
+    /// The programme that just ended natively: asked about again and still on (the file was
+    /// shorter than Tunarr's schedule, or the clocks disagree by a moment), its tail plays from
+    /// Tunarr's stream instead of re-tuning into the same end.
+    native_ended: Option<String>,
+    /// A `.ts` stream playing over flex: when (local wall ms) to ask Tunarr again.
+    native_recheck_at: Option<i64>,
     /// Automatic re-tunes spent on the current channel since it last played.
     retries: u32,
     /// When to re-tune on our own (frame-clock ms), if anything is owed.
@@ -149,6 +180,15 @@ pub(crate) fn retry(app: &mut App, now: u32) {
     tune(app, live.lineup, live.index, live.previous, now);
 }
 
+/// Should a tune of `url` ask Tunarr for native mode first? Only a Tunarr lineup URL on an origin
+/// not known to lack the route, with a Plex server signed in, and not on a re-tune after a failure
+/// (`retries > 0`), which plays the stream that has no Plex resolve in it to fail.
+fn native_wanted(tuner: &LiveTuner, url: &str, any_server: bool) -> bool {
+    any_server
+        && tuner.retries == 0
+        && native::channel_of(url).is_some_and(|(origin, _)| !tuner.native_unsupported.contains(&origin))
+}
+
 fn tune(app: &mut App, lineup: Arc<plx_data::livetv::guide::Lineup>, index: usize, previous: Option<usize>, now: u32) {
     let Some(channel) = lineup.channels.get(index) else { return };
     let url = channel.url.clone();
@@ -171,6 +211,10 @@ fn tune(app: &mut App, lineup: Arc<plx_data::livetv::guide::Lineup>, index: usiz
         app.runtime.bridge(&mut app.bridge).seed_player_hud(plx_screens::player::LIVE_BANNER_MS);
     }
     plx_media::player::commit_paused(&mut app.player.session, &mut app.adapters.player, false);
+    app.livetv.native_program = None;
+    app.livetv.native_end_ms = None;
+    app.livetv.native_recheck_at = None;
+    app.livetv.native_pending = None;
     if let Some(playlist) = virtual_playlist {
         app.livetv.epoch += 1;
         app.livetv.retry_at = None;
@@ -181,6 +225,27 @@ fn tune(app: &mut App, lineup: Arc<plx_data::livetv::guide::Lineup>, index: usiz
     }
     app.livetv.epoch += 1;
     app.livetv.retry_at = None;
+    let any_server = plx_plex::plex::server_ids().next().is_some();
+    if native_wanted(&app.livetv, &url, any_server) {
+        let (tx, rx) = mpsc::channel();
+        let ask_url = url.clone();
+        let learned = app.livetv.native_sources.clone();
+        let spawned = plx_base::task::spawn_small("livetv-native", move || {
+            let _ = tx.send(native::resolve(&ask_url, &learned));
+            plx_machine::present::wake_from_worker();
+        });
+        if spawned {
+            app.livetv.pending = None;
+            app.livetv.native_pending = Some(NativePending { epoch: app.livetv.epoch, url, rx });
+            return;
+        }
+    }
+    tune_stream(app, url);
+}
+
+/// Steps 2 and 3 for a Tunarr channel's `.ts` stream: start it at once on a declaration measured
+/// before, else probe it on a worker.
+fn tune_stream(app: &mut App, url: String) {
     // A channel measured before starts at once.
     if let Some(facts) = known_facts(&app.livetv.known, &url, app.livetv.retries) {
         app.livetv.pending = None;
@@ -222,32 +287,67 @@ fn tune_virtual(app: &mut App, playlist: &str, now: u32) {
         schedule_retry(app, now);
         return;
     };
-    let Some(mut session) = plx_media::route::live(&app.player.session).cloned() else { return };
-    session.facts = Some(StreamFacts::TUNARR_DEFAULT);
-    session.failed = false;
-    session.airing_start_ms = Some(slot.start_ms);
-    plx_media::route::set_live_tuning(&mut app.player.session, session);
     let offset_ns = (wall - slot.start_ms).max(0) * 1_000_000;
     let (title, ctx) = virtual_titles(&programme);
     plx_base::eventlog::log(&format!(
         "livetv: virtual tune rk={} offset={}s", programme.rk, offset_ns / 1_000_000_000
     ));
+    let item = Programme {
+        sid: ServerId::from_raw(programme.sid),
+        rk: &programme.rk,
+        part: &programme.part,
+        vcodec: &programme.vcodec,
+        acodec: &programme.acodec,
+        title: &title,
+        ctx: &ctx,
+        airing_start_ms: slot.start_ms,
+        library_item: false,
+    };
+    if !play_programme(app, item, offset_ns) {
+        fail(app);
+        schedule_retry(app, now);
+    }
+}
+
+/// A library item a channel airs, as `play_programme` plays it.
+struct Programme<'a> {
+    sid: ServerId,
+    rk: &'a str,
+    part: &'a str,
+    vcodec: &'a str,
+    acodec: &'a str,
+    title: &'a str,
+    ctx: &'a str,
+    /// The local wall instant the item's position 0 aired (`LiveSession::airing_start_ms`).
+    airing_start_ms: i64,
+    /// Mark the session as playing a library item (native mode); a virtual channel is one already.
+    library_item: bool,
+}
+
+/// Play `item` from `offset_ns` under the Live TV session being tuned — quietly
+/// (`route::request_play_channel`: no PlayQueue, no timeline, no scrobble). `false` when the
+/// request could not be made.
+fn play_programme(app: &mut App, item: Programme<'_>, offset_ns: i64) -> bool {
+    let Some(mut session) = plx_media::route::live(&app.player.session).cloned() else { return false };
+    session.facts = Some(StreamFacts::TUNARR_DEFAULT);
+    session.failed = false;
+    session.airing_start_ms = Some(item.airing_start_ms);
+    session.library_item = item.library_item;
+    plx_media::route::set_live_tuning(&mut app.player.session, session);
     let requested = plx_media::route::request_play_channel(
         &mut app.player.session,
         app.runtime.metadata_mut(),
         super::playback::start_caps(),
-        plx_plex::plex::ServerId::from_raw(programme.sid),
-        &programme.rk,
-        &programme.part,
-        &programme.vcodec,
-        &programme.acodec,
-        &title,
-        &ctx,
+        item.sid,
+        item.rk,
+        item.part,
+        item.vcodec,
+        item.acodec,
+        item.title,
+        item.ctx,
     );
     if !requested {
-        fail(app);
-        schedule_retry(app, now);
-        return;
+        return false;
     }
     super::playback::start_playback(
         &mut app.player.session,
@@ -261,6 +361,62 @@ fn tune_virtual(app: &mut App, playlist: &str, now: u32) {
     );
     if let Some(channel) = plx_media::route::live(&app.player.session).and_then(|l| l.channel()) {
         plx_data::livetv::remember_channel(&channel.number);
+    }
+    true
+}
+
+/// Native mode's step 3: the programme Tunarr airs, from its Plex file at the channel's point.
+fn tune_native(app: &mut App, url: String, d: native::Direct) {
+    let wall = plx_base::wallclock::now_ms();
+    let offset_ms = native::file_offset_at(&d.clock, d.seek_offset_ms, wall);
+    plx_base::eventlog::log(&format!(
+        "livetv: native tune rk={} offset={}s ends={}s skew={}ms",
+        d.rk, offset_ms / 1000, d.end_offset_ms / 1000, d.clock.skew_ms
+    ));
+    let item = Programme {
+        sid: d.sid,
+        rk: &d.rk,
+        part: &d.part,
+        vcodec: &d.vcodec,
+        acodec: &d.acodec,
+        title: &d.title,
+        ctx: &d.ctx,
+        airing_start_ms: d.airing_start_ms(),
+        library_item: true,
+    };
+    if play_programme(app, item, offset_ms * 1_000_000) {
+        app.livetv.native_program = Some(d.program_id);
+        app.livetv.native_end_ms = Some(d.end_offset_ms);
+    } else {
+        plx_base::eventlog::log("livetv: native request refused; playing the channel's stream");
+        if let Some(mut session) = plx_media::route::live(&app.player.session).cloned() {
+            session.library_item = false;
+            session.airing_start_ms = None;
+            session.facts = None;
+            plx_media::route::set_live_tuning(&mut app.player.session, session);
+        }
+        tune_stream(app, url);
+    }
+}
+
+/// What the landing of a native-mode question does, decided apart from the session so it can be
+/// tested: play the item natively, or play the stream (and when to ask again).
+#[derive(Debug, PartialEq)]
+enum NativeStep {
+    Native(native::Direct),
+    /// Play the stream; ask Tunarr again at this local instant, if ever.
+    Stream { recheck_at: Option<i64>, unsupported: bool },
+}
+
+fn native_step(plan: Plan, just_ended: Option<&str>, wall: i64) -> NativeStep {
+    match plan {
+        Plan::Direct(d) if just_ended == Some(d.program_id.as_str()) => {
+            // Still on the programme that just ended here: its tail is Tunarr's to play.
+            let left = d.end_offset_ms - native::file_offset_at(&d.clock, d.seek_offset_ms, wall);
+            NativeStep::Stream { recheck_at: native::recheck_at(&Why::Flex { remaining_ms: left }, wall), unsupported: false }
+        }
+        Plan::Direct(d) => NativeStep::Native(d),
+        Plan::Stream(why) => NativeStep::Stream { recheck_at: native::recheck_at(&why, wall), unsupported: why == Why::Unsupported },
     }
 }
 
@@ -309,8 +465,42 @@ fn fail(app: &mut App) {
     app.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
 }
 
-/// Once a frame: land the probe, and run the automatic re-tune schedule.
+/// Once a frame: land the native-mode answer and the probe, and run the automatic re-tune schedule.
 pub(crate) fn pump(app: &mut App, now: u32) {
+    if let Some(pending) = app.livetv.native_pending.as_ref() {
+        match pending.rx.try_recv() {
+            Ok((plan, learnt)) => {
+                let NativePending { epoch, url, .. } = app.livetv.native_pending.take().expect("checked above");
+                if let Some((source, sid)) = learnt {
+                    app.livetv.native_sources.insert(source, sid);
+                }
+                let current = epoch == app.livetv.epoch && plx_media::route::live(&app.player.session).is_some();
+                if current {
+                    let ended = app.livetv.native_ended.take();
+                    match native_step(plan, ended.as_deref(), plx_base::wallclock::now_ms()) {
+                        NativeStep::Native(d) => tune_native(app, url, d),
+                        NativeStep::Stream { recheck_at, unsupported } => {
+                            if unsupported {
+                                if let Some((origin, _)) = native::channel_of(&url) {
+                                    plx_base::eventlog::log(&format!("livetv: {origin} has no native-playback route"));
+                                    app.livetv.native_unsupported.insert(origin);
+                                }
+                            }
+                            app.livetv.native_recheck_at = recheck_at;
+                            tune_stream(app, url);
+                        }
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                let NativePending { epoch, url, .. } = app.livetv.native_pending.take().expect("checked above");
+                if epoch == app.livetv.epoch && plx_media::route::live(&app.player.session).is_some() {
+                    tune_stream(app, url);
+                }
+            }
+        }
+    }
     if let Some(pending) = app.livetv.pending.as_ref() {
         match pending.rx.try_recv() {
             Ok(result) => {
@@ -347,6 +537,30 @@ pub(crate) fn pump(app: &mut App, now: u32) {
         app.livetv.retry_at = None;
         return;
     };
+    // Native mode: the channel leaves the programme at a FILE position (Tunarr's schedule cut), live
+    // or paused behind; then it is asked what is on next. A stream playing over flex is asked again
+    // once the flex is over.
+    if live.library_item && app.route() == AppArg::Player {
+        if let Some(end_ms) = app.livetv.native_end_ms {
+            if plx_media::player::seen_frame(&app.player.session).unwrap_or(false)
+                && plx_media::player::playpos_ns(&app.player.session).unwrap_or(0) / 1_000_000 >= end_ms
+            {
+                plx_base::eventlog::log("livetv: the channel left the programme; asking Tunarr what is on");
+                advance_native(app, &live, now);
+                return;
+            }
+        }
+    }
+    if !live.library_item && app.route() == AppArg::Player {
+        if app.livetv.native_recheck_at.is_some_and(|at| plx_base::wallclock::now_ms() >= at) {
+            app.livetv.native_recheck_at = None;
+            plx_base::eventlog::log("livetv: the flex is over; asking Tunarr what is on");
+            plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
+            app.livetv.retries = 0;
+            tune(app, live.lineup, live.index, live.previous, now);
+            return;
+        }
+    }
     // A channel that has shown a picture has proven itself: its retry budget is whole again.
     if live.facts.is_some() && plx_media::player::seen_frame(&app.player.session).unwrap_or(false) {
         app.livetv.retries = 0;
@@ -374,9 +588,25 @@ fn schedule_retry(app: &mut App, now: u32) {
     }
 }
 
+/// A Tunarr channel in native mode moves on from the programme it played: what is on now is asked
+/// again, and the programme is remembered so a reply still naming it does not re-tune into its end.
+fn advance_native(app: &mut App, live: &LiveSession, now: u32) {
+    app.livetv.native_ended = app.livetv.native_program.take();
+    app.livetv.native_end_ms = None;
+    plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
+    app.livetv.retries = 0;
+    tune(app, Arc::clone(&live.lineup), live.index, live.previous, now);
+}
+
 /// The live stream drained to its end: a channel does not end, so this is a dropped connection.
 /// Re-tune it (bounded); when the budget is spent, leave the banner saying it is unavailable.
 pub(crate) fn stream_ended(app: &mut App, now: u32) {
+    // A Tunarr programme played natively ended (its file is done): the channel moves on.
+    if let Some(live) = plx_media::route::live(&app.player.session).cloned().filter(|l| l.library_item) {
+        plx_base::eventlog::log("livetv: the programme's file ended; asking Tunarr what is on");
+        advance_native(app, &live, now);
+        return;
+    }
     // A virtual channel's programme ended: the channel moves on to the next one, at once.
     if let Some(live) = plx_media::route::live(&app.player.session).cloned().filter(|l| l.is_virtual()) {
         plx_base::eventlog::log("livetv: the programme ended; the virtual channel moves on");
@@ -441,5 +671,70 @@ mod known_facts_tests {
         assert_eq!(known_facts(&known, url, 0), Some(facts));
         assert_eq!(known_facts(&known, url, 1), None, "a re-tune after a failure probes afresh");
         assert_eq!(known_facts(&known, "http://192.0.2.20:8000/stream/channels/2.ts", 0), None);
+    }
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+    use native::{Clock, Direct};
+
+    fn direct(program: &str) -> Direct {
+        Direct {
+            sid: ServerId::from_raw(1),
+            rk: "4242".into(),
+            part: "/library/parts/1/2/file.mkv".into(),
+            vcodec: "h264".into(),
+            acodec: "aac".into(),
+            title: "Film".into(),
+            ctx: String::new(),
+            program_id: program.into(),
+            clock: Clock::measure(1_000_000, 1_000_000, 1_000_000),
+            seek_offset_ms: 60_000,
+            end_offset_ms: 90_000,
+        }
+    }
+
+    #[test]
+    fn a_plex_programme_plays_natively() {
+        assert_eq!(native_step(Plan::Direct(direct("p1")), None, 1_000_000), NativeStep::Native(direct("p1")));
+        assert_eq!(native_step(Plan::Direct(direct("p2")), Some("p1"), 1_000_000), NativeStep::Native(direct("p2")));
+    }
+
+    /// A programme whose file ran out before Tunarr's schedule left it is not re-tuned into its own
+    /// end: the tail plays from the stream, and Tunarr is asked again when the slot is over.
+    #[test]
+    fn the_programme_that_just_ended_plays_its_tail_from_the_stream() {
+        // 10 s after the reply, 20 s of the slot remain.
+        let step = native_step(Plan::Direct(direct("p1")), Some("p1"), 1_010_000);
+        assert_eq!(step, NativeStep::Stream { recheck_at: Some(1_030_000), unsupported: false });
+        // A slot already over waits the floor, not zero: no tight loop.
+        let late = native_step(Plan::Direct(direct("p1")), Some("p1"), 1_100_000);
+        assert_eq!(late, NativeStep::Stream { recheck_at: Some(1_100_000 + native::RECHECK_MIN_MS), unsupported: false });
+    }
+
+    #[test]
+    fn what_the_app_cannot_play_itself_plays_the_stream() {
+        assert_eq!(
+            native_step(Plan::Stream(Why::Flex { remaining_ms: 30_000 }), None, 0),
+            NativeStep::Stream { recheck_at: Some(30_000), unsupported: false }
+        );
+        assert_eq!(native_step(Plan::Stream(Why::Unsupported), None, 0), NativeStep::Stream { recheck_at: None, unsupported: true });
+        assert_eq!(native_step(Plan::Stream(Why::NotPlex), None, 0), NativeStep::Stream { recheck_at: None, unsupported: false });
+        assert_eq!(native_step(Plan::Stream(Why::Failed), None, 0), NativeStep::Stream { recheck_at: None, unsupported: false });
+    }
+
+    #[test]
+    fn native_mode_is_asked_for_only_where_it_can_answer() {
+        let url = "http://192.0.2.20:8000/stream/channels/abc.ts";
+        let mut tuner = LiveTuner::default();
+        assert!(native_wanted(&tuner, url, true));
+        assert!(!native_wanted(&tuner, url, false), "no Plex server signed in");
+        assert!(!native_wanted(&tuner, "http://hdhr.lan:5004/auto/v4.1", true), "not a Tunarr lineup URL");
+        tuner.retries = 1;
+        assert!(!native_wanted(&tuner, url, true), "a re-tune after a failure plays the stream");
+        tuner.retries = 0;
+        tuner.native_unsupported.insert("http://192.0.2.20:8000".into());
+        assert!(!native_wanted(&tuner, url, true), "an older Tunarr is asked no more");
     }
 }

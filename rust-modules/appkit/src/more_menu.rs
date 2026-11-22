@@ -1114,9 +1114,9 @@ fn no_ladder(ps: &plx_media::route::PlaybackSession) -> bool {
 
 /// Is the Audio & Subtitles row offered? Only on a channel (elsewhere the control row's discs open
 /// the panel), and only on one whose programme is a Plex item with tracks to list — a virtual
-/// channel; a Tunarr stream has none the server describes.
+/// channel, or a Tunarr channel in native mode; a Tunarr stream has none the server describes.
 fn tracks_offered(ps: &plx_media::route::PlaybackSession) -> bool {
-    plx_media::route::live(ps).is_some_and(|l| l.is_virtual())
+    plx_media::route::live(ps).is_some_and(|l| l.plays_library_item())
 }
 
 fn rows_for(forced: bool) -> Vec<Action> {

@@ -7951,12 +7951,13 @@ pub fn live(ps: &PlaybackSession) -> Option<&crate::live::LiveSession> {
     ps.live.as_ref()
 }
 
-/// Is this playback a real-time Live TV STREAM (a Tunarr channel), as against a virtual
-/// channel's programme — a library file that arrives faster than it plays, which keeps the Live
-/// TV session for the banner and the channel keys but needs none of a stream's handling (the
-/// feed's two-lane live prime, `plx_play_feed::native_executor::prime_depth`).
+/// Is this playback a real-time Live TV STREAM (a Tunarr channel's `.ts`), as against a library
+/// item played on a channel (a virtual channel's programme, or a Tunarr channel's in native mode):
+/// a library file arrives faster than it plays, keeps the Live TV session for the banner and the
+/// channel keys, but needs none of a stream's handling (the feed's two-lane live prime,
+/// `plx_play_feed::native_executor::prime_depth`).
 pub fn live_stream(ps: &PlaybackSession) -> bool {
-    ps.live.as_ref().is_some_and(|l| !l.is_virtual())
+    ps.live.as_ref().is_some_and(|l| !l.plays_library_item())
 }
 
 /// **Install a Live TV channel as the playback** — the channel's URL, the declaration its probe

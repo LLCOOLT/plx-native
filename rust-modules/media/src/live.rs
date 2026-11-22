@@ -34,6 +34,11 @@ pub struct LiveSession {
     /// began on the channel's timeline — position 0 of the item — so how far the viewer has
     /// fallen behind live (a pause) is [`LiveSession::behind_ms`]. `None` on a Tunarr channel.
     pub airing_start_ms: Option<i64>,
+    /// The programme on screen is a Plex library item the app plays itself, at the channel's
+    /// point: always on a virtual channel, and on a Tunarr channel in native mode
+    /// (`plx_data::livetv::native`). Such a playback pauses, falls behind live and keeps its
+    /// tracks and quality ladder; it is not a real-time stream ([`crate::route::live_stream`]).
+    pub library_item: bool,
 }
 
 /// How far behind live a virtual channel must be before OK jumps back rather than only raising
@@ -43,7 +48,7 @@ pub const JUMP_TO_LIVE_MS: i64 = 10_000;
 impl LiveSession {
     /// A channel about to be tuned.
     pub fn tuning(lineup: Arc<Lineup>, index: usize, previous: Option<usize>) -> Self {
-        Self { lineup, index, previous, facts: None, failed: false, airing_start_ms: None }
+        Self { lineup, index, previous, facts: None, failed: false, airing_start_ms: None, library_item: false }
     }
 }
 
@@ -56,6 +61,12 @@ impl LiveSession {
     /// plays itself) rather than a Tunarr stream?
     pub fn is_virtual(&self) -> bool {
         self.channel().is_some_and(|c| plx_data::livetv::virtual_playlist(&c.url).is_some())
+    }
+
+    /// Does the programme on screen come from the library (a virtual channel's, or a Tunarr
+    /// channel's in native mode) rather than a continuous stream?
+    pub fn plays_library_item(&self) -> bool {
+        self.library_item || self.is_virtual()
     }
 
     /// Has a virtual channel fallen far enough behind live (a pause) that OK jumps back?
@@ -491,6 +502,19 @@ mod tests {
         assert!(s.is_behind(1_000_000 + 660_000, 600_000 * 1_000_000));
         let tunarr = session("http://192.0.2.20:8000/stream/1", None);
         assert!(!tunarr.is_virtual() && tunarr.behind_ms(i64::MAX / 2, 0) == 0, "a Tunarr stream is always live");
+    }
+
+    /// A Tunarr channel in native mode plays a library item: it pauses and falls behind exactly as
+    /// a virtual channel does, and is not a real-time stream.
+    #[test]
+    fn a_tunarr_channel_in_native_mode_is_a_library_item() {
+        let url = "http://192.0.2.20:8000/stream/channels/abc.ts";
+        let stream = session(url, None);
+        assert!(!stream.plays_library_item());
+        let native = LiveSession { library_item: true, ..session(url, Some(1_000_000)) };
+        assert!(native.plays_library_item() && !native.is_virtual());
+        assert_eq!(native.behind_ms(1_000_000 + 660_000, 600_000 * 1_000_000), 60_000);
+        assert!(session("plxvc:42", None).plays_library_item(), "a virtual channel always is");
     }
 
     use super::*;
