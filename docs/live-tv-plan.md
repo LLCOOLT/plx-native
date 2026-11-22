@@ -96,13 +96,17 @@ handling.
   progressive transcode is one), and the bundled FFmpeg already includes the `mpegts` demuxer
   (`ci/build-ffmpeg.sh`) and the `h264`/`aac` parsers. What it lacked until v0.10.0 was the framing:
   the progressive demuxer rewrote every video packet as MP4/Matroska AVCC and wrapped every AAC
-  frame in ADTS, which turns MPEG-TS's Annex-B video and ADTS audio into data no decoder plays
-  (`ff::ProgressiveVideo`, `ff::progressive_aac_frame`), and fed a channel's timestamps unrebased
-  (`player::engine::first_open_rebases`).
+  frame in ADTS, which turns MPEG-TS's Annex-B video and ADTS audio into data no decoder plays,
+  and fed a channel's timestamps unrebased. Since the upstream merge the demuxer lives in
+  `play-feed/src/ff.rs`, whose own Annex-B and ADTS handling replaced the fork's
+  `ProgressiveVideo`; the fork adds HEVC Annex-B (`annexb_hevc_access_unit`), timestamps for the
+  audio frames a transport stream leaves without one (`ProgressiveAudioClock`) and the live
+  analysis limits, and a channel's first open rebases its first keyframe
+  (`play-feed/src/native_executor.rs`, `first_open_rebases`).
 - **The decode path.** H.264 + AAC is an existing Load payload combination in
   `media/src/player/engine.rs`.
 - **A no-Plex entry point for the pipeline.** The `/tmp/plxnative-playurl` dev trigger
-  (`media/src/player/playurl.rs`) plays an arbitrary URL with a declared codec pair and no library
+  (`rust-modules/src/dev.rs`) plays an arbitrary URL with a declared codec pair and no library
   item behind it. Phase 0 uses it unchanged.
 - **Keys.** CH▲/▼ already arrive as wcodes 300/301 (`docs/remote-keys.md`), and the PIN keypad
   already reads digits. The LIVE button stays the television's (`docs/remote-keys.md` §5).
