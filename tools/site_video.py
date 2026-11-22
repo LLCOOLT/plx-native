@@ -12,9 +12,7 @@ and adopt them into `site/media/`.
     python3 tools/site_video.py verify DIR|feel.manifest.json
     python3 tools/site_video.py adopt artifact.zip|DIR [--write] [--expect-rev REV] [--derive]   # dry run unless --write
     python3 tools/site_video.py release-ref REF                      # prints the tag; fails for an rc, a nightly, a branch
-    python3 tools/site_video.py tree-hash [--rev REV]                # the film inputs' tree hash
     python3 tools/site_video.py needs-render [--rev REV] [--force]   # needs_render=true|false against the committed manifest
-    python3 tools/site_video.py commit-message --manifest M --tag T --run-url U --source-sha S   # the bot commit's text
 
 THE FILM REFRESHES ITSELF after a stable release (docs/agent-reference.md, "The site demo video"): `release.yml`
 dispatches `site-video.yml` ON the new `vX.Y.Z` tag, whose `decide` job asks `release-ref` and `needs-render`, whose
@@ -114,6 +112,16 @@ THRESHOLDS = {
     "ssim_min": 0.97,            # spec: per-frame minimum, each deliverable against the master
     "ssim_mean": 0.985,          # spec: mean over frames
     "size_ratio": 1.25,          # spec: each file <= 1.25x today's file of the same name
+    # A film of a DIFFERENT storyboard is not "today's file" with a regression, it is another film, so the ratio says
+    # nothing about it. For the one render that introduces a storyboard (the committed manifest names another
+    # `storyboard_sha256`) each video is held to this ceiling instead, set from the first Linux render of the
+    # 29 s storyboard (9.1 / 10.8 / 16.3 / 19.1 MB) plus about 15 %; once that film is committed the ratio governs again.
+    "size_new_film_bytes": {
+        "feel-720p60.av1.mp4": 10_500_000,
+        "feel-720p60.h264.mp4": 12_500_000,
+        "feel-1080p60.av1.mp4": 19_000_000,
+        "feel-1080p60.h264.mp4": 22_000_000,
+    },
     "seam_ssim": 0.995,          # spec: SSIM(first frame, last frame)
     "vmaf_mean": 93.0,           # provisional (only checked where libvmaf is present)
     "vmaf_min": 80.0,            # provisional
@@ -128,13 +136,16 @@ THRESHOLDS = {
 # ------------------------------------------------------------------ the pinned tool ffmpeg -------
 Pin = collections.namedtuple("Pin", "key urls sha256 kind member version licence source")
 
-# Each build was DOWNLOADED and hashed by the author of this table on 2026-10-08, and the hash
-# agrees with the publisher's own (GitHub's asset digest; the build server's .sha256 file).
+# Each build was DOWNLOADED and hashed by the author of this table, and the hash agrees with the
+# publisher's own (GitHub's asset digest; the build server's .sha256 file): darwin-arm64 on
+# 2026-10-08, linux-x86_64 on 2026-11-12 (the 2026-10-07 and 2026-10-23 autobuilds pinned before
+# it were both pruned, and no copy of either survived to mirror).
 #  * linux-x86_64 is the canonical build (CI). BtbN/FFmpeg-Builds, GPLv3 (`--enable-gpl
 #    --enable-version3`), static libs, with libsvtav1, libx264, libaom and libvmaf; the build
 #    scripts are public at github.com/BtbN/FFmpeg-Builds. Its URL is a dated `autobuild-*` release,
-#    and BtbN prunes old autobuilds: when it 404s, mirror THIS exact tarball (same sha256) as a release
-#    asset of this repository, add that URL to `urls`, and nothing else changes.
+#    and BtbN prunes old autobuilds, so `urls` lists FIRST this repository's own copy of the same
+#    tarball (same sha256), a prerelease named `mirror/ffmpeg-btbn-<autobuild>` that is never
+#    `latest`. A re-pin mirrors the new tarball the same way before it changes this table.
 #  * darwin-arm64 is for local previews only (`adopt` refuses anything not rendered on linux-ci).
 #    Martin Riedl's build server, GPLv3, ffmpeg 9.0.2, with libsvtav1 4.2.0, libx264 and libvmaf;
 #    build script github.com/ffmpeg-build-tools. Permanent timestamped URL; I ran this binary.
@@ -142,11 +153,13 @@ Pin = collections.namedtuple("Pin", "key urls sha256 kind member version licence
 PINS = {
     "linux-x86_64": Pin(
         "linux-x86_64",
-        ("https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-07-13-07/"
-         "ffmpeg-n9.0.2-22-g46d8f462ee-linux64-gpl-9.0.tar.xz",),
-        "c03023a986dec781a5ab6bb8821d6544b40eb86e96f34283880a0fae8105da67",
-        "tar.xz", "/bin/ffmpeg", "n9.0.2-22-g46d8f462ee", "GPL-3.0-or-later (--enable-gpl --enable-version3)",
-        "BtbN/FFmpeg-Builds autobuild-2026-10-07-13-07"),
+        ("https://github.com/plxnative/plx-native/releases/download/"
+         "mirror/ffmpeg-btbn-autobuild-2026-11-12-15-40/ffmpeg-n9.0.2-57-gd838f9f9ae-linux64-gpl-9.0.tar.xz",
+         "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-11-12-15-40/"
+         "ffmpeg-n9.0.2-57-gd838f9f9ae-linux64-gpl-9.0.tar.xz"),
+        "ccedeabdb6c1bbfd44647225e3a4452a1983a770847c2d7de261fcbc407250df",
+        "tar.xz", "/bin/ffmpeg", "n9.0.2-57-gd838f9f9ae", "GPL-3.0-or-later (--enable-gpl --enable-version3)",
+        "BtbN/FFmpeg-Builds autobuild-2026-11-12-15-40"),
     "darwin-arm64": Pin(
         "darwin-arm64",
         ("https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffmpeg.zip",),
@@ -336,6 +349,7 @@ POSTER_QUALITY = ["-q:v", "3"]  # provisional: the size gate bounds it against t
 # set to what the level's DPB holds (x264 would otherwise lower it with a warning), and `-level` is the field the
 # `avcC` box and the site's `codecs=` string carry. The bitrates (about 1 and 2 Mbit/s) are far under both
 # levels' VBV limits, so no `-maxrate` is needed.
+H264_LAST_FRAME_QP = 10  # the loop's last frame is coded at this fixed QP (see `video_argv`)
 H264_LEVELS = {720: ("3.2", "5"), 1080: ("4.2", "4")}  # height -> (level, refs)
 
 
@@ -353,7 +367,7 @@ AV1_720_GOP = "720"
 AV1_720_CRF = "22"
 
 
-def video_argv(ffmpeg, master, out, video):
+def video_argv(ffmpeg, master, out, video, frames=None):
     codec = AV1_CODEC if video.codec == "av1" else H264_CODEC
     if video.codec == "av1" and video.height == 720:
         override = {"-g": AV1_720_GOP, "-crf": AV1_720_CRF}
@@ -361,6 +375,14 @@ def video_argv(ffmpeg, master, out, video):
     if video.codec == "h264":
         level, refs = H264_LEVELS[video.height]
         codec = codec + ["-level", level, "-refs", refs]
+        if frames:
+            # The loop's join is SSIM(first, last) of the ENCODE. Frame 0 is referenced by hundreds of static frames, so
+            # x264's mbtree gives it a low QP; the last frame is referenced by none, so mbtree gives it a high one
+            # (1080p: 0.9947 on the 29 s film against the 0.995 floor while the master read 1.0000). Forcing an IDR
+            # there made it WORSE (0.9903, and 720p fell from 0.9962 to 0.9882): an intra frame at that QP loses the
+            # detail an inter frame inherits from its references. A one-frame zone pins the last frame's QP instead.
+            i = codec.index("-x264-params") + 1
+            codec = codec[:i] + [f"{codec[i]}:zones={frames - 1},{frames - 1},q={H264_LAST_FRAME_QP}"] + codec[i + 1:]
     return ([str(ffmpeg), "-hide_banner", "-nostdin", "-loglevel", "warning", "-stats", "-y", "-i", str(master),
              "-map", "0:v:0", "-an", "-fps_mode", "passthrough", "-vf", video_filter(video.width, video.height)]
             + codec + COLOR_TAGS + ["-movflags", "+faststart", str(out)])
@@ -372,10 +394,10 @@ def poster_argv(ffmpeg, master, out, poster):
             + POSTER_QUALITY + [str(out)])
 
 
-def encode_plan(ffmpeg, master, out_dir):
+def encode_plan(ffmpeg, master, out_dir, frames=None):
     """[(output name, argv)] for the four videos and two posters; pure, so a test asserts the argv."""
     out_dir = pathlib.Path(out_dir)
-    plan = [(v.name, video_argv(ffmpeg, master, out_dir / v.name, v)) for v in VIDEOS]
+    plan = [(v.name, video_argv(ffmpeg, master, out_dir / v.name, v, frames)) for v in VIDEOS]
     plan += [(p.name, poster_argv(ffmpeg, master, out_dir / p.name, p)) for p in POSTERS]
     return plan
 
@@ -385,7 +407,7 @@ def run_encode(ffmpeg, master, frames_tsv, out_dir, render=None, run=subprocess.
     out_dir.mkdir(parents=True, exist_ok=True)
     rows = parse_frames_tsv(pathlib.Path(frames_tsv).read_text())
     assert_encoders(ffmpeg, run)
-    for name, argv in encode_plan(ffmpeg, master, out_dir):
+    for name, argv in encode_plan(ffmpeg, master, out_dir, len(rows)):
         print(f"site_video: encode {name}", flush=True)
         done = run(argv)
         if done.returncode != 0:
@@ -590,14 +612,29 @@ def gate_hero_pool(record):
                   f"hero-report and none is not_in_video{tail}")
 
 
-def gate_sizes(out_dir, site_media):
-    """Each file no larger than `ratio` times the file of the same name in site/media, read now."""
+def storyboard_changed(record, site_media):
+    """True when the committed manifest names another storyboard than the one this render played."""
+    try:
+        committed = json.loads((pathlib.Path(site_media) / MANIFEST_NAME).read_text())["storyboard_sha256"]
+    except (OSError, ValueError, KeyError):
+        return False
+    return committed != record.get("storyboard_sha256")
+
+
+def gate_sizes(out_dir, site_media, new_film=False):
+    """Each file no larger than `ratio` times the file of the same name in site/media, read now. A `new_film` (another
+    storyboard than the committed one) holds each video to its `size_new_film_bytes` ceiling instead."""
     ratio = THRESHOLDS["size_ratio"]
+    budgets = THRESHOLDS["size_new_film_bytes"] if new_film else {}
     out = []
     for name in MEDIA_NAMES:
         new, old = pathlib.Path(out_dir) / name, pathlib.Path(site_media) / name
         if not new.is_file():
             out.append(Result(f"size/{name}", FAIL, "not encoded"))
+        elif name in budgets:
+            a = new.stat().st_size
+            out.append(Result(f"size/{name}", PASS if a <= budgets[name] else FAIL,
+                              f"{a:,} bytes against {budgets[name]:,} (a new storyboard: the film is not today's)"))
         elif not old.is_file():
             out.append(Result(f"size/{name}", SKIP, "no file of this name in site/media to compare with"))
         else:
@@ -853,7 +890,7 @@ def run_gates(out_dir, master, frames_b=None, ffmpeg=None, site_media=SITE_MEDIA
     results.append(gate_run_twice(tsv_path, frames_b))
     results.append(gate_hero_pool(record))
     results += gate_storyboard_record(record)
-    results += gate_sizes(out_dir, site_media)
+    results += gate_sizes(out_dir, site_media, storyboard_changed(record, site_media))
     vmaf = have_filter(ffmpeg, "libvmaf", run)
     for v in VIDEOS:
         path = out_dir / v.name
@@ -1071,16 +1108,23 @@ def collect_environment(env=None, run=subprocess.run, root="/"):
     }
 
 
+def git_tree_hashes(paths, run, root, rev):
+    """{path: git object id at `rev`} for every path, plus `combined` (a sha256 over the ids in order). Shared with
+    `site_stills.py`, whose inputs are a different path list hashed the same way."""
+    out = {}
+    for p in paths:
+        done = run(["git", "-C", str(root), "rev-parse", f"{rev}:{p}"], capture_output=True, text=True)
+        if done.returncode != 0:
+            raise Failure(f"cannot read the git object of {p} at {rev}: {done.stderr.strip()}")
+        out[p] = done.stdout.strip()
+    out["combined"] = hashlib.sha256("".join(out[p] for p in paths).encode()).hexdigest()
+    return out
+
+
 def tree_hashes(run=subprocess.run, root=ROOT, rev="HEAD"):
     """Git tree ids of every path in `TREE_PATHS` at `rev` (HEAD by default), and whether the working tree
     differs from HEAD there (always False for any other `rev`: a revision has no working tree)."""
-    out = {}
-    for p in TREE_PATHS:
-        done = run(["git", "-C", str(root), "rev-parse", f"{rev}:{p}"], capture_output=True, text=True)
-        if done.returncode != 0:
-            raise Failure(f"cannot read the git tree of {p} at {rev}: {done.stderr.strip()}")
-        out[p] = done.stdout.strip()
-    out["combined"] = hashlib.sha256("".join(out[p] for p in TREE_PATHS).encode()).hexdigest()
+    out = git_tree_hashes(TREE_PATHS, run, root, rev)
     if rev != "HEAD":
         return out, False
     dirty = run(["git", "-C", str(root), "status", "--porcelain", "--"] + list(TREE_PATHS),
@@ -1102,40 +1146,41 @@ def stable_release_tag(ref):
     return tag if STABLE_TAG.fullmatch(tag) else None
 
 
-def needs_render(rev="HEAD", force=False, manifest_path=None, run=subprocess.run, root=ROOT):
-    """(render?, why): does the film have to be rendered again for `rev`? Yes when forced, when the committed
-    manifest is absent or unreadable, or when its recorded `tree_hash.combined` (the trees of everything that
-    can change a pixel, `TREE_PATHS`) differs from the one at `rev`. No otherwise: the same inputs render the
-    same film, which two renders and the hold gate prove, so the committed one stands."""
+def inputs_verdict(what, rev, force, manifest_path, hash_at):
+    """(render?, why) for one set of inputs: yes when forced, when the committed manifest at `manifest_path` has no
+    readable `tree_hash.combined`, or when that differs from `hash_at()`, the combined hash at `rev`. No otherwise:
+    the same inputs render the same files, so the committed ones stand. `what` names them in the reason
+    ("the film", "the stills"); `hash_at` is called only when the manifest is readable and the run is not forced."""
     if force:
         return True, "forced"
-    path = pathlib.Path(manifest_path) if manifest_path else SITE_MEDIA / MANIFEST_NAME
+    path = pathlib.Path(manifest_path)
     try:
         recorded = json.loads(path.read_text())["tree_hash"]["combined"]
     except (OSError, ValueError, KeyError, TypeError):
         return True, f"no readable tree hash in {path.name}"
-    here = tree_hashes(run, root, rev)[0]["combined"]
+    here = hash_at()
     if here == recorded:
-        return False, f"the film's inputs at {rev} are the committed film's (tree hash {here[:12]})"
-    return True, f"the film's inputs changed: committed {recorded[:12]}, {rev} {here[:12]}"
+        return False, f"{what}'s inputs at {rev} are the committed ones' (tree hash {here[:12]})"
+    return True, f"{what}'s inputs changed: committed {recorded[:12]}, {rev} {here[:12]}"
 
 
-def commit_message(manifest, tag, run_url, source_sha):
-    """The bot commit that lands a re-rendered film: the gates' summary and the run, so a bad film is one
-    revert away. The gates prove determinism and quality, never taste."""
+def needs_render(rev="HEAD", force=False, manifest_path=None, run=subprocess.run, root=ROOT):
+    """(render?, why): does the film have to be rendered again for `rev`? `TREE_PATHS` are its inputs; two renders
+    and the hold gate prove the same inputs render the same film (`inputs_verdict`)."""
+    return inputs_verdict("the film", rev, force, manifest_path or SITE_MEDIA / MANIFEST_NAME,
+                          lambda: tree_hashes(run, root, rev)[0]["combined"])
+
+
+def film_paragraph(manifest, tag, source_sha):
+    """The film's paragraph of the bot commit (`site_stills.commit_message` writes the rest): which render it is and
+    the gates' summary. The gates prove determinism and quality, never taste."""
     results = manifest.get("gates", {}).get("results", [])
     counts = collections.Counter(r.get("status") for r in results)
     summary = ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) or "no results"
     tree = (manifest.get("tree_hash") or {}).get("combined", "?")[:12]
-    # A maintainer's manual dispatch on main has no tag: the commit names the film's source instead.
-    tag = tag or f"main@{source_sha[:8]}"
-    return (f"Site: demo video re-rendered for {tag}\n\n"
-            f"Rendered by the site-video workflow from {tag} ({source_sha}), film inputs tree hash {tree}, on the\n"
+    return (f"Rendered by the site-video workflow from {tag} ({source_sha}), film inputs tree hash {tree}, on the\n"
             f"pinned Linux/llvmpipe stack: two renders agreed frame for frame, the hold-injection gate and the\n"
-            f"sentinel scan passed, and every quality gate passed ({len(results)} gates: {summary}).\n"
-            f"Run: {run_url}\n\n"
-            f"The gates prove determinism and quality, not taste. If this film looks wrong, revert this commit;\n"
-            f"nothing else depends on it.\n")
+            f"sentinel scan passed, and every quality gate passed ({len(results)} gates: {summary}).")
 
 
 # ------------------------------------------------------------------ the page's codec strings --------
@@ -1445,7 +1490,7 @@ PINNED_ENV = {"LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
 
 
 def sim_env(runtime, out_dir, fifo, frames, preroll, allow_absent, max_hold_ms, base=None, no_hold=False,
-            keys=None, extra_holds=None):
+            keys=None, extra_holds=None, allow_overlay=False):
     """The simulator's environment: this machine's minus every PLXNATIVE_* variable (a developer's own
     session settings must not leak into a render) and with the locale and time zone pinned
     (`PINNED_ENV`), plus the dump's."""
@@ -1470,10 +1515,21 @@ def sim_env(runtime, out_dir, fifo, frames, preroll, allow_absent, max_hold_ms, 
         env["PLXNATIVE_DUMP_KEYS"] = keys
     if extra_holds is not None:
         env["PLXNATIVE_DUMP_EXTRA_HOLDS"] = str(extra_holds)
+    if allow_overlay:
+        env["PLXNATIVE_DUMP_ALLOW_OVERLAY"] = "1"
     return env
 
 
 SIGN_IN_DONE = "hubs: landed"  # the log line after which the sign-in's session is on disk
+
+
+def require_discover_stand_in(events):
+    """Fail the render unless the boot's own event log says Discover is the mock's stand-in."""
+    sys.path.insert(0, str(ROOT / "tests"))
+    import mock_pms
+    problem = mock_pms.discover_stand_in_problem(events.read_text(errors="replace") if events.exists() else "")
+    if problem:
+        raise Failure(problem)
 
 
 def sign_in_demo_profile(sim_bin, runtime, port, say=print, timeout=90, base=None):
@@ -1503,6 +1559,7 @@ def sign_in_demo_profile(sim_bin, runtime, port, say=print, timeout=90, base=Non
         else:
             raise Failure(f"the demo sign-in did not finish within {timeout}s (see {runtime / 'prep.out'})")
         time.sleep(1.5)  # the session's last revision is written a moment after the hubs land
+        require_discover_stand_in(events)  # before the film boots
     finally:
         sim.kill()
         sim.wait()
@@ -1780,9 +1837,31 @@ def parse_triggers(specs):
     return out
 
 
+def post_mock_discover(port, body):
+    """POST one JSON object to the mock's `/_mock/discover` (its Discover list mode, `guids`, `pms`...)."""
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/_mock/discover", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=10) as r:
+        r.read()
+
+
+def parse_mock_discover(specs):
+    """`--mock-discover` JSON strings -> [dict]; each must be a JSON object."""
+    out = []
+    for spec in specs or ():
+        try:
+            body = json.loads(spec)
+        except ValueError as e:
+            raise Failure(f"--mock-discover {spec!r}: not JSON ({e})")
+        if not isinstance(body, dict):
+            raise Failure(f"--mock-discover {spec!r}: want a JSON object")
+        out.append(body)
+    return out
+
+
 def run_render(sim_bin, out_dir, ffmpeg, frames, preroll=DEFAULT_PREROLL, hero=None, allow_absent=False, max_hold_ms=60000,
                timeout=3600, keep=False, say=print, no_hold=False, keys=None, extra_holds=None, triggers=None,
-               plan=None, storyboard_sha=None):
+               plan=None, storyboard_sha=None, allow_overlay=False, mock_discover=None, token=True):
     """Boot the mock catalog PMS on a free port, run the dump build against it headless, pipe its RGB24
     frames through the sentinel scan into ffmpeg, and leave `master.mkv`, `frames.tsv`, `dump.json` and
     `render.json` in `out_dir`. Returns the render record. Raises Failure on anything not clean."""
@@ -1806,16 +1885,23 @@ def run_render(sim_bin, out_dir, ffmpeg, frames, preroll=DEFAULT_PREROLL, hero=N
     finished = False
     try:
         (runtime / "plxnative-plextv").write_text(f"http://127.0.0.1:{port}")
+        (runtime / "plxnative-discover").write_text(f"http://127.0.0.1:{port}")  # the Watchlist reads the mock, never discover.provider.plex.tv
         sign_in_demo_profile(sim_bin, runtime, port, say)
+        for body in mock_discover or ():  # the plex.tv/discover stand-in's state (`POST /_mock/discover`), after the sign-in
+            post_mock_discover(port, body)
         with pms.lock:
             pms.request_log.clear()  # the log below is the film's alone
-        for name, value in {"token": DEMO_TOKEN, "heropin": "0", **(HINT_OFF if plan else {}), **(triggers or {})}.items():
+        # `token=False` boots on the STORED mock session alone: a `token` boot reads the Watchlist as
+        # unavailable for the profile (plex.tv's list belongs to the signed-in account).
+        for name, value in {**({"token": DEMO_TOKEN} if token else {}), "heropin": "0", **(HINT_OFF if plan else {}),
+                            **(triggers or {})}.items():
             (runtime / f"plxnative-{name}").write_text(value)
         enc = subprocess.Popen(ffv1_argv(ffmpeg, out_dir / "master.mkv"), stdin=subprocess.PIPE)
         log = open(runtime / "sim.out", "w")
         sim = subprocess.Popen([str(sim_bin), "127.0.0.1", str(port)], stdout=log, stderr=subprocess.STDOUT,
                                env=sim_env(runtime, out_dir, fifo, frames, preroll, allow_absent, max_hold_ms,
-                                           no_hold=no_hold, keys=keys, extra_holds=extra_holds))
+                                           no_hold=no_hold, keys=keys, extra_holds=extra_holds,
+                                           allow_overlay=allow_overlay))
 
         def pump():
             try:
@@ -1885,6 +1971,7 @@ def run_render(sim_bin, out_dir, ffmpeg, frames, preroll=DEFAULT_PREROLL, hero=N
             if plan["loop"]:
                 storyboard["loop"] = loop_metrics(ffmpeg, out_dir / "master.mkv", frames)
         events = runtime / "plxnative-events.log"
+        require_discover_stand_in(events)  # the film's own boot, not only the sign-in's
         facts = film_facts(pms, hero, json.loads(pathlib.Path(CATALOG).read_text()),
                            events.read_text(errors="replace") if events.exists() else "",
                            hero_ok=hero_report_passes())
@@ -1929,7 +2016,9 @@ def cmd_render(args):
     frames, preroll, keys, plan, sha = storyboard_args(args)
     run_render(args.bin, args.out, ffmpeg, frames, preroll, args.hero, args.allow_absent,
                args.max_hold_ms, args.timeout, args.keep_runtime, no_hold=args.no_hold, keys=keys,
-               extra_holds=args.extra_holds, triggers=parse_triggers(args.trigger), plan=plan, storyboard_sha=sha)
+               extra_holds=args.extra_holds, triggers=parse_triggers(args.trigger), plan=plan, storyboard_sha=sha,
+               allow_overlay=args.allow_overlay, mock_discover=parse_mock_discover(args.mock_discover),
+               token=not args.no_token)
 
 
 def cmd_hold_gate(args):
@@ -2067,19 +2156,10 @@ def cmd_release_ref(args):
     print(tag)
 
 
-def cmd_tree_hash(args):
-    print(tree_hashes(rev=args.rev)[0]["combined"])
-
-
 def cmd_needs_render(args):
     render, why = needs_render(args.rev, args.force, args.manifest)
     print(f"needs_render={'true' if render else 'false'}")
     print(f"reason={why}")
-
-
-def cmd_commit_message(args):
-    manifest = json.loads(pathlib.Path(args.manifest).read_text())
-    sys.stdout.write(commit_message(manifest, args.tag, args.run_url, args.source_sha))
 
 
 def main(argv=None):
@@ -2111,7 +2191,16 @@ def main(argv=None):
                    help="play tests/video/feel.json (or FILE): its frames, preroll and keys replace --frames/--preroll/--keys")
     p.add_argument("--trigger", action="append", metavar="NAME=VALUE",
                    help="a boot trigger written into the instance root as plxnative-NAME (repeatable), e.g. detail=102")
-    p.add_argument("--keys", help="the scene's script: <virtual frame>:<key>,... (up/down/left/right/ok/back); "
+    p.add_argument("--allow-overlay", action="store_true",
+                   help="MOTION REVIEW ONLY: film a scene with a modal or popover open (the driver otherwise refuses it: its "
+                        "dim field is not hold-independent). Never a deliverable; the hold-injection gate does not cover it")
+    p.add_argument("--no-token", action="store_true",
+                   help="do not arm the `token` trigger: boot on the stored mock sign-in alone (the Watchlist is that account's, "
+                        "and reads as unavailable under a `token` boot)")
+    p.add_argument("--mock-discover", action="append", metavar="JSON",
+                   help="a body POSTed to the mock's /_mock/discover after the sign-in (repeatable), e.g. "
+                        "'{\"list\":\"default\",\"guids\":\"all\"}': the Watchlist's list and which titles Add can succeed on")
+    p.add_argument("--keys", help="the scene's script: <virtual frame>:<key>,... (up/down/left/right/ok/back/hold); "
                                   "virtual frames count from the start of the preroll")
     p.add_argument("--extra-holds", help="force k (or r<seed>: seeded 0..3) extra held repeats on every clean frame "
                                          "(the hold-injection gate's switch; a render with it is not a deliverable)")
@@ -2180,23 +2269,12 @@ def main(argv=None):
     p.add_argument("ref")
     p.set_defaults(fn=cmd_release_ref)
 
-    p = sub.add_parser("tree-hash", help="print the combined git tree hash of everything that can change the film")
-    p.add_argument("--rev", default="HEAD")
-    p.set_defaults(fn=cmd_tree_hash)
-
     p = sub.add_parser("needs-render", help="print needs_render=true|false and reason=...: is the committed film "
                                             "(site/media/feel.manifest.json) of different film inputs than REV?")
     p.add_argument("--rev", default="HEAD")
     p.add_argument("--force", action="store_true")
     p.add_argument("--manifest", help="the committed manifest (default site/media/feel.manifest.json)")
     p.set_defaults(fn=cmd_needs_render)
-
-    p = sub.add_parser("commit-message", help="print the bot commit message for a re-rendered film")
-    p.add_argument("--manifest", required=True)
-    p.add_argument("--tag", required=True)
-    p.add_argument("--run-url", required=True)
-    p.add_argument("--source-sha", required=True)
-    p.set_defaults(fn=cmd_commit_message)
     args = ap.parse_args(argv)
     try:
         return args.fn(args) or 0

@@ -63,7 +63,7 @@ impl Filter {
 
     /// What the chip says: the app's own word for a genre, the guide's own for a category.
     pub fn label(&self) -> Cow<'static, str> {
-        use plx_platform::i18n::msg;
+        use plx_os::i18n::msg;
         match self {
             Filter::All => Cow::Borrowed(msg::livetv_filter_all()),
             Filter::Genre(g) => Cow::Borrowed(genre_label(*g)),
@@ -74,7 +74,7 @@ impl Filter {
 
 /// The app's name for a genre.
 pub fn genre_label(g: Genre) -> &'static str {
-    use plx_platform::i18n::msg;
+    use plx_os::i18n::msg;
     match g {
         Genre::Movie => msg::livetv_filter_movies(),
         Genre::Sports => msg::livetv_filter_sports(),
@@ -176,7 +176,7 @@ impl Timing {
             Timing::StartsIn(ms) => {
                 // Rounded UP to the minute and floored at one: "in 0 min" says nothing.
                 let ms = ((ms + 59_999) / 60_000).max(1) * 60_000;
-                Some(plx_platform::i18n::msg::livetv_starts_in(&plx_ui::fmt::dur_long(ms)))
+                Some(plx_os::i18n::msg::livetv_starts_in(&plx_ui::fmt::duration(ms)))
             }
             Timing::Quiet => None,
         }

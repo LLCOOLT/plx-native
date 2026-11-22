@@ -7,9 +7,10 @@ television runs, packaged so it starts on a Mac that has none of this repo's bui
 no Homebrew, no SDL, no toolchain. `ci/mkmacapp.py` is the whole recipe; this note is why it looks
 the way it does and what the result is and is not.
 
-It is **not a new build of the app**. It is `--features hostsim` — the desktop simulator
-(`docs/…`/`rust-modules/src/bin/sim.rs`, and the `ui-sim` skill) — with the dev features off and a
-bundle around it. Every UI change, every Plex data-layer change, is the same code the ipk ships.
+It is **not a new build of the app**. It is `--features hostsim,play-feed` — the desktop simulator,
+which boots the app on the desktop's own platform (the desktop platform crate, `rust-modules/platform-desktop`:
+its tables in `src/lib.rs`, its `plxnative-sim` binary in `src/bin/sim.rs`, built with `-p plx_platform_desktop`; the `ui-sim` skill) — with the dev features off and a bundle around it. (`play-feed` is named because `--no-default-features` drops it, and the simulator's
+video sink belongs to that backend.) Every UI change, every Plex data-layer change, is the same code the ipk ships.
 
 ## What it can do
 
@@ -18,11 +19,11 @@ libraries, Search, detail pages, seasons, episodes, cast, the who's-watching pic
 — against a real Plex Media Server that advertises a usable HTTPS origin. It persists the session
 and comes back signed in.
 
-**Plays video and sound, since 2026-10-10.** `player::desk` decodes with the bundle's own FFmpeg
-(VideoToolbox for the picture), composites the picture under the UI and clocks off the sound card.
-Until then this section said the bundle could not, because the television's decode path is LG's
-`StarfishMediaAPIs` and nothing on a Mac answered the sink's verbs; `player::desk` is that answer.
-It says nothing about LG's decoder.
+**Plays video and sound, since 2026-10-10.** The desktop decoder (the application's
+`adapters::hostsim::desk`, answering the verbs of `play-feed/src/ffi_host.rs`'s host sink) decodes
+with the bundle's own FFmpeg (VideoToolbox for the picture), composites the picture under the UI and
+clocks off the sound card. The television's decode path is LG's `StarfishMediaAPIs`, and nothing on
+a Mac answers it; the desktop decoder is the Mac's own answer. It says nothing about LG's decoder.
 
 Browsing is not LAN-only: the same `http.rs` control façade runs here through `net.rs`/libcurl for
 HTTPS PMS control. The plaintext transport remains in the shared core; the distributable host build has developer
@@ -67,10 +68,15 @@ Four things, and three of them were bugs that had been sitting in the tree unrea
    recipe are untouched.
 
 The window changed too, though that is taste rather than a bug: it opens at an exact integer
-divisor of the 1920x1080 canvas (`app.rs`'s `desktop_window_size`) with ALLOW_HIGHDPI, and can be resized. On a Retina display that means a 960x540-point window with a **1920x1080 drawable** —
-`surface::scale() == 1.0`, the same 1:1 texel contract the television renders under, which is what
-keeps the text as crisp as it is on the panel. A non-Retina 1080p display gets 960x540 at scale
-0.5 instead; Ctrl+Cmd+F (F11 elsewhere) toggles desktop fullscreen, which gives it a 1:1 surface.
+divisor of the 1920x1080 canvas (`plx_shell_sdl::window::plan_desktop_window`) with ALLOW_HIGHDPI, and can be resized
+(the canvas is drawn offscreen and only scaled into the window, so a dragged edge re-letterboxes the
+blit). The window's pixel density is measured from the window itself (`SDL_GetDisplayDPI` is
+unreliable on macOS), and the window is then sized in points for the drawable it should give, so a
+display of any size lands on the same result. On a Retina display that means a 960x540-point window
+with a **1920x1080 drawable** — `surface::scale() == 1.0`, the same 1:1 texel contract the
+television renders under, which is what keeps the text as crisp as it is on the panel. A
+non-Retina 1080p display gets 960x540 at scale 0.5 instead; Ctrl+Cmd+F (F11 elsewhere) toggles
+desktop fullscreen, which gives it a 1:1 surface.
 
 ## Bundling: the three traps
 

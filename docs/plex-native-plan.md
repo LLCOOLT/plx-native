@@ -26,14 +26,15 @@ LG 49SM9000PLA, α7 Gen2, webOS 4.5, in-app `StarfishMediaAPIs` BUFFERSTREAM.
 
 | Class | Direct-play now (demuxer emits it) | Decoder-capable, gated on demuxer/probe | Never advertise |
 |---|---|---|---|
-| Video | H.264 High@L4.2 ≤1080p60 / L5.1 4K30 | HEVC Main/Main10 L5.1 4K60 (HDR10/HLG); VP9 Profile 0 | AV1; 10-bit AVC; VP9 Profile 2; Dolby Vision in-app |
+| Video | H.264 High@L4.2 ≤1080p60 / L5.1 4K30 | HEVC Main/Main10 L5.1 4K60 (HDR10/HLG); VP9 Profile 0 | AV1 (except on a set whose codec table lists an AV1 decoder); 10-bit AVC; VP9 Profile 2; Dolby Vision in-app |
 | Audio | AC3, EAC3, AAC-LC | DTS core (`dca`) — but demuxer can't emit it → transcode | DTS-HD MA/HR; TrueHD |
 | Subs | (none rendered yet) | SRT/ASS soft via demuxer (#soft-subs); PGS bitmap | — |
 | Container | MKV (`V_MPEG4/ISO/AVC`, `V_MPEGH/ISO/HEVC`) | MP4/TS (demuxer is MKV-only) | — |
 
 **Conservative stance:** HEVC 10-bit / HDR10 is decoder-capable per LG's 4.5 spec but the
 in-app buffer-feed HDR path is *unverified* — Phase 0 probes it before we ship an HDR profile.
-DTS/TrueHD/VP9-P2/AV1 always transcode to H264/AC3 MKV (the proven `start.mkv` path).
+DTS/TrueHD/VP9-P2 always transcode to H264/AC3 MKV (the proven `start.mkv` path), and AV1 does too
+unless the set's codec table lists an AV1 decoder.
 
 ---
 
@@ -376,6 +377,8 @@ active codec.
 
 ### 4c. HDR10 — separate `setHdrInfo` call (NOT Load, NOT ACB)
 
+> **NEVER IMPLEMENTED, and not implementable on webOS 4.5:** `setHdrInfo` is absent from `libplayerAPIs`, which exports only `updateHdrInfo(const HdrInfo*)`. HEVC carries HDR10 in-band and the pipeline reports it; a VP9 PQ stream is declared by rewriting the `sourceInfo` envelope ACB is sent (`plx_play_feed::vp9_hdr`; measured: the TV's `picture.dynamicRange` flips to HDR).
+
 On webOS HDR10 static metadata is delivered by `StarfishMediaAPIs::setHdrInfo(const char*)`,
 called **after `Load()` reports LOADCOMPLETED and before `Play()`** (Kodi's `SetHDR`).
 
@@ -403,7 +406,7 @@ called **after `Load()` reports LOADCOMPLETED and before `Play()`** (Kodi's `Set
 
 `acb_bind → wait frames → acb_send_video_data(sourceInfoVerbatim) → acb_start`
 (`pump.rs:129-154`, `starfish.c:102-113`) is codec-transparent — it forwards the pipeline's own
-`sourceInfo` envelope verbatim. HEVC/4K/HDR need no ACB change.
+`sourceInfo` envelope as captured, except a container-PQ VP9 stream, whose `hdrType`/`mediaVui`/`mediaSei` are written in first. HEVC/4K/HDR need no ACB change.
 
 ### 4e. Direct-play gate (`route.rs:240`)
 
@@ -566,5 +569,7 @@ buffer-feed HDR path is undocumented. Prove it before building the demuxer aroun
    phase; if it churns too much, keep inline route.rs parsing and migrate later.
 9. **`stream.rs` is IP-only, no DNS, no chunked-request, PUT hardcodes NULL extra** — session
    headers as query params sidestep this; if we move to real headers, extend the wrappers first.
-10. **Dolby Vision / HDR10+ / VP9-P2 / DTS-HD / TrueHD / AV1** — explicitly out of scope; always
-    transcode. Never advertise (would promise a render/decode path we don't have).
+10. **Dolby Vision / HDR10+ / VP9-P2 / DTS-HD / TrueHD** — explicitly out of scope; always
+    transcode. Never advertise (would promise a render/decode path we don't have). **AV1** is the
+    exception only on a set whose codec table lists an AV1 decoder (`devcaps::Caps::av1`), where it
+    is direct-played (unmeasured on device); every other set transcodes it.

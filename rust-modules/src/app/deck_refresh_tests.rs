@@ -13,19 +13,11 @@ fn run(d: &mut DeckRefresh, from: u32, to: u32, every: u32, home: bool) -> usize
     issued
 }
 
-#[test]
-fn a_stopped_playback_refetches_once_after_the_settle_beat() {
-    let mut d = DeckRefresh::new(0);
-    d.playback_stopped(10_000 + PLAYBACK_SETTLE_MS);
-    assert!(!d.step(10_000, false, true, false), "not before the timeline PUT has landed");
-    assert!(d.step(10_000 + PLAYBACK_SETTLE_MS, false, true, false), "the deck follows the stop");
-    assert!(!d.step(10_000 + PLAYBACK_SETTLE_MS + 16, false, true, false), "and only once");
-}
 
 #[test]
 fn nothing_is_issued_under_the_player_and_the_debt_survives_it() {
     let mut d = DeckRefresh::new(0);
-    d.playback_stopped(1_000);
+    d.foreground(1_000);
     assert!(!d.step(2_000, false, false, false), "the route is still the player");
     assert!(d.owed());
     assert!(d.step(2_016, false, true, false), "paid the frame the player has gone");
@@ -39,7 +31,7 @@ fn a_reason_during_a_fetch_waits_for_it_and_is_paid_once() {
         assert!(!d.step(t, true, true, true), "never a second request while one is in flight");
     }
     // A second reason arrives while the first still waits: one debt, one request.
-    d.playback_stopped(5_000);
+    d.foreground(5_000);
     assert!(d.step(5_016, true, true, false), "the landing frees the one owed request");
     assert!(!d.step(5_032, true, true, false));
     assert!(!d.owed(), "both reasons were paid by the one request");
@@ -80,7 +72,7 @@ fn the_foreground_refetches_at_once() {
 fn an_earlier_debt_is_kept_when_a_later_one_arrives() {
     let mut d = DeckRefresh::new(0);
     d.foreground(1_000);
-    d.playback_stopped(9_000);
+    d.foreground(9_000);
     assert!(d.step(1_000, false, true, false), "the earlier reason sets the time");
 }
 
@@ -88,23 +80,10 @@ fn an_earlier_debt_is_kept_when_a_later_one_arrives() {
 fn the_schedule_reads_the_frame_clock_across_its_wrap() {
     let start = u32::MAX - 30_000;
     let mut d = DeckRefresh::new(start);
-    d.playback_stopped(start.wrapping_add(PLAYBACK_SETTLE_MS));
+    d.foreground(start.wrapping_add(800));
     assert!(!d.step(start, false, true, false));
-    assert!(d.step(start.wrapping_add(PLAYBACK_SETTLE_MS), false, true, false));
-    assert!(d.step(start.wrapping_add(VISIBLE_CADENCE_MS + PLAYBACK_SETTLE_MS), true, true, false),
+    assert!(d.step(start.wrapping_add(800), false, true, false));
+    assert!(d.step(start.wrapping_add(VISIBLE_CADENCE_MS + 800), true, true, false),
         "the cadence counts across the wrap");
 }
 
-/// **The deck after a stop is read twice**: at the settle beat, and again once the scrobble
-/// worker's late `stopped` timeline has surely landed — otherwise a deck read before it would stand
-/// until the next two-minute tick.
-#[test]
-fn a_stop_is_followed_by_a_second_refetch() {
-    let mut d = DeckRefresh::new(0);
-    d.playback_stopped(10_000 + PLAYBACK_SETTLE_MS);
-    assert!(d.step(10_000 + PLAYBACK_SETTLE_MS, true, true, false), "the first refetch at the settle beat");
-    assert!(!d.step(10_000 + PLAYBACK_SETTLE_MS + 100, true, true, false));
-    assert!(!d.step(10_000 + PLAYBACK_FOLLOWUP_MS - 1, true, true, false), "not before the follow-up");
-    assert!(d.step(10_000 + PLAYBACK_FOLLOWUP_MS + 100, true, true, false), "the follow-up refetch");
-    assert!(!d.step(10_000 + PLAYBACK_FOLLOWUP_MS + 200, true, true, false), "and only one");
-}

@@ -68,12 +68,12 @@ fn known_facts(known: &std::collections::HashMap<String, StreamFacts>, url: &str
 
 /// Drain the Live TV requests the screens raised this frame.
 pub(crate) fn requests(app: &mut App, now: u32) {
-    for (source, request, ret) in app.bridge.take_livetv_reqs() {
+    for (source, request, ret) in app.runtime.bridge(&mut app.bridge).take_livetv_reqs() {
         // Settings > Live TV comes from a page inside the Settings surface, whose inner stack is
         // not the container's entry; it only navigates, so it needs no owner check.
         if request == LiveTvReq::OpenSetup {
             bridge::dismiss_settings(&mut app.pages);
-            open_page(&mut app.pages, &mut app.bridge, true);
+            open_page(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), true);
             continue;
         }
         let MachineId::Instance(instance) = source else { continue };
@@ -81,16 +81,16 @@ pub(crate) fn requests(app: &mut App, now: u32) {
         if app.pages.nav.input_owner() != Some(InputOwner::Entry(entry)) { continue; }
         match request {
             LiveTvReq::Tab(tab) => {
-                if !app.bridge.search_tab_available(tab) || matches!(tab, HomeTab::LiveTv) { continue; }
+                if !app.runtime.bridge(&mut app.bridge).search_tab_available(tab) || matches!(tab, HomeTab::LiveTv) { continue; }
                 match tab {
-                    HomeTab::Home => bridge::nav_home_pill(&mut app.pages, &mut app.bridge, Some(ret)),
-                    other => bridge::nav_tab(&mut app.pages, &mut app.bridge, other, None, Some(ret)),
+                    HomeTab::Home => bridge::nav_home_pill(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), Some(ret)),
+                    other => bridge::nav_tab(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), other, None, Some(ret)),
                 }
             }
             LiveTvReq::Account => bridge::open_account_menu(&mut app.pages),
-            LiveTvReq::Back => bridge::nav_tab(&mut app.pages, &mut app.bridge, HomeTab::Home, None, Some(ret)),
+            LiveTvReq::Back => bridge::nav_tab(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), HomeTab::Home, None, Some(ret)),
             LiveTvReq::Tune { index } => {
-                let lineup = Arc::clone(app.bridge.livetv_view().lineup());
+                let lineup = Arc::clone(app.runtime.livetv_view().lineup());
                 if index < lineup.len() {
                     let previous = plx_media::route::live(&app.player.session).map(|l| l.index).filter(|&p| p != index);
                     tune(app, lineup, index, previous, now);
@@ -116,9 +116,10 @@ pub(crate) fn requests(app: &mut App, now: u32) {
                     }
                 }
             }
+            LiveTvReq::Number(number) => tune_number(app, &number, now),
             LiveTvReq::Detail { sid, rk } => {
                 let hit = plx_data::livetv::plexmatch::Hit { sid, rk };
-                if !app.bridge.livetv_view().knows_match(&hit) { continue; }
+                if !app.runtime.livetv_view().knows_match(&hit) { continue; }
                 let arg = AppArg::Content(plx_screens::registry::ContentArg::Detail { sid: hit.sid, rk: hit.rk });
                 bridge::nav_push_with_return(&mut app.pages, arg, ret);
             }
@@ -131,7 +132,7 @@ pub(crate) fn requests(app: &mut App, now: u32) {
 /// Tune the channel numbered `number` in the loaded guide — OK on Home's On Now card
 /// (`HomeReq::Tune`). A number the guide no longer lists (it reloaded under the card) does nothing.
 pub(crate) fn tune_number(app: &mut App, number: &str, now: u32) {
-    let lineup = Arc::clone(app.bridge.livetv_view().lineup());
+    let lineup = Arc::clone(app.runtime.livetv_view().lineup());
     let Some(index) = lineup.index_of_number(number) else { return };
     let previous = plx_media::route::live(&app.player.session).map(|l| l.index).filter(|&p| p != index);
     tune(app, lineup, index, previous, now);
@@ -163,22 +164,19 @@ fn tune(app: &mut App, lineup: Arc<plx_data::livetv::guide::Lineup>, index: usiz
     plx_media::route::set_live_tuning(&mut app.player.session, session);
     let in_player = app.route() == AppArg::Player;
     if in_player {
-        if let Some(player) = bridge::player_mut(&mut app.pages) {
-            player.hud.dismissed = false;
-            player.hud.extend(now, plx_screens::player::LIVE_BANNER_MS);
-            player.publish();
-        }
+        bridge::send_player_message(&mut app.pages,
+            plx_screens::registry::AppMsg::PlayerStart { now, hud_ms: plx_screens::player::LIVE_BANNER_MS });
     } else {
-        super::playback::enter_player(&mut app.pages, &mut app.bridge, super::playback::Origin::Here, None);
-        app.bridge.seed_player_hud(plx_screens::player::LIVE_BANNER_MS);
+        super::playback::enter_player(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), super::playback::Origin::Here, None);
+        app.runtime.bridge(&mut app.bridge).seed_player_hud(plx_screens::player::LIVE_BANNER_MS);
     }
-    plx_media::player::lifecycle::set_paused(false);
+    plx_media::player::commit_paused(&mut app.player.session, &mut app.adapters.player, false);
     if let Some(playlist) = virtual_playlist {
         app.livetv.epoch += 1;
         app.livetv.retry_at = None;
         app.livetv.pending = None;
         tune_virtual(app, &playlist, now);
-        plx_machine::idle::invalidate();
+        app.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
         return;
     }
     app.livetv.epoch += 1;
@@ -195,7 +193,7 @@ fn tune(app: &mut App, lineup: Arc<plx_data::livetv::guide::Lineup>, index: usiz
     let probe_url = url.clone();
     let spawned = plx_base::task::spawn_small("livetv-probe", move || {
         let _ = tx.send(plx_media::live::probe(&probe_url));
-        plx_machine::idle::wake();
+        plx_machine::present::wake_from_worker();
     });
     if spawned {
         app.livetv.pending = Some(Pending { epoch: app.livetv.epoch, url, rx });
@@ -203,7 +201,7 @@ fn tune(app: &mut App, lineup: Arc<plx_data::livetv::guide::Lineup>, index: usiz
         // No worker: play with Tunarr's default declaration rather than not at all.
         start(app, url, StreamFacts::TUNARR_DEFAULT);
     }
-    plx_machine::idle::invalidate();
+    app.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
 }
 
 /// Steps 2 and 3 for a virtual channel: what its timeline airs now, played from where the channel
@@ -212,7 +210,7 @@ fn tune(app: &mut App, lineup: Arc<plx_data::livetv::guide::Lineup>, index: usiz
 fn tune_virtual(app: &mut App, playlist: &str, now: u32) {
     let wall = plx_base::wallclock::now_ms();
     let airing = {
-        let view = app.bridge.livetv_view();
+        let view = app.runtime.livetv_view();
         view.virtuals()
             .channel(playlist)
             .and_then(|vc| vc.schedule.as_ref())
@@ -236,7 +234,8 @@ fn tune_virtual(app: &mut App, playlist: &str, now: u32) {
     ));
     let requested = plx_media::route::request_play_channel(
         &mut app.player.session,
-        app.bridge.metadata_mut(),
+        app.runtime.metadata_mut(),
+        super::playback::start_caps(),
         plx_plex::plex::ServerId::from_raw(programme.sid),
         &programme.rk,
         &programme.part,
@@ -258,7 +257,7 @@ fn tune_virtual(app: &mut App, playlist: &str, now: u32) {
         plx_screens::player::LIVE_BANNER_MS,
         None,
         &mut app.pages,
-        &mut app.bridge,
+        &mut app.runtime.bridge(&mut app.bridge),
     );
     if let Some(channel) = plx_media::route::live(&app.player.session).and_then(|l| l.channel()) {
         plx_data::livetv::remember_channel(&channel.number);
@@ -295,11 +294,11 @@ fn start(app: &mut App, url: String, facts: StreamFacts) {
         fail(app);
         return;
     }
-    plx_media::player::lifecycle::set_paused(false);
+    plx_media::player::commit_paused(&mut app.player.session, &mut app.adapters.player, false);
     if let Some(channel) = plx_media::route::live(&app.player.session).and_then(|l| l.channel()) {
         plx_data::livetv::remember_channel(&channel.number);
     }
-    plx_machine::idle::invalidate();
+    app.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
 }
 
 fn fail(app: &mut App) {
@@ -307,7 +306,7 @@ fn fail(app: &mut App) {
         session.failed = true;
         plx_media::route::set_live_tuning(&mut app.player.session, session);
     }
-    plx_machine::idle::invalidate();
+    app.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
 }
 
 /// Once a frame: land the probe, and run the automatic re-tune schedule.
@@ -349,13 +348,13 @@ pub(crate) fn pump(app: &mut App, now: u32) {
         return;
     };
     // A channel that has shown a picture has proven itself: its retry budget is whole again.
-    if live.facts.is_some() && plx_media::player::seen_frame() {
+    if live.facts.is_some() && plx_media::player::seen_frame(&app.player.session).unwrap_or(false) {
         app.livetv.retries = 0;
     }
     // An engine that failed on a live channel is re-tuned before the read-out is left standing.
     if app.livetv.retry_at.is_none()
         && live.facts.is_some()
-        && plx_appkit::player_hud::transport_hidden(&app.player.session)
+        && plx_appkit::player_hud::transport_hidden(&super::player_presentation::capture(&app.player.session))
     {
         schedule_retry(app, now);
     }
@@ -395,12 +394,6 @@ pub(crate) fn stream_ended(app: &mut App, now: u32) {
     }
 }
 
-/// Open the Live TV page on its channel studio, on the suggestion `id` (a Home Suggested Channels
-/// card).
-pub(crate) fn open_studio(app: &mut App, id: String) {
-    bridge::nav_select_tab(&mut app.pages, AppArg::LiveTv);
-    app.bridge.request_livetv_studio(id);
-}
 
 /// Open the Live TV page's channel studio making a channel from a show, season, collection or
 /// playlist (the card menu's "Make a Channel"). `kind` is the row's catalog kind.
@@ -418,7 +411,7 @@ pub(crate) fn open_make(
         plx_data::pms::KIND_PLAYLIST => Source::Playlist { rk: rk.to_owned() },
         _ => Source::Collection { rk: rk.to_owned() },
     };
-    let why = plx_platform::i18n::msg::livetv_studio_made_from(title);
+    let why = plx_os::i18n::msg::livetv_studio_made_from(title);
     let recipe = Recipe::made(source, title, &why, plx_base::wallclock::now_ms());
     bridge::nav_select_tab(pages, AppArg::LiveTv);
     rig.request_livetv_make(recipe, why);

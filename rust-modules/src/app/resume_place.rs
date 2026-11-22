@@ -195,8 +195,8 @@ fn restore(app: &mut App, now_ms: u32) {
                 plx_data::browse::SecKind::Show => plx_screens::registry::HomeTab::Shows,
                 _ => plx_screens::registry::HomeTab::Movies,
             };
-            if app.bridge.search_tab_available(tab) {
-                app.bridge.enter_library(*kind);
+            if app.runtime.bridge(&mut app.bridge).search_tab_available(tab) {
+                app.runtime.bridge(&mut app.bridge).enter_library(*kind);
                 super::bridge::nav_select_tab(&mut app.pages, AppArg::Library);
                 true
             } else {
@@ -208,8 +208,8 @@ fn restore(app: &mut App, now_ms: u32) {
             true
         }
         Place::LiveTv => {
-            if app.bridge.livetv_view().configured() {
-                super::livetv::open_page(&mut app.pages, &mut app.bridge, false);
+            if app.runtime.livetv_view().configured() {
+                super::livetv::open_page(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), false);
                 true
             } else {
                 false
@@ -218,8 +218,8 @@ fn restore(app: &mut App, now_ms: u32) {
         Place::Item { machine, rk } => match plx_plex::plex::id_of_machine(machine) {
             Some(sid) => {
                 let rk = rk.clone();
-                app.bridge.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::RequestDetail { sid, rk: rk.clone() });
-                super::bridge::open_detail(&mut app.pages, &mut app.bridge, sid, &rk, None, None);
+                app.runtime.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::RequestDetail { sid, rk: rk.clone() });
+                super::bridge::open_detail(&mut app.pages, &mut app.runtime.bridge(&mut app.bridge), sid, &rk, None, None);
                 true
             }
             None => false,
@@ -244,7 +244,7 @@ fn track(app: &mut App) {
                 .map(|machine| Place::Item { machine, rk })
         }
     } else {
-        place_of(&arg, app.bridge.library_kind(), machine_of)
+        place_of(&arg, app.runtime.bridge(&mut app.bridge).library_kind(), machine_of)
     };
     let Some(place) = place else { return };
     if app.resume.written.as_ref() == Some(&place) {

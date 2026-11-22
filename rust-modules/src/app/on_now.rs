@@ -65,7 +65,7 @@ impl OnNowFeed {
 pub(crate) fn step(app: &mut App) {
     let now_ms = plx_base::wallclock::now_ms();
     let art_sid = plx_plex::plex::current_server();
-    let view = app.bridge.livetv_view();
+    let view = app.runtime.livetv_view();
     let configured = view.configured();
     let inputs = Inputs {
         guide: view.revision(),
@@ -78,22 +78,22 @@ pub(crate) fn step(app: &mut App) {
     let arrived = home_visible && !app.on_now.home_visible;
     let (reload, rebuild) = app.on_now.step(inputs, configured, home_visible);
     if reload && tunarr {
-        app.bridge.livetv_run(plx_data::livetv::LiveTvCmd::RefreshIfStale);
+        app.runtime.bridge(&mut app.bridge).livetv_run(plx_data::livetv::LiveTvCmd::RefreshIfStale);
     }
     // On each arrival of Home, and while Home shows and the channels were never read (the Plex
     // server was not ready yet when Home first appeared): a read with no server does nothing.
     let unread = {
-        let v = app.bridge.livetv_view();
+        let v = app.runtime.livetv_view();
         v.virtuals().list_state() == plx_data::vchannel::channels::ListState::Unread && !v.virtuals().busy()
     };
     if arrived || (home_visible && unread) {
-        app.bridge.livetv_run(plx_data::livetv::LiveTvCmd::Virtual(plx_data::vchannel::channels::VCmd::RefreshIfStale));
+        app.runtime.bridge(&mut app.bridge).livetv_run(plx_data::livetv::LiveTvCmd::Virtual(plx_data::vchannel::channels::VCmd::RefreshIfStale));
     }
     feed_channels(app);
     if !rebuild {
         return;
     }
-    let view = app.bridge.livetv_view();
+    let view = app.runtime.livetv_view();
     let rows = if view.configured() {
         let last = plx_plex::plex::session::peek().livetv_channel().to_owned();
         on_now::rows(&on_now::on_now(view.lineup(), &last, now_ms, on_now::ON_NOW_MAX), art_sid, now_ms)
@@ -102,13 +102,13 @@ pub(crate) fn step(app: &mut App) {
     };
     super::bridge::execute_endpoint_outcomes(
         &mut app.pages,
-        app.bridge.hubs_run(plx_data::stores::hubs::HubsCmd::SetOnNow(plx_data::pms::ShelfRows(rows))).endpoints,
+        app.runtime.bridge(&mut app.bridge).hubs_run(plx_data::stores::hubs::HubsCmd::SetOnNow(plx_data::pms::ShelfRows(rows))).endpoints,
     );
 }
 
 /// Hand Home the Suggested Channels shelf when the virtual channels moved since it was built.
 fn feed_channels(app: &mut App) {
-    let view = app.bridge.livetv_view();
+    let view = app.runtime.livetv_view();
     let revision = view.virtuals().revision();
     if app.on_now.channels_built == Some(revision) {
         return;
@@ -116,12 +116,12 @@ fn feed_channels(app: &mut App) {
     app.on_now.channels_built = Some(revision);
     let rows = plx_data::livetv::suggested::rows(
         view.virtuals().suggestions(),
-        plx_platform::i18n::msg::browse_home_surprise_title(),
-        plx_platform::i18n::msg::browse_home_surprise_why(),
+        plx_os::i18n::msg::browse_home_surprise_title(),
+        plx_os::i18n::msg::browse_home_surprise_why(),
     );
     super::bridge::execute_endpoint_outcomes(
         &mut app.pages,
-        app.bridge.hubs_run(plx_data::stores::hubs::HubsCmd::SetChannels(plx_data::pms::ShelfRows(rows))).endpoints,
+        app.runtime.bridge(&mut app.bridge).hubs_run(plx_data::stores::hubs::HubsCmd::SetChannels(plx_data::pms::ShelfRows(rows))).endpoints,
     );
 }
 

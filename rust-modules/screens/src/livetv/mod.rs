@@ -1004,7 +1004,7 @@ impl<H: LiveTvLike> Screen<H> for LiveTvScreen {
             Face::Setup => self.draw_setup(p, view, focused, f.cx.tick.ms, f.measure),
             Face::Loading => {
                 // placeholder-exempt: builds the value only; counted where drawn (StatusOverlay, Working)
-                StatusOverlay::new(guide_frame(), plx_platform::i18n::msg::livetv_loading_c(), StatusKind::Working)
+                StatusOverlay::new(guide_frame(), plx_os::i18n::msg::livetv_loading_c(), StatusKind::Working)
                     .phase(f.cx.tick.ms)
                     .draw_measured(&plx_ui::Env::inert(), p, f.measure);
             }
@@ -1157,8 +1157,8 @@ mod tests {
         use plx_data::livetv::guide::Genre;
         let mut chips = vec![Filter::All];
         chips.extend(Genre::ALL.iter().map(|g| Filter::Genre(*g)));
-        for language in plx_platform::i18n::SHIPPED {
-            let _guard = plx_platform::i18n::language_on_this_thread_for_test(language);
+        for language in plx_os::i18n::SHIPPED {
+            let _guard = plx_os::i18n::language_on_this_thread_for_test(language);
             assert_eq!(draw::strip_fit(&chips, &ShippedMeasure), chips.len(), "{language:?}");
             for chip in &chips {
                 let label = chip.label();

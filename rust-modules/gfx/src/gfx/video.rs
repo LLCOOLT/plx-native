@@ -120,6 +120,7 @@ pub struct Textures {
     shape: [(c_int, c_int, c_int); 3],
 }
 
+#[derive(Clone, Copy)]
 struct Program {
     prog: c_uint,
     vid: c_int,
@@ -132,14 +133,19 @@ struct Program {
     hdr: c_int,
 }
 
-/// Linked on first use: a desktop that never plays a video never compiles it. `None` once a driver
-/// refused it, which leaves the picture out and the UI as it is.
-static mut PROGRAM: Option<Option<Program>> = None;
+thread_local! {
+    /// Linked on first use, on the render thread that owns the GL context: a desktop that never
+    /// plays a video never compiles it. `Some(None)` once a driver refused it, which leaves the
+    /// picture out and the UI as it is.
+    static PROGRAM: std::cell::Cell<Option<Option<Program>>> = const { std::cell::Cell::new(None) };
+}
 
-#[allow(static_mut_refs)]
-fn program() -> Option<&'static Program> {
+fn program() -> Option<Program> {
+    if let Some(linked) = PROGRAM.get() {
+        return linked;
+    }
     unsafe {
-        if PROGRAM.is_none() {
+        {
             let linked = link_optional_program(VS_SRC.as_ptr(), FS_VIDEO.as_ptr()).map(|prog| {
                 let loc = |name: &std::ffi::CStr| glGetUniformLocation(prog, name.as_ptr());
                 use_prog(prog);
@@ -164,9 +170,9 @@ fn program() -> Option<&'static Program> {
             if linked.is_none() {
                 plx_base::eventlog::log("video: the picture shader did not link; video will not be shown");
             }
-            PROGRAM = Some(linked);
+            PROGRAM.set(Some(linked));
+            linked
         }
-        PROGRAM.as_ref().and_then(Option::as_ref)
     }
 }
 
@@ -261,7 +267,8 @@ impl Textures {
                 Transfer::Hlg => 2.0,
             });
             glBlendFuncSeparate(GL_ONE_MINUS_DST_ALPHA, GL_ONE, GL_ONE_MINUS_DST_ALPHA, GL_ONE);
-            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            // The picture and its black surround cover the whole target.
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, super::straighten::Extent::Target);
             glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         }
     }

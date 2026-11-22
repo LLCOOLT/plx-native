@@ -137,7 +137,7 @@ impl Candidate {
             title: m.title.clone(),
             year: m.year,
             show: m.grandparent_title.clone(),
-            season: m.parent_index,
+            season: m.parent_index.unwrap_or(0),
             index: m.index,
         }
     }

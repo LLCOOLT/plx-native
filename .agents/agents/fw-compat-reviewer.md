@@ -3,8 +3,13 @@ name: fw-compat-reviewer
 description: >
   Review a change that touches FFI, linkage, or the runtime library seam and answer one
   question — can this binary still START on every firmware this project claims to support?
-  Use before pushing anything that edits `rust-modules/base/src/dynlib.rs`, `ff.rs`, `net.rs`,
-  `src/starfish.c`, `ci/expected-dt-needed.txt`, the Makefile's `LIBS_REAL`, or that adds any
+  Use before pushing anything that edits `rust-modules/base/src/dynlib.rs`,
+  `rust-modules/media-codecs/src/ffi.rs`, `rust-modules/media-codecs/src/venc.rs`,
+  `rust-modules/net/src/net.rs`, `rust-modules/net/src/curlio.rs`,
+  `src/starfish.c`, `src/video_plane.c`, `src/starfish.h`, `rust-modules/platform-webos/src/webos/ls2/uri.rs`,
+  `rust-modules/play-uri/src`, `ci/expected-dt-needed.txt`,
+  `ci/expected-dt-needed-uri.txt`, the Makefile's `LIBS_REAL`, `PLAYBACK_BACKENDS` or
+  `PLAYBACK_HAS_FEED`, or that adds any
   `extern "C"` block, `#[link]` directive, `dlopen`, mangled-symbol declaration or new FFmpeg /
   curl / Starfish / ACB call. Also use when a reviewer asks "does this still load on webOS 5?",
   when `ci/check-elf.sh` reports DT_NEEDED drift, or when a `dynlib!` declaration is being added
@@ -46,12 +51,18 @@ In scope if the diff touches any of:
 | path / edit | why it can move the answer |
 |---|---|
 | `rust-modules/base/src/dynlib.rs` | the one door for runtime-bound libraries; the macro's shape *is* the calling convention |
-| `rust-modules/media/src/ff.rs` | the four bundled-FFmpeg `dynlib!` blocks + the pinned-major gate |
+| `rust-modules/media-codecs/src/ffi.rs` | the four bundled-FFmpeg `dynlib!` blocks + the pinned-major gate |
+| `rust-modules/media-codecs/src/venc.rs` | the moved encoder ABI self-check and its FFmpeg calls |
 | `rust-modules/net/src/net.rs` | the libcurl `dynlib!` block — variadic wrappers over two C symbols, plus the candidate list |
-| `src/starfish.c` | 15 mangled C++ externs against real libraries, plus its own `dlopen` of ACB |
+| `rust-modules/net/src/curlio.rs` | the byte-range `curl_multi_*` `dynlib!` table, exposed as `net::range_io` |
+| `src/starfish.c` | 15 mangled C++ externs against real libraries (built only when `PLAYBACK_HAS_FEED`) |
+| `src/video_plane.c`, `src/starfish.h` | the video-plane binding: its own `dlopen` of ACB, the `dlsym` probe for the SDL exported window, and `vp_mode()` choosing between them; the header declares the `acb_*` / `sf_*` seam the Rust externs mirror |
+| `rust-modules/platform-webos/src/webos/ls2/uri.rs` and the `LSCall` declaration in `platform-webos/src/webos.rs` | the `com.webos.media` LS2 worker; `LSCall` is a hard import of `libluna-service2` in every build with the webOS platform crate's feature `uri-transport`, which its `play-uri` feature (in the shipping set) turns on |
+| `rust-modules/play-uri/src` | the URI backend declares no `extern "C"` of its own: it reaches ACB through `DisplaySink` (the platform's `acb_*` externs) and the bus through `tv::uri::UriMedia`; a declaration appearing here is a new undefined symbol and a layer violation |
 | any new `extern "C"` block, `#[link]`, or `__asm__("<mangled>")` declaration | each one adds an undefined symbol, or a whole `DT_NEEDED` entry |
-| `Makefile`'s `LIBS_REAL` / the link line (currently line 256 / 444) | a new `-l` is a new hard `DT_NEEDED` |
-| `ci/expected-dt-needed.txt` | somebody is *recording* drift; the question is whether it is safe drift |
+| `Makefile`'s `LIBS_REAL` and the link rule that uses it | a new `-l` is a new hard `DT_NEEDED` |
+| `Makefile`'s `PLAYBACK_BACKENDS` / `PLAYBACK_HAS_FEED` | they choose whether `src/starfish.c`, `-lplayerAPIs -lpf-1.0` and the `callbackFunctionHook` export are in the binary at all |
+| `ci/expected-dt-needed.txt`, `ci/expected-dt-needed-uri.txt` | somebody is *recording* drift; the question is whether it is safe drift |
 | `ci/build-ffmpeg.sh`, `ci/check-elf.sh`, the CI compat steps | they define what "supported" means |
 
 Out of scope and worth saying so in one line rather than reviewing anyway: UI, the Plex data
@@ -78,7 +89,7 @@ crossing 5→4 at exactly the same release.
 **3 — FFmpeg: the app BUNDLES its own and PINS it.** This one is *not* a version question, and
 treating it as one ("FFmpeg SONAMEs drift, 55→57→58→59→60") is the stale mental model. `make`
 cross-compiles FFmpeg 9.0 under a `-plx` build suffix (`ci/build-ffmpeg.sh`, `--build-suffix=-plx`),
-ships the `.so` files beside the binary, and `ff.rs::load_libraries` opens them by **absolute path
+ships the `.so` files beside the binary, and `media-codecs/src/ffi.rs::load_libraries` opens them by **absolute path
 out of `paths::app_dir()`** — because they sit on no library search path, and because webOS 11.2.0
 ships an FFmpeg 6 of its own that a bare SONAME could open instead. Both halves of that guarantee
 are load-bearing; `tools/fwcompat.py --inventory libavformat-plx` returns `-` on all 14 releases,
@@ -102,20 +113,22 @@ Consequences to check in any FFmpeg-touching diff:
   this; both blocks now carry a comment about it. Check every added symbol is in the library that
   *defines* it.
 
-**ACB is the same idea but is not `dynlib!`** — `src/starfish.c` is C and does its own
+**ACB is the same idea but is not `dynlib!`** — `src/video_plane.c` is C and does its own
 `dlopen("libAcbAPI.so.1", RTLD_NOW|RTLD_GLOBAL)`, falling back to
 `dlsym(RTLD_DEFAULT, "SDL_webOSCreateExportedWindow")` and picking between them in `vp_mode()`
 (`VP_ACB` / `VP_EXPORTED` / `VP_NONE`). The two are complementary across all 14 firmwares. A change
 there is in scope and is read in that file, not in `dynlib.rs`.
 
 **Everything else stays linked, and that is correct.** `LIBS_REAL` is `-lSDL2 -lSDL2_ttf -lGLESv2
--lluna-service2 -lglib-2.0 -lwayland-client -lplayerAPIs -lpf-1.0` (plus `-ldl -lpthread -lm`),
-every one of which carries the same SONAME on every release from 2.2.3 to 11.2.0. Moving a library
+-lluna-service2 -lglib-2.0 -lwayland-client`, plus `-lplayerAPIs -lpf-1.0` only when
+`PLAYBACK_HAS_FEED` is set (a `PLAYBACK_BACKENDS=uri` build links neither, and `ci/check-elf.sh` then
+diffs against `ci/expected-dt-needed-uri.txt`), and `-ldl -lpthread -lm`. Every one of them carries
+the same SONAME on every release from 2.2.3 to 11.2.0. Moving a library
 into `dynlib!` **trades link-time symbol checking away** for version tolerance and is only worth
 it where the version actually varies. If a diff moves a stable library there, push back and ask
 for the `--inventory` output that justifies it. The precedent for the other direction is
-`textinput.rs`: plain `extern "C"`, justified in its module doc by all 14 inventories exporting the
-whole `SDL_*TextInput*` family.
+`rust-modules/shell-sdl/src/sys.rs`: plain `extern "C"` (the `SDL_*TextInput*` calls among them),
+justified in its module doc by all 14 inventories exporting every name outside its `hostsim` block.
 
 ## WHAT `fwcompat.py` NEEDS BEFORE IT WILL ANSWER — settle this first, not at your third command
 
@@ -123,8 +136,8 @@ Two preconditions, and neither is in the `--help` text.
 
 **1. A ~317 MB firmware inventory database, fetched ONCE.** `ensure_db` runs before every mode —
 `--inventory` and `--lib` included — and looks for `~/.cache/plxnative/fwsym/data`. If that is
-absent it downloads `webosbrew-toolbox-fw-symbols_0.4.0-1_arm64.deb` from GitHub (pinned in the
-script as `FWSYM_TAG = v20260731-e1bb0c0`, so a database refresh is a visible commit rather than a
+absent it downloads `webosbrew-toolbox-fw-symbols_0.4.0-1_arm64.deb` from GitHub (pinned, with its sha256, in
+`ci/dependencies.json` as entry `webosbrew-toolbox`, so a database refresh is a visible commit rather than a
 silent change of verdict) and unpacks it. **So the first invocation on a machine needs the
 network; every invocation after it is genuinely offline** — measured on this checkout 2026-08-23,
 0.07 s for `--inventory`, 0.27 s for the full matrix. In a sandbox with no egress and a cold
@@ -146,9 +159,11 @@ grade an ELF at all.
 
 ```sh
 git -C <repo> diff --stat HEAD          # or the range under review
-git -C <repo> diff HEAD -- rust-modules/base/src/dynlib.rs rust-modules/media/src/ff.rs \
-    rust-modules/net/src/net.rs src/starfish.c Makefile ci/expected-dt-needed.txt
-grep -rn '#\[link\|extern "C"\|__asm__("' rust-modules/src rust-modules/media/src rust-modules/net/src src   # against the diff, not the tree
+git -C <repo> diff HEAD -- rust-modules/base/src/dynlib.rs rust-modules/media-codecs/src/ffi.rs rust-modules/media-codecs/src/venc.rs \
+    rust-modules/net/src/net.rs rust-modules/net/src/curlio.rs src/starfish.c src/video_plane.c src/starfish.h \
+    rust-modules/platform-webos/src/webos.rs rust-modules/platform-webos/src/webos/ls2/uri.rs Makefile \
+    ci/expected-dt-needed.txt ci/expected-dt-needed-uri.txt
+grep -rn '#\[link\|extern "C"\|__asm__("' rust-modules/src rust-modules/shell-sdl/src rust-modules/platform-webos/src rust-modules/platform-desktop/src rust-modules/platform-tizen/src rust-modules/media/src rust-modules/play-feed/src rust-modules/play-uri/src rust-modules/os/src rust-modules/media-codecs/src rust-modules/net/src src   # against the diff, not the tree
 ```
 
 ### 1. Decide, out loud, whether you are grading an ELF or grading source
@@ -214,7 +229,8 @@ tools/fwcompat.py --lib <soname> --grep '^<symbol>$'   # presence + one symbol, 
 ```
 
 Then the recorded expectation has to move with it — `ci/check-elf.sh` diffs the binary's
-`DT_NEEDED` against `ci/expected-dt-needed.txt` (15 entries today) and fails on any drift.
+`DT_NEEDED` against `ci/expected-dt-needed.txt` (15 entries today; `ci/expected-dt-needed-uri.txt`, 13 entries,
+for a `PLAYBACK_BACKENDS=uri` build) and fails on any drift.
 Regenerate it in **C collation**, not the shell's default: macOS orders case-insensitively and the
 Linux runner puts capitals first, and that pure-ordering diff reads exactly like the ABI drift the
 check exists to catch. That is what `LC_ALL=C` in the check is for.
@@ -235,16 +251,18 @@ Reading the output:
 
 * **Always pass `--min-release 4.4.2`: a bare `tools/fwcompat.py` EXITS 1 on a perfectly healthy
   binary.** Verified 2026-08-23 on this checkout — same ELF, byte-identical table, `bare exit=1`
-  against `--min-release 4.4.2 exit=0`. With no floor every release gates, and the five oldest
-  fail permanently (next bullet). So a `set -e`, a wrapper script, or anyone who reads `$?`
+  against `--min-release 4.4.2 exit=0`. With no floor every release gates, including the
+  old images below the floor (next bullet). So a `set -e`, a wrapper script, or anyone who reads `$?`
   instead of the table gets a regression that is not one. docs/agent-reference.md's own example line
   (`tools/fwcompat.py   # the matrix: OK/FAIL per release`) does not mention it.
-* **`--min-release 4.4.2` is the floor, and there is a reason.** The five oldest images (1.2.0,
-  1.4.0, 2.2.3, 3.4.0, 3.9.2) fail permanently and for something nobody intends to fix: they
-  predate the C++11 `std::string` ABI, so `StarfishMediaAPIs::Feed` has a different mangling.
-  `tools/fwcompat.py --release 3.9.2` shows it directly — the two missing symbols are
-  `SDL_webOSCursorVisibility` and `_ZN17StarfishMediaAPIs4FeedB5cxx11EPKc`, the `B5cxx11` tag being
-  the whole story. Those rows are still printed; they just do not set the exit status.
+* **`--min-release 4.4.2` is the floor, and there is a reason.** It is the oldest release this
+  project has graded as healthy; the older images (1.2.0, 1.4.0, 2.2.3, 3.4.0, 3.9.2) predate the
+  C++11 `std::string` ABI and are untested on a set apart from one 3.4.3 (webOS 1.x/2.x were never
+  tried). They used to fail on two missing symbols, `SDL_webOSCursorVisibility` and
+  `StarfishMediaAPIs::Feed`'s C++11 name, but since #578 both are `dlsym`'d at runtime
+  (`src/starfish.c`, and `rust-modules/platform-webos/src/system.rs`'s `webos3_cursor_sleep_hint` and `cursor_door`), so the binary no longer imports them. Re-run
+  `tools/fwcompat.py` for what the old rows print now; they are still printed below the floor and
+  do not set the exit status.
 * **Baseline as of 2026-08-23** (verified by running it): `15 DT_NEEDED, 319 undefined dynamic
   symbols`, **OK on 4.4.2, 4.10.0, 5.3.1, 6.4.0, 7.4.0, 8.3.0, 9.2.0, 10.2.0, 11.2.0**. Anything
   else at or above the floor is a regression introduced by the diff. Do not quote this baseline as
@@ -370,17 +388,18 @@ infer past.)
   (14 GB on this checkout, per feature set, per worktree). Worse for your own job: any make
   invocation that is not a **pure query** and whose feature configuration differs from the stamp
   **deletes `pkg/plxnative` at parse time** — so `make RELEASE=1 <anything>` would destroy the very
-  binary you were about to grade. The only side-effect-free goals are the seven `print-*` queries
-  and `release-guard`; `make -s print-appdir` is safe, `make -p` is never (it prints unexpanded
+  binary you were about to grade. The side-effect-free goals are the `SIDE_EFFECT_FREE` list
+  (`grep '^SIDE_EFFECT_FREE' Makefile`: the `print-*` queries, `release-guard`, `make disk`,
+  `make check-nodef` and a few more); `make -s print-appdir` is safe, `make -p` is never (it prints unexpanded
   recursive variables).
 * Host-only tooling is fine and encouraged: `tools/fwcompat.py`, `ci/check-elf.sh`, the NDK's
-  `arm-webos-linux-gnueabi-readelf` / `-objdump`, `cd rust-modules && cargo +nightly check`,
-  `make check`. **`make check` is NOT in `SIDE_EFFECT_FREE`** (Makefile line 358 — that list is
-  the seven `print-*` goals plus `release-guard`, and nothing else), so on a checkout whose last
+  `arm-webos-linux-gnueabi-readelf` / `-objdump`, `cd rust-modules && cargo check`,
+  `make check`. **`make check` is NOT in `SIDE_EFFECT_FREE`** (the Makefile line starting
+  `SIDE_EFFECT_FREE =` is the exact set), so on a checkout whose last
   build was `RELEASE=1`, a plain `make check` rewrites `pkg/.build-config` at parse time and takes
   `pkg/plxnative` and the staged `.so` files with it: the binary you were about to grade, gone
   before cargo has started. **Grade the ELF first and run host checks after**, or invoke
-  `cargo +nightly check` inside `rust-modules/` directly, which never touches the stamp.
+  `cargo check` inside `rust-modules/` directly, which never touches the stamp.
 
 ## OUTPUT
 

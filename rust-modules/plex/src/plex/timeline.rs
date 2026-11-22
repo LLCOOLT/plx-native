@@ -6,8 +6,12 @@
 //! per-playback session id, PlayQueue ids, and the SELECTED audio/subtitle stream ids, so
 //! /status/sessions shows the right track and the Direct Play vs Transcode badge
 //! (correlated by the active encoder's coupled `X-Plex-Session-Identifier == session=`).
+//! PMS keeps a dashboard row for every session id that ever reported `playing` until that id goes
+//! quiet for minutes, whatever the encoder stop and `/status/sessions/close` did; a report with
+//! `state=stopped` and `continuing=1` ([`TimelineReport::continuing`]) retires the row of an id
+//! the playback has moved off (issue #1236).
 use super::client::{Client, QueryBuilder};
-use super::params::TimelineReport;
+use super::params::{ServerStop, TimelineAnswer, TimelineReport};
 use super::servers::ServerId;
 
 impl Client {
@@ -20,6 +24,19 @@ impl Client {
     /// same success line for all four. The reporting is `crate::route::scrobble_stop`'s; this
     /// only has to stop throwing the answer away.
     pub fn timeline(&self, r: &TimelineReport) -> bool {
+        self.post_ok(&self.timeline_query(r))
+    }
+
+    pub fn timeline_answer(&self, r: &TimelineReport) -> TimelineAnswer {
+        match self.post_accepting_json(&self.timeline_query(r)) {
+            Some(body) => TimelineAnswer { taken: true, stop: server_stop_of(&body) },
+            None => TimelineAnswer::default(),
+        }
+    }
+
+    /// The request path and query of one report, without the token. Its own function so the wire
+    /// shape is graded without a server.
+    fn timeline_query(&self, r: &TimelineReport) -> String {
         let q = QueryBuilder::new("/:/timeline")
             .str("ratingKey", r.rating_key)
             .str("key", &format!("/library/metadata/{}", r.rating_key))
@@ -33,8 +50,9 @@ impl Client {
             .opt_str("playQueueID", r.play_queue_id)
             .opt_str("playQueueItemID", r.play_queue_item_id)
             .opt_int("audioStreamID", r.audio_stream_id)
-            .opt_int("subtitleStreamID", r.subtitle_stream_id);
-        self.post_ok(&q.build())
+            .opt_int("subtitleStreamID", r.subtitle_stream_id)
+            .opt_int("continuing", i64::from(r.continuing));
+        q.build()
     }
 
     /// GET /identity → the server's stable machineIdentifier (None on failure/empty).
@@ -50,14 +68,26 @@ impl Client {
     /// POST /playQueues for one item. Best-effort: None on failure — the timeline still works,
     /// just without the queue ids (and the player without an Up Next).
     ///
-    /// `continuous=1` is what makes the response carry the show's remaining episodes after the
-    /// one being played, each as a FULL `Metadata` row (thumb, S/E, duration, viewOffset, and
-    /// `Media[0].Part[0].key` + codecs — everything `route::request_play` needs). The Up Next control
-    /// screen is therefore free: it reads [`PlayQueueResult::next`] from the queue this playback
-    /// already had to create, instead of asking the server what plays next.
+    /// **An episode's queue is the SHOW's, with the episode selected in it** (`show_rk` non-empty):
+    /// the request names the show as the `uri` and the episode as the `key`
+    /// ([`show_queue_query`]). The queue then holds the episodes BEFORE the one playing as well as
+    /// after it, which is what Previous needs: the episode-only request below answers the playing
+    /// episode and its successors and nothing before, so a play started fresh had no predecessor
+    /// row and the Previous disc could only ever be a restart of the current episode. This shape
+    /// is spec- and client-derived, not observed on a live server (`docs/pms-api.md`, "A show-keyed PlayQueue"),
+    /// so the answer is accepted only when its selected row IS the requested episode
+    /// ([`PlayQueueResult::selects`]); a server that ignored `key`, or refused, falls back to the
+    /// episode request, which is exactly what every play sent before.
     ///
-    /// Trailer extras omit `continuous`: a continuous extras queue can be sibling clips, and EOS
-    /// must not Up-Next into a featurette. `opt_int` drops the param when `continuous` is false.
+    /// The episode request's `continuous=1` is what makes the response carry the show's remaining
+    /// episodes after the one being played, each as a FULL `Metadata` row (thumb, S/E, duration,
+    /// viewOffset, and `Media[0].Part[0].key` + codecs — everything `route::request_play` needs).
+    /// The Up Next control screen is therefore free: it reads [`PlayQueueResult::next`] from the
+    /// queue this playback already had to create, instead of asking the server what plays next.
+    ///
+    /// Trailer extras omit `continuous` (and pass no `show_rk`): a continuous extras queue can be
+    /// sibling clips, and EOS must not Up-Next into a featurette. `opt_int` drops the param when
+    /// `continuous` is false.
     ///
     /// The WHOLE window is kept, as [`QueueRow`]s — the queue this round trip already paid for is
     /// the queue a list can draw and jump around in, and throwing it away meant re-asking the
@@ -66,10 +96,33 @@ impl Client {
         &self,
         machine_id: &str,
         rating_key: &str,
+        show_rk: &str,
         session: &str,
         continuous: bool,
     ) -> Option<PlayQueueResult> {
-        self.post_play_queue(machine_id, rating_key, session, continuous, false)
+        if continuous && !show_rk.is_empty() {
+            let q = self.playback_identity(show_queue_query(machine_id, show_rk, rating_key, session));
+            let asked = self
+                .post_json(&q.build())
+                .map(|mc| PlayQueueResult::of(mc, self.id(), rating_key))
+                .filter(|queue| queue.selects(rating_key, self.id()));
+            if let Some(queue) = asked {
+                return Some(self.complete_before(queue));
+            }
+        }
+        let q = QueryBuilder::new("/playQueues")
+            .str("type", "video")
+            .str("uri", &item_uri(machine_id, rating_key))
+            .opt_int("continuous", i64::from(continuous))
+            .int("shuffle", 0)
+            .int("repeat", 0)
+            .str("X-Plex-Session-Identifier", session);
+        let q = self.playback_identity(q);
+        Some(PlayQueueResult::of(
+            self.post_json(&q.build())?,
+            self.id(),
+            rating_key,
+        ))
     }
 
     /// POST /playQueues with `shuffle=1` over a SHOW or a SEASON (`container_key`): the server
@@ -85,53 +138,14 @@ impl Client {
         container_key: &str,
         session: &str,
     ) -> Option<PlayQueueResult> {
-        self.post_play_queue(machine_id, container_key, session, false, true)
-    }
-
-    fn post_play_queue(
-        &self,
-        machine_id: &str,
-        rating_key: &str,
-        session: &str,
-        continuous: bool,
-        shuffle: bool,
-    ) -> Option<PlayQueueResult> {
-        let uri = format!(
-            "server://{machine_id}/com.plexapp.plugins.library/library/metadata/{rating_key}"
-        );
-        let q = play_queue_query(&uri, continuous, shuffle)
+        let q = play_queue_query(&item_uri(machine_id, container_key), false, true)
             .str("X-Plex-Session-Identifier", session);
         let q = self.playback_identity(q);
         // a shuffled queue's selection is the server's pick, never the container we named — the
         // rating-key fallback must not match the container
-        let fallback_rk = if shuffle { "" } else { rating_key };
-        Some(PlayQueueResult::of(
-            self.post_json(&q.build())?,
-            self.id(),
-            fallback_rk,
-        ))
+        Some(PlayQueueResult::of(self.post_json(&q.build())?, self.id(), ""))
     }
 
-    /// GET /playQueues/{id}: the window of an EXISTING queue centred on `center_item_id`, for a
-    /// playback that continues inside the queue it is already playing (a shuffled queue's next
-    /// episode, a row jumped to from the queue panel). `center` does not move the server's own
-    /// selection (spec: "this doesn't change the current selected item") — the timeline report's
-    /// `playQueueItemID` does — so the result's selection is `center_item_id`, not the container's.
-    pub fn fetch_play_queue(
-        &self,
-        play_queue_id: i64,
-        center_item_id: i64,
-        rating_key: &str,
-    ) -> Option<PlayQueueResult> {
-        let q = fetch_queue_query(play_queue_id, center_item_id);
-        let q = self.playback_identity(q);
-        Some(PlayQueueResult::centred(
-            self.get_json(&q.build())?,
-            self.id(),
-            center_item_id,
-            rating_key,
-        ))
-    }
 
     /// POST /playQueues for a PLAYLIST — `playlistID=<id>` with the playlist's own `uri`, so the
     /// queue is the playlist's items in the playlist's order, starting at `rating_key` (its first
@@ -152,6 +166,42 @@ impl Client {
             rating_key,
         ))
     }
+
+    /// A queue the server says has rows before the selected one, but whose answer OPENS on the
+    /// selected row (a window that starts where playback does), is read again around its selected
+    /// item with the existing window read ([`Client::play_queue_window`]), so Previous is not lost
+    /// to the page the create answered with. A read that fails, or that does not hold the selected
+    /// row, leaves the answer as it was.
+    fn complete_before(&self, queue: PlayQueueResult) -> PlayQueueResult {
+        if !queue.opens_on_selected_with_rows_before() {
+            return queue;
+        }
+        match self.play_queue_window(&queue.id.to_string(), queue.selected_item_id) {
+            Some(rows) => queue.with_window(rows),
+            None => queue,
+        }
+    }
+}
+
+/// The `uri` naming one library item on the server `machine_id`, the form `POST /playQueues` takes
+/// (the simple `/library/metadata/{rk}` form answers HTTP 400, `docs/pms-api.md`, "PlayQueue for an
+/// extra").
+fn item_uri(machine_id: &str, rating_key: &str) -> String {
+    format!("server://{machine_id}/com.plexapp.plugins.library/library/metadata/{rating_key}")
+}
+
+/// The `POST /playQueues` that builds an episode's queue from its SHOW: the show is the `uri`, the
+/// episode the `key` ("the key of the first item to play", `docs/plex-openapi.json`), no
+/// `continuous` (the queue already spans every episode, before and after the keyed one). Its own
+/// function so the wire shape is graded without a server.
+fn show_queue_query(machine_id: &str, show_rk: &str, rating_key: &str, session: &str) -> QueryBuilder {
+    QueryBuilder::new("/playQueues")
+        .str("type", "video")
+        .str("uri", &item_uri(machine_id, show_rk))
+        .str("key", &format!("/library/metadata/{rating_key}"))
+        .int("shuffle", 0)
+        .int("repeat", 0)
+        .str("X-Plex-Session-Identifier", session)
 }
 
 /// The playlist queue's request, before the client's identity is added — split out so the
@@ -168,9 +218,6 @@ fn playlist_queue_query(machine_id: &str, playlist_id: &str, rating_key: &str, s
         .str("X-Plex-Session-Identifier", session)
 }
 
-/// How many rows either side of the centre a continuation asks for (`window`). A projected row is
-/// ~300 bytes, so 25 + 1 + 25 is ~15 KB — and it is the rows the queue panel lists.
-pub const QUEUE_WINDOW: i64 = 25;
 
 /// The POST /playQueues query without its identity headers — split out so a host test grades the
 /// exact parameters (`continuous` dropped when false, `shuffle` the flag) without a server.
@@ -183,14 +230,6 @@ fn play_queue_query(uri: &str, continuous: bool, shuffle: bool) -> QueryBuilder 
         .int("repeat", 0)
 }
 
-/// The GET /playQueues/{id} query: a window of [`QUEUE_WINDOW`] rows each side of the centre.
-fn fetch_queue_query(play_queue_id: i64, center_item_id: i64) -> QueryBuilder {
-    QueryBuilder::new(&format!("/playQueues/{play_queue_id}"))
-        .opt_int("center", center_item_id)
-        .int("window", QUEUE_WINDOW)
-        .int("includeBefore", 1)
-        .int("includeAfter", 1)
-}
 
 /// One retained row of the play queue: everything a queue list draws, plus everything
 /// `crate::route::request_play` needs to START that row — and nothing else.
@@ -222,6 +261,11 @@ pub struct QueueRow {
     pub title: String,
     /// `grandparentTitle` — the show, empty for a movie
     pub show_title: String,
+    /// `grandparentRatingKey` — the show's key on this server, empty for a movie
+    pub show_rk: String,
+    /// `viewCount > 0` AS THE QUEUE WAS BUILT, i.e. at play start: what the stop record compares
+    /// the server's later answer against to tell a first watch (fan out) from a rewatch.
+    pub watched: bool,
     /// `parentIndex` — season number (0 for a movie)
     pub season: i64,
     pub index: i64,
@@ -235,8 +279,6 @@ pub struct QueueRow {
     pub dur_ms: i64,
     /// `viewOffset` — the resume point, 0 = unwatched/from the start
     pub resume_ms: i64,
-    /// `viewCount > 0` — watched at least once (the queue panel's watched mark)
-    pub watched: bool,
     /// `Media[0].Part[0].key` — the direct-play part
     pub part: String,
     pub vcodec: String,
@@ -246,8 +288,8 @@ pub struct QueueRow {
 impl QueueRow {
     /// Consume a queue `Metadata` row into its lean projection. BY VALUE: the strings are moved,
     /// not cloned, and the rest of the row's tree is dropped as this returns.
-    fn of(m: super::models::Metadata, sid: super::ServerId) -> QueueRow {
-        // `Media[0]` / `Media[0].Part[0]`, the same pick `Metadata::first_part` makes — by value,
+    pub(super) fn of(m: super::models::Metadata, sid: super::ServerId) -> QueueRow {
+        // `Media[0]` / `Media[0].Part[0]`, the default version, `Metadata::media_version(None)` — by value,
         // so the other versions and their Stream lists die here.
         let (vcodec, acodec, part) = match m.media.into_iter().next() {
             Some(md) => (
@@ -268,13 +310,14 @@ impl QueueRow {
             kind: m.kind,
             title: m.title,
             show_title: m.grandparent_title,
-            season: m.parent_index,
+            show_rk: m.grandparent_rating_key,
+            watched: m.view_count > 0,
+            season: m.parent_index.unwrap_or(0),
             index: m.index,
             thumb: m.thumb,
             poster: m.grandparent_thumb,
             dur_ms: m.duration,
             resume_ms: m.view_offset,
-            watched: m.view_count > 0,
             part,
             vcodec,
             acodec,
@@ -316,6 +359,49 @@ pub fn next_after<'a>(
     rating_key: &str,
 ) -> Option<&'a QueueRow> {
     items.get(queue_index_of(items, selected_item_id, sid, rating_key)? + 1)
+}
+
+fn server_stop_of(body: &[u8]) -> Option<ServerStop> {
+    let reply: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let container = reply.get("MediaContainer")?;
+    let code = container.get("terminationCode")?;
+    let code = code.as_i64().or_else(|| code.as_str()?.trim().parse().ok())?;
+    let reason = container.get("terminationText").and_then(serde_json::Value::as_str).unwrap_or_default();
+    Some(ServerStop { code, reason: reason.to_owned() })
+}
+
+#[cfg(test)]
+mod server_stop_tests {
+    use super::{server_stop_of, ServerStop};
+
+    #[test]
+    fn a_termination_on_the_answer_is_read_with_its_reason() {
+        let stop = |code, reason: &str| Some(ServerStop { code, reason: reason.to_owned() });
+        assert_eq!(
+            server_stop_of(br#"{"MediaContainer":{"size":0,"terminationCode":2006,"terminationText":"stopped"}}"#),
+            stop(2006, "stopped")
+        );
+        assert_eq!(
+            server_stop_of(br#"{"MediaContainer":{"terminationCode":"2006","terminationText":"stopped"}}"#),
+            stop(2006, "stopped")
+        );
+        assert_eq!(server_stop_of(br#"{"MediaContainer":{"terminationCode":2006}}"#), stop(2006, ""));
+    }
+
+    #[test]
+    fn an_ordinary_or_unreadable_answer_stops_nothing() {
+        let bodies: [&[u8]; 6] = [
+            b"",
+            b"<MediaContainer size=\"0\"/>",
+            br#"{"MediaContainer":{"size":0}}"#,
+            br#"{"MediaContainer":{"terminationCode":null}}"#,
+            br#"{"MediaContainer":{"terminationCode":"soon"}}"#,
+            br#"{}"#,
+        ];
+        for body in bodies {
+            assert_eq!(server_stop_of(body), None, "{}", String::from_utf8_lossy(body));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -378,34 +464,84 @@ mod tests {
         assert!(shuffled.contains("shuffle=1"), "{shuffled}");
         assert!(!shuffled.contains("continuous"), "a shuffled queue is not continuous: {shuffled}");
         assert!(shuffled.contains("metadata%2F70"), "the container is the uri: {shuffled}");
-        let get = fetch_queue_query(41, 9).build();
-        assert!(get.starts_with("/playQueues/41?"), "{get}");
-        assert!(get.contains("center=9") && get.contains(&format!("window={QUEUE_WINDOW}")), "{get}");
-        assert!(!fetch_queue_query(41, 0).build().contains("center"), "no centre: the server's own");
     }
 
-    /// **A continuation reads the window with OUR selection.** The server still has the previous
-    /// row selected (the timeline report that moves it has not been sent), so `next` must follow
-    /// the centre we asked for, not `playQueueSelectedItemID` — and a centre the window does not
-    /// hold has no successor rather than the window's second row.
+
+    /// **The wire shape of an episode's show-based queue**: the SHOW is the `uri`, the episode the
+    /// `key` (as a library path), and there is no `continuous` (the queue spans the show before and
+    /// after the keyed episode). The episode-only request keeps `continuous=1` and the episode as
+    /// its `uri`, so the two cannot be confused.
     #[test]
-    fn a_centred_window_follows_the_requested_row() {
-        let body = r#"{"MediaContainer":{"playQueueID":41,"playQueueSelectedItemID":1,
-            "playQueueSelectedItemOffset":0,"playQueueTotalCount":4,"Metadata":[
-            {"playQueueItemID":1,"ratingKey":"a","type":"episode","viewCount":1},
-            {"playQueueItemID":2,"ratingKey":"b","type":"episode"},
-            {"playQueueItemID":3,"ratingKey":"c","type":"episode"},
-            {"playQueueItemID":4,"ratingKey":"d","type":"episode"}]}}"#;
-        let mc = || serde_json::from_str::<Envelope>(body).unwrap().media_container;
-        let r = PlayQueueResult::centred(mc(), Q, 2, "b");
-        assert_eq!((r.id, r.selected_item_id, r.remaining), (41, 2, 2));
-        assert_eq!(r.next.as_ref().map(|n| n.rk.as_str()), Some("c"), "after OUR row, not the server's");
-        assert_eq!(rks(&r.items), ["a", "b", "c", "d"]);
-        assert!(r.items[0].watched && !r.items[1].watched, "viewCount is the watched mark");
-        let last = PlayQueueResult::centred(mc(), Q, 4, "d");
-        assert!(last.next.is_none() && last.remaining == 0);
-        let gone = PlayQueueResult::centred(mc(), Q, 99, "zz");
-        assert!(gone.next.is_none(), "an unknown centre has no successor");
+    fn an_episodes_queue_is_asked_of_its_show_with_the_episode_as_the_key() {
+        let show = show_queue_query("machine", "50", "102", "sess").build();
+        assert!(show.starts_with("/playQueues?"), "{show}");
+        assert!(show.contains("uri=server%3A%2F%2Fmachine%2Fcom.plexapp.plugins.library%2Flibrary%2Fmetadata%2F50"), "{show}");
+        assert!(show.contains("key=%2Flibrary%2Fmetadata%2F102"), "{show}");
+        assert!(!show.contains("continuous"), "{show}");
+        let episode = QueryBuilder::new("/playQueues")
+            .str("uri", &item_uri("machine", "102"))
+            .opt_int("continuous", 1)
+            .build();
+        assert!(episode.contains("metadata%2F102") && !episode.contains("key="), "{episode}");
+        assert!(episode.contains("continuous=1"), "{episode}");
+    }
+
+    /// A queue body whose selected row (`playQueueSelectedItemID`) is `selected` of rows
+    /// `101..=104` (item ids 7001..=7004), `offset` rows before it in the whole queue, the window
+    /// starting at row `from`.
+    fn season(selected: i64, offset: i64, from: usize) -> PlayQueueResult {
+        let rows: Vec<String> = (from..4)
+            .map(|n| format!(r#"{{"playQueueItemID":{},"ratingKey":"{}","type":"episode","index":{}}}"#, 7001 + n, 101 + n, n + 1))
+            .collect();
+        result(
+            &format!(
+                r#"{{"MediaContainer":{{"size":{},"playQueueID":88,"playQueueSelectedItemID":{selected},
+                "playQueueSelectedItemOffset":{offset},"playQueueTotalCount":4,"Metadata":[{}]}}}}"#,
+                rows.len(),
+                rows.join(",")
+            ),
+            "102",
+        )
+    }
+
+    /// **A show-based queue is believed only when it selects the episode asked for.** A server that
+    /// ignored `key` answers the first row, a stale one some other episode: neither may stand for
+    /// the playing episode (its queue item id is what the timeline reports, and its successor is
+    /// Up Next).
+    #[test]
+    fn a_show_queue_is_accepted_only_when_it_selects_the_requested_episode() {
+        assert!(season(7002, 1, 0).selects("102", Q), "the keyed episode is the selected row");
+        assert!(!season(7001, 0, 0).selects("102", Q), "the key was ignored: the first row is selected");
+        assert!(!season(7003, 2, 0).selects("102", Q), "another row is selected");
+        assert!(!season(9999, 0, 0).selects("102", Q), "a selected id no row has");
+        assert!(!season(7002, 1, 0).selects("102", ServerId::from_raw(3)), "a queue of another server is not this episode's");
+    }
+
+    /// The window read is spent only when the create answered with a window that opens ON the
+    /// selected row while the server says rows precede it: the predecessors it lost.
+    #[test]
+    fn a_window_that_opens_on_the_selected_row_with_rows_before_it_is_read_again() {
+        assert!(season(7002, 1, 1).opens_on_selected_with_rows_before(), "opens on 102, one row before it");
+        assert!(!season(7002, 1, 0).opens_on_selected_with_rows_before(), "the predecessor is already in the window");
+        assert!(!season(7001, 0, 0).opens_on_selected_with_rows_before(), "nothing before the first row");
+        assert!(!season(7002, 0, 1).opens_on_selected_with_rows_before(), "the server reports no rows before it");
+    }
+
+    /// The re-read window replaces the rows (and the successor), keeps the selection and the queue
+    /// id, and is refused when it does not hold the selected row.
+    #[test]
+    fn a_re_read_window_replaces_the_rows_and_never_the_selection() {
+        let opened = season(7002, 1, 1);
+        assert_eq!(rks(&opened.items), ["102", "103", "104"]);
+        let window: Vec<QueueRow> = (0..4)
+            .map(|n| QueueRow { item_id: 7001 + n, sid: Q, rk: (101 + n).to_string(), ..Default::default() })
+            .collect();
+        let full = season(7002, 1, 1).with_window(window.clone());
+        assert_eq!(rks(&full.items), ["101", "102", "103", "104"]);
+        assert_eq!((full.id, full.selected_item_id), (88, 7002));
+        assert_eq!(full.next.as_ref().map(|n| n.rk.as_str()), Some("103"));
+        let without = season(7002, 1, 1).with_window(window[..1].to_vec());
+        assert_eq!(rks(&without.items), ["102", "103", "104"], "a window that lost the selected row is ignored");
     }
 
     /// A response body through the SHIPPED mapping — the same call `create_play_queue` makes once
@@ -598,6 +734,47 @@ mod tests {
         );
         assert_eq!(bare.rk, "775", "the rest of the row still projects");
     }
+
+    /// Issue #1236: `continuing=1` is what takes a retired session's row off the dashboard, and
+    /// it is only true of a report that says so. Every ordinary report (playing, paused, the
+    /// final `stopped`) must not carry the key at all, so a server sees the same request it
+    /// always did.
+    #[test]
+    fn continuing_rides_the_timeline_query_only_when_true() {
+        use super::super::params::TimelineState;
+        let client = Client::new(
+            ServerId::from_raw(3),
+            "machine",
+            crate::plex::Origin::http("10.0.0.1", 32400),
+            "tok",
+            "cid-1236",
+        );
+        let query = |state, continuing| {
+            client.timeline_query(&TimelineReport {
+                rating_key: "42",
+                state,
+                time_ms: 20_000,
+                duration_ms: 60_000,
+                session: "logical-abr-1",
+                play_queue_id: "pq",
+                play_queue_item_id: "pqi",
+                audio_stream_id: 0,
+                subtitle_stream_id: 0,
+                continuing,
+            })
+        };
+
+        let retired = query(TimelineState::Stopped, true);
+        assert!(retired.starts_with("/:/timeline?ratingKey=42&"), "{retired}");
+        assert!(retired.contains("&state=stopped&"), "{retired}");
+        assert!(retired.contains("&continuing=1"), "{retired}");
+        assert!(retired.contains("&X-Plex-Session-Identifier=logical-abr-1&"), "{retired}");
+
+        for state in [TimelineState::Playing, TimelineState::Paused, TimelineState::Stopped] {
+            let ordinary = query(state, false);
+            assert!(!ordinary.contains("continuing"), "{ordinary}");
+        }
+    }
 }
 
 /// What a POST /playQueues gives the app: the two ids the `/:/timeline` report carries, plus the
@@ -618,9 +795,49 @@ pub struct PlayQueueResult {
     /// continuous queue is just itself — verified live: total count 1). A copy of the `items` row
     /// after the selected one; one lean row is worth not making every caller redo the lookup.
     pub next: Option<QueueRow>,
+    /// `playQueueSelectedItemOffset`: how many rows the WHOLE queue holds before the selected one
+    /// (0 when the server omitted it). A window that opens on the selected row while this is above
+    /// zero has lost the predecessors the server says exist ([`Self::opens_on_selected_with_rows_before`]).
+    before: i64,
 }
 
 impl PlayQueueResult {
+    /// Whether the selected row of this answer IS `rating_key` on `sid`: the check a queue built
+    /// from the show with the episode as its `key` must pass before the app believes it. A server
+    /// that ignored the `key` answers a queue selected on some other row, whose item ids the
+    /// timeline would then report for the wrong episode and whose Up Next would be wrong.
+    pub(super) fn selects(&self, rating_key: &str, sid: ServerId) -> bool {
+        // By the queue item id alone: the rating-key fallback of `queue_index_of` would believe a
+        // `playQueueSelectedItemID` that names no row, and the timeline reports that id.
+        self.selected_item_id != 0
+            && self.items.iter().any(|row| {
+                row.item_id == self.selected_item_id
+                    && super::same_item((row.sid, &row.rk), (sid, rating_key))
+            })
+    }
+
+    /// The server says rows precede the selected one, and the returned window starts ON it.
+    fn opens_on_selected_with_rows_before(&self) -> bool {
+        self.before > 0
+            && self.selected_item_id != 0
+            && self.items.first().is_some_and(|row| row.item_id == self.selected_item_id)
+    }
+
+    /// This result over `rows`, a window read of the same queue around the selected row. Only a
+    /// window that holds the selected row replaces the answer: an expired or mismatched one cannot
+    /// discard the selection.
+    fn with_window(self, rows: Vec<QueueRow>) -> PlayQueueResult {
+        let Some(selected) = self.items.iter().find(|row| row.item_id == self.selected_item_id) else {
+            return self;
+        };
+        let (sid, rk) = (selected.sid, selected.rk.clone());
+        if !rows.iter().any(|row| row.item_id == self.selected_item_id && row.rk == rk) {
+            return self;
+        }
+        let next = next_after(&rows, self.selected_item_id, sid, &rk).cloned();
+        PlayQueueResult { items: rows, next, ..self }
+    }
+
     /// The WHOLE response→result mapping, kept out of `create_play_queue` so the host tests grade
     /// the code that ships instead of a copy of it (only the request build is left up there).
     fn of(
@@ -648,35 +865,8 @@ impl PlayQueueResult {
             remaining,
             items,
             next,
+            before: mc.play_queue_selected_item_offset.max(0),
         }
     }
 
-    /// A GET /playQueues/{id}?center=… answer, read with OUR selection: `center` is the row this
-    /// playback is starting, which the server will only learn from the next timeline report, so
-    /// the container's own `playQueueSelectedItemID` (the PREVIOUS item) must not decide `next`.
-    /// `remaining` counts the window's rows after the centre — the whole-queue offset the server
-    /// reports is the old selection's, not this one's.
-    fn centred(
-        mc: super::models::MediaContainer,
-        sid: super::ServerId,
-        center_item_id: i64,
-        rating_key: &str,
-    ) -> PlayQueueResult {
-        let id = mc.play_queue_id;
-        let items: Vec<QueueRow> = mc
-            .metadata
-            .into_iter()
-            .map(|m| QueueRow::of(m, sid))
-            .collect();
-        let at = queue_index_of(&items, center_item_id, sid, rating_key);
-        let remaining = at.map_or(0, |i| (items.len() - i - 1) as i64);
-        let next = next_after(&items, center_item_id, sid, rating_key).cloned();
-        PlayQueueResult {
-            id,
-            selected_item_id: center_item_id,
-            remaining,
-            items,
-            next,
-        }
-    }
 }

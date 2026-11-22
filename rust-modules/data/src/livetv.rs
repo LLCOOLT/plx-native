@@ -377,7 +377,7 @@ impl LiveTvState {
         let origin = self.source.clone();
         let spawned = plx_base::task::spawn_small("livetv-load", move || {
             let _ = tx.send(source::load(&origin, plx_base::wallclock::now_ms()));
-            plx_machine::idle::wake();
+            plx_machine::present::wake_from_worker();
         });
         if !spawned {
             return false;
@@ -396,7 +396,7 @@ impl LiveTvState {
         let (tx, rx) = mpsc::channel();
         let spawned = plx_base::task::spawn_small("livetv-search", move || {
             let _ = tx.send(source::discover());
-            plx_machine::idle::wake();
+            plx_machine::present::wake_from_worker();
         });
         if !spawned {
             return false;
@@ -425,7 +425,7 @@ impl LiveTvState {
         let (tx, rx) = mpsc::channel();
         let spawned = plx_base::task::spawn_small("livetv-plexmatch", move || {
             let _ = tx.send(plexmatch::lookup(&want));
-            plx_machine::idle::wake();
+            plx_machine::present::wake_from_worker();
         });
         if !spawned {
             return false;
@@ -510,7 +510,6 @@ impl LiveTvState {
         }
         if changed {
             self.revision += 1;
-            plx_machine::idle::invalidate();
         }
         changed
     }

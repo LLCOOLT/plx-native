@@ -1,281 +1,464 @@
-//! **The account's Plex watchlist on Home** — the titles on the profile's watchlist (plex.tv's
-//! Discover service, `plx_plex::plex::discover`) that the household's libraries hold, as those
-//! LIBRARY rows, for Home's Watchlist shelf; and the list's membership, for the Add to / Remove
-//! from Watchlist controls.
+//! watchlist: the data layer of the plex.tv Watchlist page (docs/watchlist-plan.md §1.1-1.5, §1.10).
 //!
-//! A watchlist row is a CATALOG item (`plex://movie/<id>`), not a library one, so a row is shown
-//! only once a server has been asked for that guid (`Client::find_by_guid`, the query "Also
-//! available" uses) and answered with its own copy — the card then opens that copy's page exactly
-//! as any shelf card does. A title no library holds is left off the shelf: the detail page reads a
-//! server's metadata and has no catalog-only face. Its membership still counts, so its detail
-//! page anywhere else would still read "Remove from Watchlist".
+//! * [`model`]: rows, the guid-to-server match table, [`model::TileState`].
+//! * [`order`]: the title comparator (§1.10), sort and filter over stored rows.
+//! * [`ledger`]: the intent ledger (optimistic flip, coalescing, revert).
+//! * this module: the identity a worker is handed ([`WatchlistAuth`]), the I/O seam
+//!   ([`WatchlistIo`], live in production, a script in tests) and the worker bodies that turn a
+//!   page of the service's list into rows plus the guid matches against the user's servers.
+//!   `stores::watchlist` owns the state those workers land into.
 //!
-//! **One fetch at a time, on a slow clock.** The list moves when somebody edits it, not on its own:
-//! it is refetched with Home's hubs at most every [`STALE_MS`], and at once after an edit made here
-//! (the worker performs the edit, then reads the list back, so the shelf always shows what plex.tv
-//! says). The resolution costs one request per title per server, so it is bounded: the first
-//! [`RESOLVE_MAX`] titles, stopping at a shelf's worth of copies.
-//!
-//! The state machine lives in `pms` (the hub store owns the shelf); this module is its pure halves
-//! and the worker.
+//! Nothing here names a token in a log line or a `Debug` form: [`WatchlistAuth`] hides its
+//! credential, and the plex layer's transport logs status and endpoint shape only.
+pub mod ledger;
+pub mod model;
+pub mod order;
 
+use ledger::{Intent, PendingWrite, WriteOutcome};
+use model::{Asked, Kind, Reach, ServerMatch, WatchRow};
+
+use plx_plex::plex::session::{CurrentProfile, UserRef};
+use plx_plex::plex::watchlist::{WatchItem, WatchKind, WatchPage, WatchlistError, MAX_PAGE};
+use plx_plex::plex::{GuidKind, GuidLookupError, GuidMatch, ServerId, GUIDS_PER_REQUEST};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use plx_plex::plex::discover::{watchlist_key, WatchlistItem};
-use plx_plex::plex::ServerId;
-
-use crate::pms::{PmsMovie, MAX_SHELF_ITEMS};
-
-/// How long a fetched watchlist is trusted before Home's next hub refresh reads it again.
-pub const STALE_MS: i64 = 10 * 60 * 1000;
-
-/// Titles asked of the servers at most per fetch — the resolution's bound (module doc).
-pub const RESOLVE_MAX: usize = 48;
-
-/// The list's membership: every guid on it, as plex.tv listed them.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Membership {
-    guids: HashSet<String>,
+/// Who a worker acts for, built from the [`WatchlistInput`] the app read on the MAIN thread
+/// (`session::plex_tv_credential`) and owned by the worker: it never reads the session itself. `generation` is the profile generation
+/// at capture; a landing tagged with an older one is dropped.
+#[derive(Clone)]
+pub struct WatchlistAuth {
+    pub client_id: String,
+    pub credential: String,
+    pub user: UserRef,
+    pub generation: u32,
 }
 
-impl Membership {
-    pub fn new(guids: impl IntoIterator<Item = String>) -> Self {
-        Self { guids: guids.into_iter().filter(|g| !watchlist_key(g).is_empty()).collect() }
+impl std::fmt::Debug for WatchlistAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WatchlistAuth").field("generation", &self.generation).finish_non_exhaustive()
+    }
+}
+
+impl WatchlistAuth {
+    /// Is this still the seated profile? Compared by id and uuid and the profile generation, against
+    /// the profile the app read for this pass ([`WatchlistInput`]).
+    pub fn is_current(&self, now: &CurrentProfile) -> bool {
+        now.generation == self.generation
+            && now.user.as_ref().is_some_and(|u| u.id == self.user.id && u.uuid == self.user.uuid)
     }
 
-    /// Is the title with this guid on the list? `None` when it cannot be (a legacy or local guid,
-    /// which has no catalog entry to add) — no control is offered for it.
-    pub fn on_list(&self, guid: &str) -> Option<bool> {
-        (!watchlist_key(guid).is_empty()).then(|| self.guids.contains(guid))
+    pub fn matches_lease(&self, profile: &CurrentProfile, credential: Option<&str>) -> bool {
+        self.is_current(profile) && credential == Some(self.credential.as_str())
     }
 
-    /// The membership after an edit made here, before plex.tv has been read back.
-    pub fn edited(&self, guid: &str, add: bool) -> Self {
-        let mut next = self.clone();
-        if add {
-            next.guids.insert(guid.to_owned());
-        } else {
-            next.guids.remove(guid);
+
+}
+
+/// **What the app reads from the session for the two plex.tv stores (docs/sans-io.md S5):** the
+/// seated profile and, when a capture can happen, the identity to act as. The Bridge reads the
+/// registry (`Bridge::watchlist_input`) and hands this to a step; nothing here reads it. Built per
+/// call, never kept: a capture reads the credential at the moment it is made.
+pub struct WatchlistInput {
+    profile: Arc<CurrentProfile>,
+    auth: Option<WatchlistAuth>,
+}
+
+impl WatchlistInput {
+    /// The input for `profile`, whose plex.tv `credential` and the install's `client_id` the caller
+    /// read. `auth` is `None` when there is no profile, no credential or no client id: the page then
+    /// has no list to read.
+    pub fn new(profile: Arc<CurrentProfile>, credential: Option<String>, client_id: &str) -> Self {
+        let auth = match (profile.user.clone(), credential) {
+            (Some(user), Some(credential)) if !client_id.is_empty() => Some(WatchlistAuth {
+                client_id: client_id.to_owned(),
+                credential,
+                user,
+                generation: profile.generation,
+            }),
+            _ => None,
+        };
+        Self { profile, auth }
+    }
+
+    pub fn profile(&self) -> &CurrentProfile {
+        &self.profile
+    }
+
+    pub fn auth(&self) -> Option<&WatchlistAuth> {
+        self.auth.as_ref()
+    }
+
+    /// A seated profile of `generation` with a credential: what a signed-in test hands a step.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(generation: u32) -> Self {
+        Self::new(Self::profile_for_test(generation), Some("test-credential".into()), "test-client")
+    }
+
+    /// The same seat with no plex.tv credential: the page has no account to read.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn signed_out_for_test(generation: u32) -> Self {
+        Self::new(Self::profile_for_test(generation), None, "test-client")
+    }
+
+    /// The profile a frame pass is handed: the default user seated at `generation`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn profile_for_test(generation: u32) -> Arc<CurrentProfile> {
+        Arc::new(CurrentProfile { user: Some(UserRef::default()), generation, stamp: String::new() })
+    }
+}
+
+/// Worker transport plus captured facts. The job wrapper supplies `Reach`, generations and
+/// today from its request; the narrow live port or a script supplies transport responses.
+pub trait WatchlistIo: Reach + Send + Sync {
+    /// One page of the list. `if_none_match` is the `ETag` of the last COMPLETE read, handed over
+    /// for page 0 only; an answer of `Err(WatchlistError::NotModified)` is the service saying the
+    /// list is unchanged.
+    fn page(&self, auth: &WatchlistAuth, start: u32, size: u32, if_none_match: Option<&str>)
+        -> Result<WatchPage, WatchlistError>;
+    fn released(&self, auth: &WatchlistAuth) -> Result<Vec<WatchItem>, WatchlistError>;
+    fn write(&self, auth: &WatchlistAuth, hex: &str, intent: Intent) -> Result<(), WatchlistError>;
+    fn find(&self, server: ServerId, kind: GuidKind, guids: &[String]) -> Result<Vec<GuidMatch>, GuidLookupError>;
+    /// `plex::servers::roster_gen()`.
+    fn roster_gen(&self) -> u32;
+    /// `plex::servers::facts_gen()`: moves when reachability or the roster's facts do.
+    fn facts_gen(&self) -> u32;
+    /// Today as `YYYY-MM-DD` (UTC), the fallback "coming soon" test when the released list failed.
+    fn today(&self) -> Option<String>;
+
+}
+
+
+
+/// Civil date of a day count since 1970-01-01 (Howard Hinnant's algorithm).
+pub fn ymd_of_unix_days(days: i64) -> String {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Which request a landing answers: the profile generation it was captured under, the store epoch
+/// (a profile switch or reset rotates it) and the request id within the epoch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tag {
+    pub profile_gen: u32,
+    pub epoch: u32,
+    pub req: u32,
+}
+
+/// What a worker brings back. Every variant is tagged by its [`Landed`].
+#[derive(Clone, Debug)]
+pub enum What {
+    /// One page of the list, with the matches of its rows against every reachable server.
+    Page {
+        start: u32,
+        total: Option<u32>,
+        rows: Vec<WatchRow>,
+        answers: Vec<Answer>,
+        roster_gen: u32,
+        /// Page 0's `ETag` (the validator for the next read), when the service sent one.
+        etag: Option<String>,
+    },
+    /// Page 0 answered 304: the rows already held are the service's current list, so no page is
+    /// read and nothing is replaced.
+    NotModified,
+    /// The page could not be read; the list stops here.
+    PageFailed { start: u32, why: Failure },
+    /// The released set as a guid set, or `None` when that read failed.
+    Released { guids: Option<HashSet<String>> },
+    /// A full re-match of the rows handed over (the roster moved).
+    Rematch { answers: Vec<Answer>, roster_gen: u32 },
+    /// Fresh answers from ONE server for some guids (a library change its feed reported): merged
+    /// over the table, which is otherwise kept as it is.
+    Delta { answers: Vec<Answer> },
+    /// The list worker is finished (every page read or the cap reached).
+    ListDone,
+    /// The write worker's verdict.
+    Written { write: PendingWrite, outcome: WriteOutcome },
+}
+
+#[derive(Clone, Debug)]
+pub struct Landed {
+    pub tag: Tag,
+    pub what: What,
+}
+
+/// Why a list read stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// 401: the account credential is refused.
+    Unauthorized,
+    /// No answer from plex.tv.
+    Offline,
+    /// Any other refusal or an unreadable body.
+    Other,
+}
+
+impl Failure {
+    fn of(e: &WatchlistError) -> Failure {
+        match e {
+            WatchlistError::Unauthorized => Failure::Unauthorized,
+            WatchlistError::Transport => Failure::Offline,
+            _ => Failure::Other,
         }
-        next
     }
 }
 
-/// What one fetch produced: the membership and the shelf's library rows, in the list's order.
-#[derive(Default, Clone)]
-pub struct Build {
-    pub members: Membership,
-    pub rows: Vec<PmsMovie>,
+/// One server's answer for one guid.
+pub type Answer = (String, ServerId, Asked);
+
+/// `plex://movie|show/<hex>` to the 12 bytes of its hex, or `None` for anything else.
+pub fn decode_hex(hex: &str) -> Option<[u8; 12]> {
+    if hex.len() != 24 || !hex.is_ascii() {
+        return None;
+    }
+    let mut out = [0u8; 12];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
-/// **The shelf, from the list and a lookup.** For each title in the list's order (the most
-/// recently added first), the first source — in roster order, our own servers first — whose
-/// library holds a copy; at most a shelf's worth, asking about at most [`RESOLVE_MAX`] titles.
-///
-/// `find(sid, guid)` is one server's answer: `Some(Some(row))` a copy, `Some(None)` "not here",
-/// `None` no answer (the next source is still asked). Pure, so the order and the bounds are graded
-/// on the host; the worker hands in the real query.
-pub fn resolve(
-    items: &[WatchlistItem],
-    sources: &[ServerId],
-    mut find: impl FnMut(ServerId, &str) -> Option<Option<PmsMovie>>,
-) -> Vec<PmsMovie> {
-    let mut rows: Vec<PmsMovie> = Vec::new();
-    let wanted = items.iter().filter(|it| matches!(it.kind.as_str(), "movie" | "show") && !watchlist_key(&it.guid).is_empty());
-    for item in wanted.take(RESOLVE_MAX) {
-        if rows.len() >= MAX_SHELF_ITEMS {
+/// The inverse of [`decode_hex`]: the 24 lowercase hex digits the service takes.
+pub fn encode_hex(hex: &[u8; 12]) -> String {
+    hex.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `plex://movie|show/<24 hex>`: the guid string a Remove write and a page's removal landing are keyed by.
+pub fn guid_of(kind: model::Kind, hex: &[u8; 12]) -> String {
+    let k = match kind {
+        model::Kind::Movie => "movie",
+        model::Kind::Show => "show",
+    };
+    format!("plex://{k}/{}", encode_hex(hex))
+}
+
+/// A stored row from a decoded item, or `None` for a kind the page does not show or an id the
+/// service did not give in the form it takes. `order` is the row's server-side position.
+pub fn row_of(item: &WatchItem, order: u32) -> Option<WatchRow> {
+    let kind = match item.kind? {
+        WatchKind::Movie => Kind::Movie,
+        WatchKind::Show => Kind::Show,
+        WatchKind::Other => return None,
+    };
+    let hex = decode_hex(&item.hex)?;
+    Some(WatchRow {
+        guid: item.guid.clone(),
+        hex,
+        kind,
+        title: item.title.clone().unwrap_or_default(),
+        title_sort: item.title_sort.clone().unwrap_or_default(),
+        year: item.year,
+        added_at: item.added_at,
+        release: item.originally_available.clone(),
+        rating: item.rating,
+        // Settled by the released set when it lands; until then a row counts as released.
+        released: true,
+        order,
+        thumb: item.thumb.clone().unwrap_or_default(),
+    })
+}
+
+/// A lookup row's colours as bytes (the wire's hex colours are bytes, so this is exact).
+fn quantize_blur(c: [[f32; 3]; 4]) -> crate::watchlist::model::Blur {
+    c.map(|corner| corner.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8))
+}
+
+fn guid_kind(kind: Kind) -> GuidKind {
+    match kind {
+        Kind::Movie => GuidKind::Movie,
+        Kind::Show => GuidKind::Show,
+    }
+}
+
+/// Match `rows` (guid, kind) against every reachable server: per server and kind, chunks of
+/// [`GUIDS_PER_REQUEST`]. A guid the server answered about is `Held` or `Absent`; a server that did
+/// not answer a chunk leaves its guids unanswered (silent), so `Absent` is never inferred.
+pub fn match_rows(io: &dyn WatchlistIo, rows: &[(String, Kind)]) -> Vec<Answer> {
+    let mut out = Vec::new();
+    for sid in io.roster().into_iter().filter(|s| io.reachable(*s)) {
+        out.extend(match_on(io, sid, rows));
+    }
+    out
+}
+
+/// [`match_rows`] against ONE server (it is not asked whether the server is reachable).
+pub fn match_on(io: &dyn WatchlistIo, sid: ServerId, rows: &[(String, Kind)]) -> Vec<Answer> {
+    let mut out = Vec::new();
+    for kind in [Kind::Movie, Kind::Show] {
+        let mut seen = HashSet::new();
+        let guids: Vec<String> = rows
+            .iter()
+            .filter(|(g, k)| *k == kind && g.starts_with("plex://") && seen.insert(g.clone()))
+            .map(|(g, _)| g.clone())
+            .collect();
+        for chunk in guids.chunks(GUIDS_PER_REQUEST) {
+            let Ok(found) = io.find(sid, guid_kind(kind), chunk) else { continue };
+            for g in chunk {
+                let hit = found.iter().find(|m| &m.guid == g);
+                let held = hit.and_then(|m| m.rating_key.parse::<i64>().ok());
+                match (hit.is_some(), held) {
+                    (true, Some(rating_key)) => out.push((
+                        g.clone(),
+                        sid,
+                        Asked::Held(
+                            ServerMatch {
+                                server_id: sid,
+                                rating_key,
+                                blur: hit.and_then(|m| m.blur).map(quantize_blur),
+                            },
+                            hit.map(|m| m.facts.clone()).unwrap_or_default(),
+                        ),
+                    )),
+                    (true, None) => {} // a key we cannot use: neither held nor absent
+                    (false, _) => out.push((g.clone(), sid, Asked::Absent)),
+                }
+            }
+        }
+    }
+    out
+}
+
+/// WORKER THREAD: read the list. Page 0, then the released set, then the remaining pages until
+/// the server's own end (`start` reaches `totalSize`, a short page, or an empty one); each page is
+/// matched against the servers before it is posted so a tile arrives with its state. Stops at
+/// the first page that fails; the owned stream worker owes the terminal completion.
+/// `known` is the guids already matched against every reachable server under roster generation
+/// `known.1`; they are skipped while the roster has not moved (a new roster is a full re-match).
+/// `etag` is the validator of the last complete read (`If-None-Match` on page 0 only): when the
+/// service answers 304 the list is not read at all and [`What::NotModified`] stands in for every
+/// page, but the released set is still read (a title's release moves it without moving the list).
+pub fn run_list(
+    io: &dyn WatchlistIo,
+    auth: &WatchlistAuth,
+    tag: Tag,
+    known: (&HashSet<String>, u32),
+    etag: Option<&str>,
+    post: &mut dyn FnMut(Landed),
+) {
+    let mut start = 0u32;
+    let mut page_no = 0u32;
+    loop {
+        let page = match io.page(auth, start, MAX_PAGE, etag.filter(|_| start == 0)) {
+            Ok(p) => p,
+            Err(WatchlistError::NotModified) if start == 0 && etag.is_some() => {
+                post(Landed { tag, what: What::NotModified });
+                let guids = io.released(auth).ok().map(|items| items.into_iter().map(|i| i.guid).collect());
+                post(Landed { tag, what: What::Released { guids } });
+                break;
+            }
+            Err(e) => {
+                post(Landed { tag, what: What::PageFailed { start, why: Failure::of(&e) } });
+                break;
+            }
+        };
+        // Paging follows the wire: an entry the decoder dropped still held a slot.
+        let got = page.raw;
+        let rows: Vec<WatchRow> =
+            page.items.iter().enumerate().filter_map(|(i, it)| row_of(it, start + i as u32)).collect();
+        let roster_gen = io.roster_gen();
+        let skip_known = known.1 == roster_gen;
+        let keys: Vec<(String, Kind)> = rows
+            .iter()
+            .filter(|r| !(skip_known && known.0.contains(&r.guid)))
+            .map(|r| (r.guid.clone(), r.kind))
+            .collect();
+        let answers = match_rows(io, &keys);
+        let total = page.total;
+        let etag = page.etag;
+        post(Landed { tag, what: What::Page { start, total, rows, answers, roster_gen, etag } });
+        if page_no == 0 {
+            let guids = io.released(auth).ok().map(|items| items.into_iter().map(|i| i.guid).collect());
+            post(Landed { tag, what: What::Released { guids } });
+        }
+        start += got;
+        let more = match total {
+            Some(t) => start < t,
+            None => got >= MAX_PAGE,
+        };
+        // Ends on the server's answer (`start` at `totalSize`, or a short page). A page that
+        // carried no entries advances nothing, so it also ends the loop: that is loop safety
+        // against a misbehaving server, not a bound on the list.
+        if got == 0 || !more {
             break;
         }
-        if let Some(row) = sources.iter().find_map(|&sid| find(sid, &item.guid).flatten()) {
-            rows.push(row);
-        }
+        page_no += 1;
     }
-    rows
+
 }
 
-/// A server's copy among a `find_by_guid` answer's rows: the first one a shelf can draw (a title
-/// and a poster, the rule every Home row meets), stamped with the guid it was asked for — a
-/// server's own row can carry a legacy guid for the same title.
-pub fn copy_of(mc: &plx_plex::plex::MediaContainer, sid: ServerId, guid: &str) -> Option<PmsMovie> {
-    mc.metadata
-        .iter()
-        .filter(|it| crate::pms::listable(&it.kind))
-        .map(|it| crate::pms::parse_item(it, sid))
-        .find(|m| !m.title.is_empty() && !m.thumb.is_empty())
-        .map(|mut m| {
-            m.guid = guid.to_owned();
-            m
-        })
+/// WORKER THREAD: the full re-match of `rows` after the roster moved.
+pub fn run_rematch(io: &dyn WatchlistIo, rows: &[(String, Kind)], tag: Tag, post: &mut dyn FnMut(Landed)) {
+    let roster_gen = io.roster_gen();
+    let answers = match_rows(io, rows);
+    post(Landed { tag, what: What::Rematch { answers, roster_gen } });
 }
 
-/// Everything one watchlist fetch needs, captured on the main thread at the spawn site.
-pub struct Request {
-    /// The hub store's watchlist generation when this was asked; a reset supersedes it.
-    pub gen: u32,
-    /// An edit to make first: `(guid, add)`.
-    pub edit: Option<(String, bool)>,
-    /// The sources to look titles up on, in roster order, each with the client captured for it.
-    pub sources: Vec<(ServerId, &'static plx_plex::plex::Client)>,
-    /// `(X-Plex-Client-Identifier, the profile's plex.tv token)`.
-    pub credential: (String, String),
+/// WORKER THREAD: ask ONE server again about `rows` after its library changed.
+pub fn run_delta(io: &dyn WatchlistIo, sid: ServerId, rows: &[(String, Kind)], tag: Tag, post: &mut dyn FnMut(Landed)) {
+    post(Landed { tag, what: What::Delta { answers: match_on(io, sid, rows) } });
 }
 
-/// One finished fetch: `build` is `None` when the list could not be read.
-pub struct Landing {
-    pub gen: u32,
-    pub build: Option<Build>,
-}
-
-/// The profile's plex.tv credential, when it has one this app may use for an account read
-/// (`session::plex_tv_credential`); `None` signed out, or for a profile whose token is unknown.
-///
-/// A dev build whose plex.tv is the loopback stand-in (`account::plex_tv_is_stand_in`, which only a
-/// `devtriggers` build can arm) reads the stand-in's synthetic list with a placeholder credential
-/// when the profile has none — a simulator booted on an injected server token has no plex.tv
-/// sign-in, and the stand-in accepts any token.
-pub fn credential() -> Option<(String, String)> {
-    let client_id = plx_plex::plex::session::peek().client_id.clone();
-    let token = plx_plex::plex::session::current()
-        .and_then(|user| plx_plex::plex::session::plex_tv_credential(&user))
-        .or_else(|| plx_plex::plex::account::plex_tv_is_stand_in().then(|| "stand-in".to_owned()))?;
-    Some((client_id, token))
-}
-
-/// WORKER THREAD: make the edit (if any), read the list, resolve the shelf.
-#[cfg(not(any(test, feature = "test-support")))]
-pub fn fetch(request: &Request) -> Option<Build> {
-    let (client_id, token) = &request.credential;
-    let account = plx_plex::plex::account::AccountClient::new(client_id, Some(token));
-    if let Some((guid, add)) = &request.edit {
-        if account.watchlist_edit(watchlist_key(guid), *add) != Some(true) {
-            plx_base::eventlog::log(&format!("watchlist: the {} was not accepted", if *add { "add" } else { "removal" }));
-        }
-    }
-    let items = account.watchlist()?;
-    let sids: Vec<ServerId> = request.sources.iter().map(|(sid, _)| *sid).collect();
-    let rows = resolve(&items, &sids, |sid, guid| {
-        let client = request.sources.iter().find(|(s, _)| *s == sid)?.1;
-        let mc = client.find_by_guid(guid)?;
-        Some(copy_of(&mc, sid, guid))
-    });
-    plx_base::eventlog::log(&format!("watchlist: {} titles, {} on Home", items.len(), rows.len()));
-    Some(Build { members: Membership::new(items.into_iter().map(|it| it.guid)), rows })
-}
-
-/// HOST SUITE: [`fetch`]'s cut — it reaches plex.tv and every server.
-#[cfg(any(test, feature = "test-support"))]
-pub fn fetch(_request: &Request) -> Option<Build> {
-    None
-}
-
-/// The hub store's watchlist bookkeeping (main thread): the single flight, the clock, the
-/// membership published to the controls, and an edit owed a read-back while a fetch is out.
-#[derive(Default)]
-pub struct State {
-    pub gen: u32,
-    pub fetching: bool,
-    /// When the last fetch was ASKED (wall-clock ms); `None` before the first.
-    pub asked_at_ms: Option<i64>,
-    /// An edit made while a fetch was already out: it is performed by the next one.
-    pub owed_edit: Option<(String, bool)>,
-    /// `None` until a fetch has answered (the controls offer nothing while the list is unknown).
-    pub members: Option<Arc<Membership>>,
-}
-
-impl State {
-    /// Is a fetch due at `now_ms` from Home's refresh (not an edit)?
-    pub fn due(&self, now_ms: i64) -> bool {
-        !self.fetching && self.asked_at_ms.is_none_or(|at| now_ms - at >= STALE_MS || now_ms < at)
-    }
+/// WORKER THREAD: one write. A failure of any kind is `Failed`; the ledger reverts the flip.
+pub fn run_write(io: &dyn WatchlistIo, auth: &WatchlistAuth, tag: Tag, write: PendingWrite, post: &mut dyn FnMut(Landed)) {
+    let outcome = match io.write(auth, &encode_hex(&write.hex), write.intent) {
+        Ok(()) => WriteOutcome::Landed,
+        Err(_) => WriteOutcome::Failed,
+    };
+    post(Landed { tag, what: What::Written { write, outcome } });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn item(kind: &str, guid: &str) -> WatchlistItem {
-        WatchlistItem { guid: guid.into(), kind: kind.into(), ..Default::default() }
-    }
-
-    fn copy(sid: ServerId, rk: &str) -> PmsMovie {
-        PmsMovie { sid, rk: rk.into(), title: rk.into(), thumb: "/t".into(), ..Default::default() }
-    }
-
-    const OURS: ServerId = ServerId::from_raw(0);
-    const SHARE: ServerId = ServerId::from_raw(1);
-
     #[test]
-    fn each_title_takes_the_first_source_holding_it_in_list_order() {
-        let items = [item("movie", "plex://movie/a"), item("show", "plex://show/b"), item("movie", "plex://movie/c")];
-        let rows = resolve(&items, &[OURS, SHARE], |sid, guid| Some(match (sid, guid) {
-            (OURS, "plex://movie/a") => Some(copy(OURS, "1")),
-            (SHARE, "plex://movie/a") => Some(copy(SHARE, "9")),
-            (SHARE, "plex://show/b") => Some(copy(SHARE, "2")),
-            _ => None,
-        }));
-        let got: Vec<_> = rows.iter().map(|m| (m.sid, m.rk.as_str())).collect();
-        assert_eq!(got, [(OURS, "1"), (SHARE, "2")], "our own copy first; a title nobody holds is left off");
+    fn hex_round_trips_and_rejects_the_wrong_shape() {
+        let h = decode_hex("0123456789abcdef01234567").unwrap();
+        assert_eq!(encode_hex(&h), "0123456789abcdef01234567");
+        assert!(decode_hex("0123").is_none());
+        assert!(decode_hex("zz23456789abcdef01234567").is_none());
+        assert!(decode_hex("0123456789abcdef0123456é").is_none());
     }
 
     #[test]
-    fn a_source_that_does_not_answer_does_not_hide_a_copy_elsewhere() {
-        let rows = resolve(&[item("movie", "plex://movie/a")], &[OURS, SHARE], |sid, _| match sid {
-            OURS => None,
-            _ => Some(Some(copy(SHARE, "5"))),
-        });
-        assert_eq!(rows.len(), 1);
+    fn civil_dates_come_out_right() {
+        assert_eq!(ymd_of_unix_days(0), "1970-01-01");
+        assert_eq!(ymd_of_unix_days(19_782), "2024-02-29");
+        assert_eq!(ymd_of_unix_days(20_001), "2024-10-05");
     }
 
     #[test]
-    fn episodes_and_unwatchlistable_guids_are_not_looked_up() {
-        let mut asked = Vec::new();
-        resolve(&[item("episode", "plex://episode/e"), item("movie", "com.plexapp.agents.imdb://tt1")], &[OURS], |_, guid| {
-            asked.push(guid.to_owned());
-            Some(None)
-        });
-        assert!(asked.is_empty());
+    fn auth_lease_requires_the_same_profile_and_current_credential() {
+        let input = WatchlistInput::for_test(9);
+        let auth = input.auth().unwrap();
+        assert!(auth.matches_lease(input.profile(), Some("test-credential")));
+        assert!(!auth.matches_lease(input.profile(), Some("rotated-credential")));
+        assert!(!auth.matches_lease(input.profile(), None));
+        let other = WatchlistInput::profile_for_test(10);
+        assert!(!auth.matches_lease(&other, Some("test-credential")));
+        let mut user = input.profile().user.clone().unwrap();
+        user.uuid = "different".into();
+        let other = CurrentProfile { user: Some(user), generation: 9, stamp: String::new() };
+        assert!(!auth.matches_lease(&other, Some("test-credential")));
     }
 
     #[test]
-    fn the_resolution_is_bounded_by_the_shelf_and_by_the_titles_asked() {
-        let many: Vec<_> = (0..200).map(|i| item("movie", &format!("plex://movie/{i}"))).collect();
-        let mut asked = 0;
-        let rows = resolve(&many, &[OURS], |_, _| { asked += 1; Some(Some(copy(OURS, "x"))) });
-        assert_eq!((rows.len(), asked), (MAX_SHELF_ITEMS, MAX_SHELF_ITEMS), "a full shelf stops asking");
-        let mut asked = 0;
-        resolve(&many, &[OURS], |_, _| { asked += 1; Some(None) });
-        assert_eq!(asked, RESOLVE_MAX, "nothing held: at most RESOLVE_MAX titles are asked about");
-    }
-
-    #[test]
-    fn membership_answers_only_for_a_catalog_guid_and_follows_an_edit() {
-        let m = Membership::new(["plex://movie/a".to_owned(), "local://3".to_owned()]);
-        assert_eq!(m.on_list("plex://movie/a"), Some(true));
-        assert_eq!(m.on_list("plex://movie/b"), Some(false));
-        assert_eq!(m.on_list("local://3"), None, "no catalog entry: no control");
-        assert_eq!(m.edited("plex://movie/b", true).on_list("plex://movie/b"), Some(true));
-        assert_eq!(m.edited("plex://movie/a", false).on_list("plex://movie/a"), Some(false));
-    }
-
-    #[test]
-    fn a_copy_is_a_drawable_row_stamped_with_the_asked_guid() {
-        let mc: plx_plex::plex::MediaContainer = serde_json::from_str(
-            r#"{"Metadata":[{"type":"movie","ratingKey":"1","title":"","thumb":"/t"},
-                            {"type":"movie","ratingKey":"2","title":"s1","thumb":"/t","guid":"com.plexapp.agents.x://1"}]}"#,
-        ).unwrap();
-        let m = copy_of(&mc, OURS, "plex://movie/a").expect("the drawable row");
-        assert_eq!((m.rk.as_str(), m.guid.as_str()), ("2", "plex://movie/a"));
-    }
-
-    #[test]
-    fn a_fetch_is_due_once_the_list_is_stale_and_none_is_out() {
-        let mut s = State::default();
-        assert!(s.due(0), "never fetched");
-        s.asked_at_ms = Some(1_000);
-        assert!(!s.due(1_000 + STALE_MS - 1));
-        assert!(s.due(1_000 + STALE_MS));
-        s.fetching = true;
-        assert!(!s.due(1_000 + STALE_MS), "one in flight");
+    fn the_auth_debug_form_hides_the_credential() {
+        let a = WatchlistAuth {
+            client_id: "client".into(),
+            credential: "SECRET".into(),
+            user: UserRef::default(),
+            generation: 3,
+        };
+        let shown = format!("{a:?}");
+        assert!(!shown.contains("SECRET") && !shown.contains("client"));
     }
 }

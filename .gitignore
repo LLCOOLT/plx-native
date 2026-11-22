@@ -47,6 +47,20 @@ rust-modules/target-macapp/
 # `make test-fast` — the opt-in INCREMENTAL host unit loop, in its own tree so its incremental
 # cache never lands in the `target` that `make check` and CI use.
 rust-modules/target-fast/
+# `make test-hostsim` — the same shape for the application crate's `hostsim` tests: its own tree,
+# in the checkout so `make disk` / `tools/build-gc.sh` see it and `git add -A` cannot commit it.
+# (`make check-nodef` has no dir of its own: it builds into `target/` above.)
+rust-modules/target-hostsim/
+# `make fuzz-hud` -- the fuzz package's own tree and the files its tool generates (fuzz/Cargo.toml says why
+# the lock is a copy of the shipped one rather than a committed file). All of it is derived and may go with a
+# lane except `fuzz/artifacts/`: a crash input is a finding, so tools/build-gc.sh keeps a lane that holds one.
+rust-modules/target-fuzz/
+fuzz/Cargo.lock
+fuzz/.lock-base
+fuzz/seeds/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
 # `make LAB=1` and `make LAB=1 sim` — the Lab Diagnostics feature set gets its own build trees for
 # the reason every other feature set does (cargo does not hash its output; see the Makefile).
 rust-modules/target-lab/
@@ -54,9 +68,34 @@ rust-modules/target-sim-lab/
 # `make screenshots-sim` — the documentation-screenshot simulator (hostsim + devtriggers).
 rust-modules/target-sim-shots/
 rust-modules/target-sim-video/
+# `simulators.yml` builds into `target-sim-ci` (`make sim-macos SIM_TDIR=...`) and `target-sim-ci-macapp`
+# (the macapp feature set's link), in the checkout; a lane reproducing that job gets the same trees.
+rust-modules/target-sim-ci*/
 # pkg/plxnative-storage's own target dir, deliberately separate from $(RUST_TDIR) — see the
 # Makefile's STORAGE_TDIR comment. One glob for every RELEASE/LAB/SYMBOLS combination.
 rust-modules/target*-storage/
+# `make PLATFORM=tizen tizen-so` (mk/platform-tizen.mk, docs/tizen.md): the Tizen build's own cargo tree (the glob above does
+# not cover it: it names `target*-storage`), the library and package it writes, and the static SDL it builds from the pins.
+rust-modules/target-tizen/
+tizen/out/
+tizen/sdl-build/
+# The .NET host project's generated half (tizen/host/PlxHost/): `tizen-tpk` stages the library, the font, the icon and the two
+# dev-boot values into it and dotnet writes bin/ and obj/. The dev-boot files carry an address the builder chose (never a
+# credential), so they are listed one by one, and a stale one must never ride into the next package.
+tizen/host/PlxHost/bin/
+tizen/host/PlxHost/obj/
+tizen/host/PlxHost/lib/
+tizen/host/PlxHost/res/appfont.ttf
+tizen/host/PlxHost/res/appfont-bold.ttf
+tizen/host/PlxHost/res/OFL.txt
+tizen/host/PlxHost/res/THIRD-PARTY-NOTICES.md
+tizen/host/PlxHost/res/licenses/
+tizen/host/PlxHost/res/dev-boot.json
+tizen/host/PlxHost/res/log-host.txt
+tizen/host/PlxHost/shared/res/plxntizen0.png
+# Signing material is never source: a Samsung author or distributor certificate and its profile (docs/tizen.md, "Signing").
+*.p12
+*.pfx
 
 # dead prototype dir (code lives in rust-modules/ now)
 rust-poc/
@@ -79,6 +118,7 @@ pkg/logmprobe
 .tv-dpad-pass
 .tv-tunnel.pid
 .tv-tunnel.log
+.tv-plextv.pid
 .tv-remote-url
 pkg/.build-config
 pkg/.config-local-stamp
@@ -101,15 +141,17 @@ pkg/.flavor/
 # tree in a machine-wide, flag-keyed cache (`$PLX_BUILD_CACHE`, default `~/.cache/plxnative`), so
 # a fresh worktree gets its own real prefix in about three seconds. The slashless form stays: it
 # costs nothing, and it is the pattern that was actually load-bearing when somebody did.
-# `vendor/ffmpeg-build` still holds one thing after that change — the pinned upstream TARBALL,
-# which stays in the checkout because `release.yml` publishes it as the LGPL corresponding source.
+# `vendor/ffmpeg-build` holds the in-checkout object tree when PLX_BUILD_CACHE is empty. The pinned
+# upstream TARBALL (which `release.yml` publishes as the LGPL corresponding source) is in
+# `vendor/downloads`, with every other archive `ci/deps.py` fetches from `ci/dependencies.json`.
 vendor/ffmpeg-build
+vendor/downloads
+# nanosvg is fetched, not vendored: `ci/deps.py stage nanosvg --into vendor/nanosvg`.
+vendor/nanosvg
 vendor/ffmpeg-prefix
-vendor/sentry-native-*.tar.gz
 vendor/sentry-native-src
 vendor/sentry-native-build
 vendor/sentry-native-prefix
-vendor/libass-sources
 vendor/libass-build
 vendor/libass-build-host
 vendor/libass-prefix
@@ -125,6 +167,8 @@ vendor/vendor/
 # them, so a fresh clone rebuilds FFmpeg either way, and tracking them costs 2.1 MB per version
 # bump forever in a repo whose reproducibility rests on the pinned tarball.
 pkg/lib*-plx.so.*
+# ...and the `.debug` files `make symbols-libs` separates from them (symbols for the Sentry upload).
+pkg/symbols/
 pkg/libass-plx-host.so.0*
 pkg/libass-plx.0.dylib.*.new
 pkg/.ffabi-ok
@@ -157,9 +201,13 @@ tests/fixtures/**/*.mkv
 tests/fixtures/**/*.mp4
 tests/fixtures/**/*.sup
 tests/fixtures/fixtures.json
-# ...except one deliberate 13 KB regression fixture, which is not generated media but the input of
-# `ff_image_subtitle_tests.rs` (`make check-ffmpeg`): mkvmerge's zlib-compressed subtitle tracks.
+# ...except two deliberate small regression fixtures, which are not generated media but inputs of
+# `ff_image_subtitle_tests.rs` (`make check-ffmpeg`): mkvmerge's zlib-compressed subtitle tracks,
+# and the NUL-terminated ASS header and packets (`make_ass_header_fixture.py`).
 !tests/fixtures/mkv_zlib_subs.mkv
+!tests/fixtures/ass-terminated-header.mkv
+# ...and the 588-byte GBK subrip track of `ff_subtitle_charset_tests.rs` (issue #628).
+!tests/fixtures/gbk-subrip.mkv
 
 # Python bytecode from the host-side test/tooling scripts.
 __pycache__/
@@ -194,3 +242,14 @@ tests/fixtures/softfloat/arm.tbl
 
 # Independent native DB8 storage helper (built by Makefile).
 /pkg/plxnative-storage
+
+# Node tools (tools/package.json): `npm ci --prefix tools`
+tools/node_modules/
+
+# Native backend feature matrices use separate, rebuildable Cargo trees.
+rust-modules/target*-uri/
+rust-modules/target*-feed/
+rust-modules/target*-none/
+
+# Empryo local workspace state, reviews and scratch artifacts.
+/.empryo/

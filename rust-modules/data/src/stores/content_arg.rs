@@ -10,6 +10,10 @@ pub enum ContentArg {
     Person { sid: plx_plex::plex::ServerId, key: String, guid: String, name: String, thumb: String },
     Filmography { sid: plx_plex::plex::ServerId, key: String },
     Collection(plx_plex::plex::collections::CollectionRef),
+    /// The catalog page of a title no server holds (plex.tv discover, `/library/metadata/<hex>`):
+    /// the 12 bytes of the catalog id (`watchlist::decode_hex` / `encode_hex`). Appended last so the
+    /// recorded tags of every earlier variant stand.
+    Catalog { hex: [u8; 12] },
 }
 
 impl plx_machine::machine::LogicalState for ContentArg {
@@ -24,6 +28,7 @@ impl plx_machine::machine::LogicalState for ContentArg {
                 // recordings of collection pages keep their canon.
                 if id.playlist { c.u32(1); }
             }
+            Self::Catalog { hex } => { c.u32(4).str(&crate::watchlist::encode_hex(hex)); }
         }
     }
     fn probe(&self, out: &mut String) { out.push_str("content_arg"); }
@@ -40,6 +45,7 @@ impl ContentArg {
             (Self::Filmography { sid: a, key: x }, Self::Filmography { sid: b, key: y }) =>
                 a == b && x == y,
             (Self::Collection(a), Self::Collection(b)) => a.same_collection(b),
+            (Self::Catalog { hex: a }, Self::Catalog { hex: b }) => a == b,
             _ => false,
         }
     }

@@ -293,7 +293,7 @@ impl Channels {
         let (tx, rx) = mpsc::channel();
         let spawned = plx_base::task::spawn_small(name, move || {
             let _ = tx.send(work());
-            plx_machine::idle::wake();
+            plx_machine::present::wake_from_worker();
         });
         spawned.then_some(rx)
     }

@@ -7,8 +7,8 @@
 //!
 //! # What may appear, and what may not
 //!
-//! The envelope is assembled from [`plx_media::player::Diag`], [`plx_platform::tv::device`] and
-//! [`plx_platform::devcaps`], whose fields are numbers, bools, enums and short platform strings.
+//! The envelope is assembled from [`plx_media::player::Diag`], [`plx_os::tv::device`] and
+//! [`plx_os::devcaps`], whose fields are numbers, bools, enums and short platform strings.
 //! `app::diagnostics`'s module doc states the rule those types already live under and the reasoning
 //! behind each clause; it applies here unchanged and for a stronger reason, since an upload
 //! crosses the public internet rather than a room:
@@ -80,7 +80,7 @@ pub(crate) struct Device {
     pub hw_revision: String,
 }
 
-/// What the SoC's own table says it decodes ([`plx_platform::devcaps`]) — the field that separates "this
+/// What the SoC's own table says it decodes ([`plx_os::devcaps`]) — the field that separates "this
 /// firmware refuses the stream" from "this set was never going to decode it".
 #[derive(Serialize)]
 pub(crate) struct Caps {
@@ -88,6 +88,8 @@ pub(crate) struct Caps {
     pub hevc_max_w: u32,
     pub hevc_max_h: u32,
     pub vp9: bool,
+    /// the device table lists an AV1 decoder row (false on the assumed set)
+    pub av1: bool,
     /// the direct-playable audio subset, in `plex::DP_AUDIO_CODECS`'s comma form
     pub audio: String,
 }
@@ -197,8 +199,9 @@ pub(crate) fn build(
     session: &str,
     route: &'static str,
     ps: &plx_media::route::PlaybackSession,
+    pa: &plx_media::player::adapter::PlayerAdapter,
 ) -> String {
-    let d = plx_media::player::diag(ps);
+    let d = plx_media::player::diag(ps, pa);
     let (recs, dropped) = plx_base::eventlog::ring::take();
     body(seq, reason, session, route, &d, recs, dropped)
 }
@@ -269,13 +272,13 @@ pub(crate) fn body(
 }
 
 fn device() -> Device {
-    let i = plx_platform::tv::device::info();
-    let d = plx_platform::tv::device::device();
+    let i = plx_os::tv::device::info();
+    let d = plx_os::tv::device::device();
     Device {
         webos_release: i.release.clone(),
-        webos_codename: i.codename.clone(),
-        webos_api: i.api.clone(),
-        webos_name: i.name.clone(),
+        webos_codename: i.webos.codename.clone(),
+        webos_api: i.webos.api.clone(),
+        webos_name: i.webos.name.clone(),
         model: d.model.clone(),
         board: d.board.clone(),
         hw_revision: d.hw_revision.clone(),
@@ -283,12 +286,13 @@ fn device() -> Device {
 }
 
 fn caps() -> Caps {
-    let c = plx_platform::devcaps::caps();
+    let c = plx_os::devcaps::caps();
     Caps {
         hevc: c.hevc,
         hevc_max_w: c.hevc_max.0,
         hevc_max_h: c.hevc_max.1,
         vp9: c.vp9,
+        av1: c.av1,
         audio: c.audio.clone(),
     }
 }

@@ -192,7 +192,7 @@ fn edit_opens_the_options_and_each_change_previews_the_draft_again() {
     st.key(Key::Ok, s.view(), NOW, &mut out);
     let Some(Out::Store(VCmd::Preview { recipe, .. })) = out.pop() else { panic!() };
     assert_eq!(recipe.rules.max_rating_rank, 1);
-    assert_eq!(edit_label(EditItem::Rating, &recipe), plx_platform::i18n::msg::livetv_studio_rating_up_to("G"));
+    assert_eq!(edit_label(EditItem::Rating, &recipe), plx_os::i18n::msg::livetv_studio_rating_up_to("G"));
     // Done returns to the actions, on Edit; Keep then keeps the edited draft.
     st.key(Key::Right, s.view(), NOW, &mut out);
     st.key(Key::Ok, s.view(), NOW, &mut out);
@@ -208,7 +208,7 @@ fn options_cycle_and_the_count_reads_naturally() {
     assert_eq!(next_kinds(next_kinds(next_kinds(Kinds::Both))), Kinds::Both);
     assert_eq!((next_rating(0), next_rating(2), next_rating(3)), (1, 3, 0));
     let line = estimate_line(&Estimate { films: 1, shows: 0, programmes: 1, hours: 2.4 });
-    assert_eq!(line, format!("{} \u{b7} {}", plx_platform::i18n::msg::browse_person_films(1), plx_platform::i18n::msg::livetv_studio_hours(2)));
+    assert_eq!(line, format!("{} \u{b7} {}", plx_os::i18n::msg::browse_person_films(1), plx_os::i18n::msg::livetv_studio_hours(2)));
     assert_eq!(estimate_line(&Estimate::default()), "");
 }
 
@@ -246,7 +246,7 @@ fn new_channel_starts_from_the_library_and_names_itself_from_its_options() {
     assert_eq!((recipe.rules.year_from, recipe.rules.year_to, recipe.name.as_str()), (1980, 1989, "80s Comedy"));
     assert_eq!(st.made().unwrap().name, "80s Comedy", "the card follows the name");
     let line = estimate_line(st.estimate_of(st.made().unwrap()).expect("a live count"));
-    assert_eq!(line, format!("{} \u{b7} {}", plx_platform::i18n::msg::browse_person_films(1), plx_platform::i18n::msg::livetv_studio_hours(2)));
+    assert_eq!(line, format!("{} \u{b7} {}", plx_os::i18n::msg::browse_person_films(1), plx_os::i18n::msg::livetv_studio_hours(2)));
 }
 
 #[test]

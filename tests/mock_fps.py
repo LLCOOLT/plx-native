@@ -27,21 +27,70 @@ Scene fields (tests/manifest.json, `fps_scenes`):
   "mock": {"rk": 50002}         a scene that names a library `item` on a real server opens THIS
                                 ratingKey of the synthetic library instead (`$rk` in its triggers);
                                 an `item` scene with no `mock.rk` is not runnable under --mock
+  "mock": {"cw_art_fixture": true}
+                                ... `--cw-art-fixture`: five dedicated Continue Watching items (one per
+                                art path a stills card can take: Plex cover, background + clearLogo
+                                composite, title in type) head the row, whose art the mock draws at
+                                request time, so the card art is a cold read on a fresh install
+  "mock": {"link": ["remote-wan"]}
+                                ... `--link remote-wan` (tests/link_conditioner.py): the mock answers
+                                like a slow remote server; a spec is `[class=]profile[:k=v,...]`, and
+                                `shows`/`seasons`/`episodes` size the TV library (a season over 60
+                                episodes pages)
   "mock": {"triggers": {"plxnative-search": "sb"}}
                                 trigger values that replace the scene's own under --mock (a query
                                 that the synthetic titles, all `s` + hex, can actually match)
+  "mock": {"extra_media": ["bug665/src.mkv"], "transcode_fixture": "bug665/clip.mkv", "rk": 990001}
+                                ... `--extra-media <file>` (one real, ffprobed file per movie, ratingKeys
+                                990001+ in the order given) and `--transcode-fixture <file>` (served for
+                                every `/video/:/transcode/universal/start*`, so a re-encode route has
+                                bytes). Paths are relative to the fixtures root (`$FIXTURES_OUT`, else
+                                `~/plxnative-fixtures`), never absolute and never inside the repo; a scene
+                                whose files are not built is SKIPPED with the reason, not failed
   "mock": {"only": true, ...}   runs ONLY under --mock (the scene is meaningless on a real library)
   "walk": {"key_gap_s": 0.33, "max_rows": 170, ...}
                                 after the Home shelves land, press Down once per landed row at
                                 that pace and then Up back, and grade the heartbeats of THAT window
-  "walk": {"landed": "library", "extra_rows": 6, "fingerprint_region": "grid", ...}
-                                the same walk over the Library: sized from the seated section's
+  "walk": {"landed": "library", "extra_rows": 0, "fingerprint_region": "shelf", ...}
+                                the same walk over the Library's Recommended page (the Library page
+                                mounts no shelves): sized from the seated section's
                                 `libhubs: section N landed M shelves` line, a second Down per
-                                linked shelf, `extra_rows` more to reach the grid, and a
-                                `focus route=... region=grid` fingerprint required in the window
+                                linked shelf, `extra_rows` more (0: the page seats its first shelf on
+                                arrival and has no toolbar to cross; the burst walks over the Library's
+                                grid use 2, to cross its header), and a
+                                `focus route=... region=<fingerprint_region>` fingerprint required in
+                                the window (a region the scene's page prints: tests/test_harness.py
+                                reads the words from the page's `probe_viewport`)
+  "walk": {"row_down": 1, "cards": 96, "key_gap_s": 0.33, ...}
+                                a ROW walk (#567, `home-recent-paging`): after Home lands, press Down
+                                `row_down` times to reach a named row (the `plxnative-grid` trigger
+                                seats row 0, the first shelf, so 1 reaches the second), then Right
+                                `cards` times, rest `rest_s`, Left `cards` times back. Only
+                                down/right/left, never ok or back. `max_rows` is not used. The
+                                result prints the page landings (`hubs: landed` lines) inside the
+                                window; `min_page_landings` (default 6) of them must fall in the
+                                forward half or the scene FAILS ("paging did not happen")
+  "walk": {"row_down": 3, "cards": 96, "key": "down", "back": "up", "reach": {"route": "library",
+           "region": "grid", "min_global": 120}, ...}
+                                the row walk over any other card section (the `*-paging-held-*`
+                                scenes): `key`/`back` name the pair that walks the list (Down/Up for
+                                a grid, one row per press), and `reach` replaces the `hubs: landed`
+                                grading, which only Home logs: the walk starts once the screen's
+                                first `focus route=<route>` fingerprint is logged, and FAILS when the
+                                deepest `cdg=` (the focused card's index in its source, logged with
+                                `plxnative-focusx`) never reaches `min_global`, i.e. the list never
+                                paged. The detail counts frames the focused card was drawn partly
+                                off the 1920-wide canvas.
   "walk": {"min_landed": 150, ...}
                                 the scene FAILS when fewer shelves (rows) than that landed, so a
                                 cap that shortens the surface cannot pass on the shorter walk
+
+  "expect": {"decision": "transcode", "load_max": "1920x1080@60", ...}
+                                a scene's own log assertions, the SAME functions and keys as a
+                                playback case's `expect` (run.py `grade_scene_expect`): decision,
+                                codec + video_size, load_video / load_audio / load_max / sink_echo,
+                                min_timeline_climb_s; `no_error` is always checked. For a player
+                                scene whose point is what the app DECLARED, not how fast it drew
 
 A scene with no `mock` block is never run under --mock: it needs real library content, and guessing
 which scenes do not is how a synthetic library grades the wrong thing.
@@ -63,9 +112,18 @@ REPO_ROOT = os.path.dirname(TESTS_DIR)
 # (`pms: server <slot> version=<v> ...`). The same literal `tools/mock-guest.py` checks before boot.
 MOCK_SERVER_VERSION = "1.41.0.0000-synthetic"
 
+# The URI product route's carrier: the ONE `--extra-media` clip its mock serves, so the mock numbers it
+# from the start of its fixed id block (`mock_pms.EXTRA_MEDIA_RK_BASE` / `EXTRA_MEDIA_PART_ID_BASE`,
+# pinned against the mock by tests/test_harness.py).
+CARRIER_RK = 990001
+CARRIER_PART_ID = 991001
+
 # The only keys a walk may press. Never `ok`/`enter` (a Home card press resumes playback and writes
 # a household's viewing record) and never `back` (on a root screen it leaves the app).
 WALK_KEYS = ("down", "up")
+# A row walk (`walk.cards`) moves ALONG a row: Down to reach it, then Right and Left (`walk.key` and
+# `walk.back` name another pair for a grid: Down and Up, one row per press). Same bans.
+ROW_WALK_KEYS = ("down", "up", "right", "left")
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +161,54 @@ def mock_server_args(scene):
             args += ["--section-hubs-linked", str(linked)]
     elif block.get("section_hubs_linked"):
         raise ValueError(f"{scene.get('name')}: mock.section_hubs_linked needs mock.section_hubs")
+    if block.get("cw_art_fixture"):
+        args += ["--cw-art-fixture"]
+    for spec in block.get("link") or []:
+        args += ["--link", str(spec)]  # tests/link_conditioner.py; mock_pms validates it at start
+    for key in ("shows", "seasons", "episodes"):
+        if block.get(key) is not None:
+            args += [f"--{key}", str(int(block[key]))]
+    for path in mock_fixture_paths(scene):
+        args += ["--extra-media", path]
+    if block.get("transcode_fixture") is not None:
+        args += ["--transcode-fixture", fixture_path(scene, block["transcode_fixture"])]
     return args
+
+
+def fixtures_base():
+    """The directory a scene's `mock.extra_media` / `mock.transcode_fixture` names resolve against:
+    the one `make fixtures-pipeline` writes beside (`$FIXTURES_OUT`, else `~/plxnative-fixtures`),
+    i.e. the PARENT of the `pipeline/` pack. Outside the repo, like every generated medium."""
+    return os.environ.get("FIXTURES_OUT") or os.path.expanduser("~/plxnative-fixtures")
+
+
+def fixture_path(scene, rel):
+    """`rel` under [`fixtures_base`]. A tracked manifest holds only relative names: an absolute path
+    or a `..` would put one person's directory (or the repo) into a public file."""
+    parts = str(rel).replace("\\", "/").split("/")
+    if not rel or os.path.isabs(str(rel)) or ".." in parts:
+        raise ValueError(f"{scene.get('name')}: mock fixture {rel!r} must be a relative name "
+                         f"under the fixtures root, with no `..`")
+    return os.path.join(fixtures_base(), *parts)
+
+
+def mock_fixture_paths(scene):
+    """The scene's `mock.extra_media` files, resolved, in the order the mock numbers them."""
+    block = scene_mock(scene) or {}
+    return [fixture_path(scene, rel) for rel in block.get("extra_media") or []]
+
+
+def missing_mock_fixtures(scene):
+    """Why the scene cannot run here: the mock fixture files that are not built, or None."""
+    block = scene_mock(scene) or {}
+    rels = list(block.get("extra_media") or [])
+    if block.get("transcode_fixture") is not None:
+        rels.append(block["transcode_fixture"])
+    gone = [r for r in rels if not os.path.isfile(fixture_path(scene, r))]
+    if not gone:
+        return None
+    return (f"mock fixture(s) not built under {fixtures_base()}: {', '.join(gone)} "
+            f"(the scene's `comment` has the ffmpeg commands)")
 
 
 def mock_scene(scene):
@@ -113,6 +218,9 @@ def mock_scene(scene):
     out = dict(scene)
     if block.get("rk") is not None:
         out["rk"] = int(block["rk"])
+        # The overlay's `skip` says the REAL library has no item of this shape; the mock serves
+        # `mock.rk` from its own synthetic library, so that reason no longer applies.
+        out.pop("skip", None)
     if block.get("triggers"):
         out["triggers"] = {**scene.get("triggers", {}), **block["triggers"]}
     return out
@@ -134,6 +242,8 @@ def partition_mock(scenes, mock):
         elif mock and block is None:
             skipped.append((s["name"], "needs real library content (no `mock` block); "
                                        "not runnable against the synthetic mock"))
+        elif mock and block is not None and missing_mock_fixtures(s):
+            skipped.append((s["name"], missing_mock_fixtures(s)))
         elif not mock and block is not None and block.get("only"):
             skipped.append((s["name"], "mock-only scene: run with --mock"))
         else:
@@ -161,6 +271,29 @@ def configured_endpoint(config_path):
         raise SystemExit(f"--mock needs an explicit PMS_HOST and PMS_PORT in {config_path} "
                          f"(the address the deployed binary was built against)")
     return host[1], int(port[1])
+
+
+def carrier_server_args(path, audio=None, subtitle=None, transcode=None):
+    """The `tests/mock_pms.py` arguments of a mock-carried pipeline case: the carrier clip as its ONE
+    `--extra-media` movie (ratingKey `CARRIER_RK`, part `CARRIER_PART_ID`). `path` is absolute, resolved
+    by the runner against the pack it is serving, not against `fixtures_base()`.
+
+    `audio` (a case's `carrier_audio`) is the 1-based audio stream of the carrier the mock reports as the
+    server-selected one (`--extra-media-audio`): the app's own startup pick, with track memory cleared.
+    `subtitle` (`carrier_subtitle`) is the same for the 1-based subtitle stream (`--extra-media-subtitle`).
+    `transcode` is the absolute path the mock serves for every `/video/:/transcode/universal/start`
+    (`--transcode-fixture`: the enhanced remux of a `pms_route: "mock"` case). None leaves each as it was."""
+    args = ["--extra-media", str(path)]
+    for flag, key, value in (("--extra-media-audio", "carrier_audio", audio),
+                             ("--extra-media-subtitle", "carrier_subtitle", subtitle)):
+        if value is None:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"{key} {value!r} must be a positive integer (the 1-based stream)")
+        args += [flag, str(value)]
+    if transcode is not None:
+        args += ["--transcode-fixture", str(transcode)]
+    return args
 
 
 def _mock_guest_module():
@@ -323,7 +456,13 @@ def landed_library_count(lines, section):
 def landed_shelves(scene, lines):
     """The shelf count the scene's walk is sized from: the seated Library section's landing when
     `walk.landed` is `"library"`, otherwise Home's. None before it has landed."""
-    if (scene.get("walk") or {}).get("landed") == "library":
+    walk = scene.get("walk") or {}
+    if walk.get("reach"):
+        # A surface with no landing line of its own (`walk.reach`): it is up once its first
+        # focus fingerprint is logged, and the walk's size is its fixed key plan (one "row").
+        rx = re.compile(rf"^focus route={re.escape(scene['route'])}\b")
+        return 1 if any(rx.match(ln) for ln in lines) else None
+    if walk.get("landed") == "library":
         return landed_library(lines, library_section_index(scene))
     found = landed(lines)
     return found[1] if found else None
@@ -331,6 +470,8 @@ def landed_shelves(scene, lines):
 
 def landed_lands(scene, lines):
     """How many times the scene's walk surface landed (see `landed_shelves`)."""
+    if (scene.get("walk") or {}).get("reach"):
+        return 1 if landed_shelves(scene, lines) else 0
     if (scene.get("walk") or {}).get("landed") == "library":
         return landed_library_count(lines, library_section_index(scene))
     return landed_count(lines)
@@ -366,23 +507,51 @@ def walk_downs(scene, shelves):
     """The Down presses a walk of `scene` makes for `shelves` landed shelves (before the
     `max_rows` cap `walk_plan` applies). Home: one per row. Library (`walk.landed: "library"`):
     one per shelf, a SECOND for each linked shelf (its heading is a stop of its own, then its
-    row), and `extra_rows` more to cross the toolbar into the grid."""
+    row), and `extra_rows` more (the Library page's toolbar, to reach its grid; the Recommended
+    page seats its first shelf on arrival and needs none). A `walk.reach` surface (the
+    Library page, which mounts no shelves and logs no landing) has a fixed plan: its one "row"
+    plus `extra_rows` Downs from the page header into the grid."""
     w = scene["walk"]
+    if w.get("reach"):
+        return int(shelves) + int(w.get("extra_rows", 0))
     if w.get("landed") != "library":
         return int(shelves)
     return int(shelves) + linked_landed(scene, shelves) + int(w.get("extra_rows", 0))
+
+
+def is_burst(scene):
+    """Whether the scene's `walk` is a burst walk (`walk.burst`): short runs of keys with rests
+    between them, instead of one continuous Down leg and one Up leg."""
+    return bool((scene.get("walk") or {}).get("burst"))
+
+
+def burst_shape(walk):
+    """`(burst, bursts, key_s, rest_s)` of a burst walk: `burst` keys `key_ms` apart, then
+    `rest_ms` of nothing, `bursts` times in each direction. Refuses a shape that is not a walk."""
+    burst, bursts = int(walk["burst"]), int(walk["bursts"])
+    key_s, rest_s = float(walk["key_ms"]) / 1000.0, float(walk["rest_ms"]) / 1000.0
+    if burst < 1 or bursts < 1 or key_s <= 0 or rest_s < 0:
+        raise ValueError(f"walk burst={burst} bursts={bursts} key_ms/rest_ms={key_s * 1000}/"
+                         f"{rest_s * 1000} is not a walk")
+    return burst, bursts, key_s, rest_s
 
 
 def walk_secs_needed(scene):
     """Seconds one walk can take at most: the launch wait, land wait, settle, down + up at
     `key_gap_s`, the rest between the legs, and a closing tail. The manifest's `run_secs` must
     cover it (a unit test holds every walk scene to that), because the run is a fixed `sleep` on
-    the TV."""
+    the TV. A burst walk (`walk.burst`) spends `max_rows` keys `key_ms` apart reaching the grid,
+    a rest, then `bursts` bursts down and as many back up, each followed by its rest."""
     w = scene["walk"]
-    keys = 2 * int(w["max_rows"])
+    if is_burst(scene):
+        burst, bursts, key_s, rest_s = burst_shape(w)
+        walking = (int(w["max_rows"]) * key_s + rest_s
+                   + 2 * bursts * (burst * key_s + rest_s))
+    else:
+        keys = len(row_walk_plan(w)) if is_row_walk(w) else 2 * int(w["max_rows"])
+        walking = keys * float(w["key_gap_s"]) + w.get("rest_s", 4)
     return (LAUNCH_WAIT_S + scene.get("warmup_s", 5) + w.get("land_wait_s", 15)
-            + w.get("settle_s", 3) + keys * float(w["key_gap_s"]) + w.get("rest_s", 4)
-            + w.get("tail_s", 5))
+            + w.get("settle_s", 3) + walking + w.get("tail_s", 5))
 
 
 def grid_fingerprint_seen(window, route, region):
@@ -405,6 +574,94 @@ KEY_RE = re.compile(r"\bkey type=0x300\b")
 HEARTBEAT_RE = re.compile(r"^loop=\d+ route=\w+")
 
 
+def is_row_walk(walk):
+    """Whether `walk` walks ALONG a row (`walk.cards`) rather than down the Home rows."""
+    return "cards" in walk
+
+
+def row_walk_plan(walk):
+    """The ordered key tokens of a row walk: `row_down` Downs to reach the row, `cards` Rights
+    along it, then `cards` Lefts back. Nothing else can be produced."""
+    n = int(walk["cards"])
+    fwd, back = walk.get("key", "right"), walk.get("back", "left")
+    plan = ["down"] * int(walk.get("row_down", 0)) + [fwd] * n + [back] * n
+    assert all(k in ROW_WALK_KEYS for k in plan)
+    return plan
+
+
+def page_landings(window, forward_keys=None):
+    """`(forward, total)` `hubs: landed` lines in `window`: every landing after the walk's first
+    key is a page (or a refresh), and `forward` counts those before the `forward_keys`-th key line
+    (the forward half of a row walk). `forward` is `total` when `forward_keys` is None or the
+    window holds fewer key lines than that."""
+    total = forward = 0
+    keys = 0
+    turned = False
+    for ln in window or []:
+        if KEY_RE.search(ln):
+            keys += 1
+            turned = forward_keys is not None and keys > forward_keys
+        elif LANDED_RE.match(ln.strip()):
+            total += 1
+            forward += 0 if turned else 1
+    return forward, total
+
+
+def describe_paging(window, forward_keys, min_forward):
+    """`(failure_or_None, detail)` for a row walk: the page landings in the window, graded only
+    on the forward half reaching `min_forward`."""
+    fwd, total = page_landings(window, forward_keys)
+    detail = f" | page landings in window: {fwd} forward, {total} total"
+    if fwd < min_forward:
+        return (f"paging did not happen: {fwd} page landing(s) (`hubs: landed`) in the forward half "
+                f"of the walk, fewer than the {min_forward} required ({total} in the whole window)"
+                ), detail
+    return None, detail
+
+
+FOCUS_CD_RE = re.compile(r"\bcdx=(-?\d+) cdy=(-?\d+) cdw=(\d+).*?\bcdg=(\d+)")
+FOCUS_CDK_RE = re.compile(r"\bcdk=(\S+)")
+CANVAS_W = 1920  # plx_base::surface::LOGICAL_W: every drawn x in the fingerprint is in these pixels
+
+
+def describe_reach(window, route, reach):
+    """`(failure_or_None, detail)` for a row walk over a surface that logs no `hubs: landed` line
+    per page (`walk.reach`): the deepest source index the focused card had (`cdg=`, the
+    `plxnative-focusx` read-out of `plx_ui::card_probe`) on `focus route=<route>` lines of the
+    walk's window. A walk that never got past the first window measured nothing, so it fails below
+    `min_global`. Also counts the frames the focused card was drawn partly outside the canvas: a
+    finding in the detail, never a failure. The detail and the failure also name how many DISTINCT
+    cards (`cdk=`, the stable key) were focused, which a fault in `cdg` cannot hide: a walk whose
+    `cdg` stalls while the cards keep changing is a probe fault, not a list that never paged."""
+    rx = re.compile(rf"^focus route={re.escape(route)}\b")
+    region = reach.get("region")
+    deepest, frames, off, cards = None, 0, 0, set()
+    for ln in window or []:
+        if not rx.match(ln) or (region and f"region={region} " not in ln + " "):
+            continue
+        m = FOCUS_CD_RE.search(ln)
+        if not m:
+            continue
+        x, y, w, g = (int(v) for v in m.groups())
+        deepest = g if deepest is None else max(deepest, g)
+        frames += 1
+        off += x < 0 or x + w > CANVAS_W or y < 0
+        k = FOCUS_CDK_RE.search(ln)
+        if k:
+            cards.add(k.group(1))
+    detail = (f" | focused card reached item {deepest} ({frames} drawn frames, {off} partly off the canvas, "
+              f"{len(cards)} distinct cards focused)")
+    need = int(reach["min_global"])
+    if deepest is None or deepest < need:
+        return (f"paging did not happen: the focused card reached item "
+                f"{'none' if deepest is None else deepest} on `focus route={route}"
+                f"{' region=' + region if region else ''}`, below the {need} the scene requires "
+                f"({len(cards)} distinct cards were focused: far more of them than `cdg` reached "
+                f"means the probe's `cdg` is wrong, not that the list never paged; is "
+                f"`plxnative-focus` + `plxnative-focusx` armed?)"), detail
+    return None, detail
+
+
 def walk_plan(rows, walk):
     """The ordered key tokens for one walk: `rows` Downs, then `rows` Ups, capped at `max_rows`
     each way. Raises if a token outside WALK_KEYS could ever be produced."""
@@ -412,6 +669,49 @@ def walk_plan(rows, walk):
     plan = ["down"] * n + ["up"] * n
     assert all(k in WALK_KEYS for k in plan)
     return plan
+
+
+def burst_plan(rows, walk):
+    """The ordered `(key, seconds_until_the_next_key)` pairs of a burst walk over `rows` landed
+    shelves: the Downs that cross the shelves and the toolbar into the grid (`walk_downs`'s share
+    is the caller's `rows`, capped at `max_rows`) at `key_ms`, a rest, then `bursts` bursts of
+    `burst` Downs, then the same bursts of Ups. Every burst ends in `rest_ms`; the keys inside a
+    burst are `key_ms` apart. Raises if a token outside WALK_KEYS could ever be produced."""
+    burst, bursts, key_s, rest_s = burst_shape(walk)
+    n = min(int(rows), int(walk["max_rows"]))
+    steps = [("down", key_s)] * n
+    if steps:
+        steps[-1] = ("down", rest_s)
+    for key in ("down", "up"):
+        for _ in range(bursts):
+            steps += [(key, key_s)] * (burst - 1) + [(key, rest_s)]
+    assert all(k in WALK_KEYS for k, _ in steps)
+    return steps
+
+
+def walk_steps(scene, rows):
+    """`(key, seconds_until_the_next_key)` for every key the walk of `scene` presses over `rows`
+    landed shelves/rows. A plain walk is `walk_plan` at `key_gap_s` with `rest_s` added after the
+    last Down; a row walk (`walk.cards`) is `row_walk_plan`, resting after its Rights instead; a
+    burst walk is `burst_plan`. KeyWalk paces itself from this and nothing else."""
+    w = scene["walk"]
+    if is_burst(scene):
+        return burst_plan(walk_downs(scene, rows), w)
+    if is_row_walk(w):
+        plan = row_walk_plan(w)
+        half = int(w.get("row_down", 0)) + int(w["cards"])
+    else:
+        plan = walk_plan(walk_downs(scene, rows), w)
+        half = len(plan) // 2
+    gap, rest = float(w["key_gap_s"]), float(w.get("rest_s", 4))
+    return [(key, gap + (rest if i + 1 == half else 0.0)) for i, key in enumerate(plan)]
+
+
+def walk_expected_keys(scene, rows):
+    """How many keys a complete walk of `scene` sends over `rows` landed shelves/rows, 0 when
+    nothing landed. The grader's count and the walker's plan are the same list, so they cannot
+    disagree."""
+    return len(walk_steps(scene, rows)) if rows else 0
 
 
 def walk_window(lines, tail_beats=2):
@@ -464,6 +764,85 @@ def describe_walk(rows_landed, keys_seen, stats, hub_lands, unit="row"):
             f"(recorded, not graded) | {'shelves' if unit == 'shelf' else 'hubs'} landed {hub_lands}x")
 
 
+# ---------------------------------------------------------------------------
+# Placeholder accounting (a burst walk's instrument)
+# ---------------------------------------------------------------------------
+# `phcount: frames=F ph_frames=P draws=D ph=N`, one line per second while `plxnative-phcount` is
+# armed (`card_motion_metrics::interval_line`): presented card frames, those that showed at least
+# one card without a texture, card draws and the draws without a texture (the placeholder
+# tile-frames). It is its own event-log line, not a heartbeat field.
+PHCOUNT_RE = re.compile(r"^phcount: frames=(\d+) ph_frames=(\d+) draws=(\d+) ph=(\d+)\s*$")
+
+
+def phcount_samples(window):
+    """The `phcount:` lines of `window` as `(keys_before, frames, ph_frames, draws, ph)`, where
+    `keys_before` is how many key lines precede the sample in the window (its place in the walk)."""
+    out, keys = [], 0
+    for ln in window or []:
+        if KEY_RE.search(ln):
+            keys += 1
+            continue
+        m = PHCOUNT_RE.match(ln.strip())
+        if m:
+            out.append((keys, *(int(g) for g in m.groups())))
+    return out
+
+
+def placeholder_tally(window, walk, prelude_keys):
+    """Placeholder tile-frames of a burst walk's `window`, or None when no `phcount:` line is in it
+    (the instrument was not armed, or the build has no devtriggers: not the same as zero).
+
+    `prelude_keys` is how many keys cross into the grid before the first burst. A sample belongs
+    to the burst of the last key before it, so a burst owns the rest that follows it (that is the
+    time a warm-while-at-rest strategy works in); its second-granular lines make a per-burst count
+    good to about a line either side of a boundary. Bursts `0..bursts-1` are the Down leg and
+    `bursts..2*bursts-1` the Up leg."""
+    samples = phcount_samples(window)
+    if not samples:
+        return None
+    burst, bursts, _, _ = burst_shape(walk)
+    per = [0] * (2 * bursts)
+    prelude = 0
+    for keys, _frames, _ph_frames, _draws, ph in samples:
+        if keys <= prelude_keys:
+            prelude += ph
+        else:
+            per[min((keys - prelude_keys - 1) // burst, 2 * bursts - 1)] += ph
+    return {"lines": len(samples), "frames": sum(x[1] for x in samples),
+            "ph_frames": sum(x[2] for x in samples), "draws": sum(x[3] for x in samples),
+            "ph": sum(x[4] for x in samples), "prelude": prelude, "per_burst": per,
+            "bursts": bursts}
+
+
+_FPS_RE = re.compile(r"\bfps=(\d+)")
+_PUP_RE = {k: re.compile(rf"\b{k}=(\d+)") for k in ("pupf", "pupf_ge22", "pup")}
+
+
+def describe_burst(window, route, walk, prelude_keys):
+    """The printed (never graded) half of a burst walk: placeholder tile-frames in total and per
+    burst, the median `fps=` over the window's heartbeats, and the poster-upload tally
+    (`pupf=`/`pupf_ge22=`/`pup=`) summed over them."""
+    beats = [ln for ln in window or [] if HEARTBEAT_RE.match(ln) and f"route={route}" in ln]
+    fps = sorted(int(m.group(1)) for ln in beats if (m := _FPS_RE.search(ln)))
+    med = f"{fps[len(fps) // 2]} (min {fps[0]}, max {fps[-1]}, n={len(fps)})" if fps else "n/a"
+    pup = {k: sum(int(m.group(1)) for ln in beats if (m := rx.search(ln)))
+           for k, rx in _PUP_RE.items()}
+    seen = any("pupf=" in ln for ln in beats)
+    tally = placeholder_tally(window, walk, prelude_keys)
+    if tally is None:
+        ph = ("placeholders: n/a (no `phcount:` line in the walk window: is plxnative-phcount "
+              "armed, and is this a devtriggers build?)")
+    else:
+        b = tally["bursts"]
+        ph = (f"placeholders: ph={tally['ph']} tile-frames in {tally['lines']} s "
+              f"({tally['ph_frames']} of {tally['frames']} card frames showed one; "
+              f"prelude ph={tally['prelude']}, bursts ph={sum(tally['per_burst'])}) | "
+              f"per burst down {tally['per_burst'][:b]} up {tally['per_burst'][b:]}")
+    ups = (f"pupf={pup['pupf']} pupf_ge22={pup['pupf_ge22']} pup={pup['pup']}" if seen
+           else "pupf/pup n/a")
+    return f" | burst: {ph} | median fps {med} | {ups} (recorded, not graded)"
+
+
 class KeyWalk(threading.Thread):
     """Drives the paced Down-then-Up walk on the TV while `make run` is blocked in its `sleep`.
 
@@ -509,7 +888,9 @@ class KeyWalk(threading.Thread):
                 break
             self.cancel.wait(2.0)
         if not found:
-            what = ("the Library never logged `libhubs: section "
+            what = (f"the {self.scene['route']} screen never logged a `focus route={self.scene['route']}` "
+                    "fingerprint (is `plxnative-focus` armed?)" if self.walk.get("reach") else
+                    "the Library never logged `libhubs: section "
                     f"{library_section_index(self.scene)} landed`"
                     if self.walk.get("landed") == "library" else "Home never logged `hubs: landed`")
             self.error = f"{what}, so there were no rows to walk"
@@ -517,23 +898,18 @@ class KeyWalk(threading.Thread):
         self.rows = found
         if self.cancel.wait(float(self.walk.get("settle_s", 3))):
             return
-        plan = walk_plan(walk_downs(self.scene, self.rows), self.walk)
-        gap = float(self.walk["key_gap_s"])
-        rest = float(self.walk.get("rest_s", 4))
+        steps = walk_steps(self.scene, self.rows)
         proc = subprocess.Popen(self.ssh_argv(self.tv, "sh"), stdin=subprocess.PIPE, text=True,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            half = len(plan) // 2
             nxt = time.monotonic()
-            for i, key in enumerate(plan):
+            for key, delay_s in steps:
                 if self.cancel.is_set():
                     break
                 proc.stdin.write(f"echo {key} > {self.fifo}\n")
                 proc.stdin.flush()
                 self.sent += 1
-                nxt += gap
-                if i + 1 == half:
-                    nxt += rest
+                nxt += delay_s
                 delay = nxt - time.monotonic()
                 if delay > 0:
                     self.cancel.wait(delay)

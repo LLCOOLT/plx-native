@@ -2,63 +2,69 @@
 //! borrowed strings and never opens the session file or polls the Browse vocabulary.
 
 use plx_ui::containers::tabs::StripMember;
-use plx_ui::dispatch::STRIP_BASE;
 use plx_machine::machine::{FocusKey, Measure};
-use plx_ui::widgets::{self, ChromeRead, ProfileChipRead, TabLabels, TopFocus};
+use plx_ui::icons::Icon;
+use plx_ui::widgets::{self, ChromeRead, ProfileChipRead, TabFace, TabLabels, TopFocus};
 use plx_data::stores::browse::{DirectoryView, SecKind};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Pill {
     Home,
     Section(SecKind),
+    Watchlist,
     /// Drawn just before Search, while Live TV has anything to show (`LiveTvView::configured`).
     LiveTv,
     Search,
 }
 
-/// How many pills the strip draws: Home, one per library type, Live TV when `livetv`, Search.
-pub(crate) fn tab_count(directory: DirectoryView<'_>, livetv: bool) -> usize {
-    1 + directory.tab_count() + usize::from(livetv) + 1
+/// The strip's destination keys in strip order: Home, one key per type pill, the Watchlist
+/// bookmark, Live TV when `livetv` (it has anything to show), Search. The one
+/// place that order is written; `refresh` publishes it and the pill maps below read it, so no
+/// map assumes which index Search holds.
+fn strip_keys(directory: DirectoryView<'_>, livetv: bool) -> Vec<u32> {
+    let mut keys = vec![widgets::TAB_KEY_HOME];
+    keys.extend((0..directory.tab_count()).filter_map(|i| directory.tab_kind(i)).map(|kind| match kind {
+        SecKind::Movie => widgets::TAB_KEY_MOVIES,
+        SecKind::Show => widgets::TAB_KEY_SHOWS,
+    }));
+    keys.push(widgets::TAB_KEY_WATCHLIST);
+    if livetv {
+        keys.push(widgets::TAB_KEY_LIVETV);
+    }
+    keys.push(widgets::TAB_KEY_SEARCH);
+    keys
 }
 
 pub(crate) fn pill_at(directory: DirectoryView<'_>, livetv: bool, i: usize) -> Pill {
-    pill_in(i, tab_count(directory, livetv) - 1, livetv, |tab| directory.tab_kind(tab))
+    pill_in(i, &strip_keys(directory, livetv))
 }
 
-fn pill_in(
-    i: usize,
-    search: usize,
-    livetv: bool,
-    kind_at: impl Fn(usize) -> Option<SecKind>,
-) -> Pill {
-    if i == search {
-        Pill::Search
-    } else if livetv && i + 1 == search {
-        Pill::LiveTv
-    } else if let Some(section) = i.checked_sub(1) {
-        kind_at(section).map(Pill::Section).unwrap_or(Pill::Home)
-    } else {
-        Pill::Home
+/// The destination a strip index names, by the KEY published at that index.
+fn pill_in(i: usize, keys: &[u32]) -> Pill {
+    match keys.get(i).copied() {
+        Some(widgets::TAB_KEY_MOVIES) => Pill::Section(SecKind::Movie),
+        Some(widgets::TAB_KEY_SHOWS) => Pill::Section(SecKind::Show),
+        Some(widgets::TAB_KEY_WATCHLIST) => Pill::Watchlist,
+        Some(widgets::TAB_KEY_LIVETV) => Pill::LiveTv,
+        Some(widgets::TAB_KEY_SEARCH) => Pill::Search,
+        _ => Pill::Home,
     }
 }
 
 pub(crate) fn pill_of(directory: DirectoryView<'_>, livetv: bool, pill: Pill) -> Option<usize> {
-    let search = tab_count(directory, livetv) - 1;
-    pill_index(pill, search, livetv, |kind| directory.tab_of_kind(kind))
+    pill_index(pill, &strip_keys(directory, livetv))
 }
 
-fn pill_index(
-    pill: Pill,
-    search: usize,
-    livetv: bool,
-    tab_of: impl Fn(SecKind) -> Option<usize>,
-) -> Option<usize> {
-    match pill {
-        Pill::Home => Some(0),
-        Pill::Section(kind) => tab_of(kind).map(|i| i + 1),
-        Pill::LiveTv => livetv.then(|| search - 1),
-        Pill::Search => Some(search),
-    }
+fn pill_index(pill: Pill, keys: &[u32]) -> Option<usize> {
+    let key = match pill {
+        Pill::Home => widgets::TAB_KEY_HOME,
+        Pill::Section(SecKind::Movie) => widgets::TAB_KEY_MOVIES,
+        Pill::Section(SecKind::Show) => widgets::TAB_KEY_SHOWS,
+        Pill::Watchlist => widgets::TAB_KEY_WATCHLIST,
+        Pill::LiveTv => widgets::TAB_KEY_LIVETV,
+        Pill::Search => widgets::TAB_KEY_SEARCH,
+    };
+    keys.iter().position(|&k| k == key)
 }
 
 #[derive(Default)]
@@ -71,16 +77,43 @@ pub(crate) struct ChromeSnapshot {
     label_gen: u32,
     profile_generation: Option<u32>,
     session_watch: plx_plex::plex::session::VisibleSessionWatch,
-    labels: Vec<String>,
-    keys: Vec<u32>,
+    faces: Vec<TabFace>,
+    pub(crate) keys: Vec<u32>,
     widths: Vec<f32>,
     thumb: String,
+    /// The profile's full chip label and initial, as captured: the chip's name is ELIDED from
+    /// these to the room the strip leaves ([`widgets::chip_name_budget`]), so a change of the
+    /// strip's widths re-elides without re-reading the session.
+    label: String,
+    initial_text: String,
     initial: std::ffi::CString,
     name: std::ffi::CString,
     name_w: f32,
+    /// A pulse asked for and not yet handed to the strip's renderer: the destination key.
+    pulse: Option<u32>,
 }
 
 impl ChromeSnapshot {
+    /// **Pulse the strip destination `key`** (~1.35x scale and a glow, decorative): the Watchlist
+    /// mark after a title was put on the list. The APPLICATION asks, never a screen; the bridge
+    /// hands it to the strip's renderer on its next chrome update. A frame is requested so an
+    /// idle app wakes for it.
+    pub(crate) fn pulse(&mut self, key: u32) {
+        self.pulse = Some(key);
+    }
+
+    /// The pending pulse as the strip index of its destination; `None` when nothing is pending or
+    /// the destination is not on the strip (a Home with no Watchlist mark). Consumes it.
+    pub(crate) fn take_pulse(&mut self) -> Option<usize> {
+        let key = self.pulse.take()?;
+        self.keys.iter().position(|k| *k == key)
+    }
+
+    /// Forget a pending pulse: the bar is not on screen, so it would play late on the next page.
+    pub(crate) fn drop_pulse(&mut self) {
+        self.pulse = None;
+    }
+
     pub(crate) fn refresh(&mut self, measure: &dyn Measure, directory: DirectoryView<'_>, livetv: bool) {
         self.refresh_with_profile(measure, directory, livetv, None);
     }
@@ -88,61 +121,58 @@ impl ChromeSnapshot {
     pub(crate) fn refresh_with_profile(&mut self, measure: &dyn Measure, directory: DirectoryView<'_>, livetv: bool,
         captured: Option<(&plx_plex::plex::session::CurrentProfile, &plx_plex::plex::session::Session)>) {
         let generation = directory.tabs_gen();
-        if self.tabs_generation != Some(generation) || self.livetv != livetv {
+        let strip_changed = self.tabs_generation != Some(generation) || self.livetv != livetv;
+        if strip_changed {
             self.livetv = livetv;
             self.label_gen = self.label_gen.wrapping_add(1);
-            self.labels.clear();
-            self.keys.clear();
-            self.labels.push(plx_platform::i18n::msg::browse_chrome_home().into());
-            self.keys.push(STRIP_BASE);
-            for i in 0..directory.tab_count() {
-                let Some(kind) = directory.tab_kind(i) else { continue };
-                self.labels.push(match kind { SecKind::Movie => plx_platform::i18n::msg::browse_kind_movies(), SecKind::Show => plx_platform::i18n::msg::browse_kind_tv_shows() }.into());
-                self.keys.push(STRIP_BASE + match kind {
-                    SecKind::Movie => 1,
-                    SecKind::Show => 2,
-                });
-            }
-            if livetv {
-                self.labels.push(plx_platform::i18n::msg::livetv_tab().into());
-                self.keys.push(STRIP_BASE + 5);
-            }
-            self.labels.push(String::new());
-            self.keys.push(STRIP_BASE + 3);
-            self.widths = widgets::tab_widths(&self.labels, measure);
+            self.keys = strip_keys(directory, livetv);
+            self.faces = self.keys.iter().map(|&key| match key {
+                widgets::TAB_KEY_HOME => TabFace::Label(plx_os::i18n::msg::browse_chrome_home().into()),
+                widgets::TAB_KEY_MOVIES => TabFace::Label(plx_os::i18n::msg::browse_kind_movies().into()),
+                widgets::TAB_KEY_SHOWS => TabFace::Label(plx_os::i18n::msg::browse_kind_tv_shows().into()),
+                widgets::TAB_KEY_WATCHLIST => TabFace::Icon(Icon::Bookmark),
+                widgets::TAB_KEY_LIVETV => TabFace::Label(plx_os::i18n::msg::livetv_tab().into()),
+                _ => TabFace::Icon(Icon::Search),
+            }).collect();
+            self.widths = widgets::tab_widths(&self.faces, measure);
             self.tabs_generation = Some(generation);
         }
         let generation = captured.map_or_else(plx_plex::plex::session::current_gen, |(profile, _)| profile.generation);
         let session_changed = captured.is_none() && self.session_watch.changed();
+        let mut profile_changed = false;
         if self.profile_generation != Some(generation) || session_changed {
             let current = captured.map_or_else(plx_plex::plex::session::current, |(profile, _)| profile.user.clone());
             let account = if let Some((_, saved)) = captured { saved.account(current.as_ref()) }
                 else { plx_plex::plex::session::peek().account(current.as_ref()) };
             self.thumb = current.map(|user| user.thumb).unwrap_or_default();
-            let label = plx_screens::account_menu::chip_label(&account);
-            let initial = account.name.as_deref().and_then(|name| name.chars().next())
+            self.label = plx_screens::account_menu::chip_label(&account);
+            self.initial_text = account.name.as_deref().and_then(|name| name.chars().next())
                 .map(|c| c.to_uppercase().to_string()).unwrap_or_default();
-            (self.initial, self.name, self.name_w) =
-                widgets::profile_chip_text(&label, &initial, measure);
             self.profile_generation = Some(generation);
+            profile_changed = true;
+        }
+        if profile_changed || strip_changed {
+            self.elide_chip_name(measure);
         }
     }
 
+    /// Elide the chip's name to the room the strip's CURRENT widths leave it. Called when the
+    /// profile changes and when the strip does (a library kind appearing or leaving changes the
+    /// track), because the budget is a function of both and drawing measures nothing.
+    fn elide_chip_name(&mut self, measure: &dyn Measure) {
+        let budget = widgets::chip_name_budget(widgets::tab_track_w(&self.widths));
+        (self.initial, self.name, self.name_w) =
+            widgets::profile_chip_text(&self.label, &self.initial_text, budget, measure);
+    }
+
     pub(crate) fn labels(&self) -> TabLabels<'_> {
-        TabLabels { generation: self.label_gen, labels: &self.labels }
+        TabLabels { generation: self.label_gen, faces: &self.faces }
     }
 
-    pub(crate) fn library_selection(&self, kind: SecKind) -> u32 {
-        let elem = STRIP_BASE + match kind { SecKind::Movie => 1, SecKind::Show => 2 };
-        self.keys.iter().position(|key| *key == elem).unwrap_or(0) as u32
-    }
-
-    pub(crate) fn livetv_selection(&self) -> u32 {
-        self.keys.iter().position(|key| *key == STRIP_BASE + 5).unwrap_or(0) as u32
-    }
-
-    pub(crate) fn search_selection(&self) -> u32 {
-        self.keys.iter().position(|key| *key == STRIP_BASE + 3).unwrap_or(0) as u32
+    /// The strip key published at `selected` (an index into [`Self::keys`], as `members` takes it):
+    /// the page's own pill, for the landing rule `TabContainer::strip_selected` states.
+    pub(crate) fn key_at(&self, selected: i32) -> Option<u32> {
+        self.keys.get(selected.max(0) as usize).copied()
     }
 
     pub(crate) fn profile(&self) -> ProfileChipRead<'_> {
@@ -158,7 +188,7 @@ impl ChromeSnapshot {
 
     pub(crate) fn focus(&self, focus: Option<FocusKey<u32>>) -> TopFocus {
         match focus.map(|focus| focus.elem) {
-            Some(key) if key == STRIP_BASE + 4 => TopFocus::Chip,
+            Some(key) if key == widgets::TAB_KEY_CHIP => TopFocus::Chip,
             Some(key) => self.keys.iter().position(|&id| id == key).map(TopFocus::Pill).unwrap_or(TopFocus::Away),
             None => TopFocus::Away,
         }
@@ -169,20 +199,24 @@ impl ChromeSnapshot {
     /// own; the `Bridge` methods that call this are the one place both live.
     pub(crate) fn members(&self, selected: i32, focus: Option<FocusKey<u32>>, scroll: f32, out: &mut Vec<StripMember<u32>>) {
         out.clear();
-        out.push(StripMember::new(STRIP_BASE + 4, widgets::CHIP_FRAME));
+        out.push(StripMember::new(widgets::TAB_KEY_CHIP, widgets::CHIP_FRAME));
         widgets::tab_members(&self.widths, &self.keys, selected, self.focus(focus), scroll, out);
     }
 
     #[cfg(test)]
     pub(crate) fn seed_for_test(&mut self, name: &str, initial: &str, labels: &[&str], measure: &dyn Measure) {
         self.tabs_generation = Some(1);
-        self.labels = labels.iter().map(|s| (*s).to_owned()).collect();
-        self.keys = (0..self.labels.len()).map(|i| STRIP_BASE + i as u32).collect();
-        self.widths = widgets::tab_widths(&self.labels, measure);
+        // An empty label is the Search slot: the production strip ends in the Search icon face.
+        self.faces = labels.iter()
+            .map(|s| if s.is_empty() { TabFace::Icon(Icon::Search) } else { TabFace::Label((*s).to_owned()) })
+            .collect();
+        self.keys = (0..self.faces.len()).map(|i| plx_ui::dispatch::STRIP_BASE + i as u32).collect();
+        self.widths = widgets::tab_widths(&self.faces, measure);
         self.profile_generation = Some(1);
         self.thumb.clear();
-        (self.initial, self.name, self.name_w) =
-            widgets::profile_chip_text(name, initial, measure);
+        self.label = name.to_owned();
+        self.initial_text = initial.to_owned();
+        self.elide_chip_name(measure);
     }
 }
 
@@ -221,15 +255,65 @@ mod tests {
         assert_eq!(snapshot.name.to_str().unwrap(), "Synthetic owner");
     }
 
+    /// A font (or a language) that lengthens the pills, standing in for one that fills the bar.
+    struct Wide;
+    impl Measure for Wide {
+        fn width(&self, s: &std::ffi::CStr, sz: i32, _bold: bool) -> f32 {
+            s.to_bytes().len() as f32 * sz as f32 * 3.0
+        }
+        fn cap_h(&self, sz: i32) -> f32 { sz as f32 * 0.7 }
+        fn line_h(&self, sz: i32) -> f32 { sz as f32 * 1.2 }
+    }
+
+    /// The chip's name is elided to the room the strip leaves it, so a change of the STRIP (a
+    /// library kind appearing or leaving) re-elides it with the profile untouched: the owner
+    /// holds the full label and re-asks `chip_name_budget` whenever `tabs_generation` moves, and
+    /// drawing measures nothing. A bar too wide to leave the name any room shows none.
+    #[test]
+    fn the_chip_name_is_re_elided_when_only_the_strip_changes() {
+        let _serial = plx_base::testlock::serial();
+        let directory = directory(&[SecKind::Movie, SecKind::Show]);
+        let mut snapshot = ChromeSnapshot::default();
+        // the first refresh captures whatever profile is seated; the label is then a long one, as
+        // a profile with a long name would have captured, and only the STRIP moves from here on
+        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view(), false);
+        snapshot.label = "A profile name long enough to overflow any budget the bar could leave it".into();
+        snapshot.tabs_generation = None;
+        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view(), false);
+        let roomy = snapshot.name_w;
+        let budget = widgets::chip_name_budget(widgets::tab_track_w(&snapshot.widths));
+        assert!(budget > 0.0, "the ordinary strip leaves the chip a name");
+        assert!(roomy > 0.0 && roomy <= budget, "name {roomy} against a budget of {budget}");
+        assert!(snapshot.name.to_str().unwrap().ends_with('\u{2026}'), "a long name is elided");
+
+        // the strip is rebuilt with wider pills; the profile generation does not move
+        snapshot.tabs_generation = None;
+        snapshot.refresh(&Wide, directory.view(), false);
+        // The widest track the bar allows (the clock's clearance narrows it from the chip's alone).
+        assert_eq!(widgets::tab_track_w(&snapshot.widths), widgets::tab_track_w(&[f32::MAX]),
+            "the fixture strip must fill the bar");
+        // The top bar's clock holds the strip back further than the chip does, so even the widest
+        // strip leaves the chip some room: the name is re-elided to that smaller budget, not dropped.
+        let tight = widgets::chip_name_budget(widgets::tab_track_w(&snapshot.widths));
+        assert!(tight < budget, "a wider strip leaves the name less room ({tight} against {budget})");
+        assert_ne!(snapshot.name_w, roomy, "the name is elided again for the strip's new budget");
+
+        // …and back: the name returns to the full budget of the ordinary strip
+        snapshot.tabs_generation = None;
+        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view(), false);
+        assert_eq!(snapshot.name_w, roomy);
+    }
+
     #[test]
     fn published_bar_focus_uses_destination_identity_not_position() {
-        let snapshot = ChromeSnapshot { labels: vec!["Home".into(), "TV Shows".into(), String::new()],
-            keys: vec![STRIP_BASE, STRIP_BASE + 2, STRIP_BASE + 3], ..Default::default() };
-        let at = |id| Some(FocusKey { entry: EntryId(1), elem: STRIP_BASE + id });
-        assert_eq!(snapshot.focus(at(2)), TopFocus::Pill(1));
-        assert_eq!(snapshot.focus(at(3)), TopFocus::Pill(2));
-        assert_eq!(snapshot.focus(at(1)), TopFocus::Away);
-        assert_eq!(snapshot.focus(at(4)), TopFocus::Chip);
+        let snapshot = ChromeSnapshot { faces: vec![TabFace::Label("Home".into()),
+                TabFace::Label("TV Shows".into()), TabFace::Icon(Icon::Search)],
+            keys: vec![widgets::TAB_KEY_HOME, widgets::TAB_KEY_SHOWS, widgets::TAB_KEY_SEARCH], ..Default::default() };
+        let at = |elem| Some(FocusKey { entry: EntryId(1), elem });
+        assert_eq!(snapshot.focus(at(widgets::TAB_KEY_SHOWS)), TopFocus::Pill(1));
+        assert_eq!(snapshot.focus(at(widgets::TAB_KEY_SEARCH)), TopFocus::Pill(2));
+        assert_eq!(snapshot.focus(at(widgets::TAB_KEY_MOVIES)), TopFocus::Away);
+        assert_eq!(snapshot.focus(at(widgets::TAB_KEY_CHIP)), TopFocus::Chip);
         for elem in [0, 1] {
             assert_eq!(snapshot.focus(Some(FocusKey { entry: EntryId(1), elem })), TopFocus::Away);
         }
@@ -242,12 +326,21 @@ mod tests {
             profile_generation: Some(plx_plex::plex::session::current_gen()), ..Default::default()
         };
         snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view(), false);
-        assert_eq!(snapshot.keys, vec![STRIP_BASE, STRIP_BASE + 1, STRIP_BASE + 2, STRIP_BASE + 3]);
-        assert_eq!(&snapshot.labels[..3], &["Home", "Movies", "TV Shows"]);
+        assert_eq!(snapshot.keys, vec![widgets::TAB_KEY_HOME, widgets::TAB_KEY_MOVIES,
+            widgets::TAB_KEY_SHOWS, widgets::TAB_KEY_WATCHLIST, widgets::TAB_KEY_SEARCH]);
+        let words: Vec<&str> = snapshot.faces.iter().filter_map(|face| match face {
+            TabFace::Label(word) => Some(word.as_str()),
+            TabFace::Icon(_) => None,
+        }).collect();
+        assert_eq!(&words[..3], &["Home", "Movies", "TV Shows"]);
+        assert_eq!(snapshot.faces.last(), Some(&TabFace::Icon(Icon::Search)));
+        assert_eq!(snapshot.faces[snapshot.faces.len() - 2], TabFace::Icon(Icon::Bookmark),
+            "the Watchlist bookmark sits just before Search");
         let mut members = Vec::new();
         snapshot.members(0, None, 0.0, &mut members);
         assert_eq!(members.iter().map(|member| member.elem).collect::<Vec<_>>(),
-            vec![STRIP_BASE + 4, STRIP_BASE, STRIP_BASE + 1, STRIP_BASE + 2, STRIP_BASE + 3]);
+            vec![widgets::TAB_KEY_CHIP, widgets::TAB_KEY_HOME, widgets::TAB_KEY_MOVIES,
+                widgets::TAB_KEY_SHOWS, widgets::TAB_KEY_WATCHLIST, widgets::TAB_KEY_SEARCH]);
     }
 
     #[test]
@@ -259,41 +352,62 @@ mod tests {
         snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view(), false);
         let before = snapshot.labels().generation;
         snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view(), true);
-        assert_eq!(snapshot.keys, vec![STRIP_BASE, STRIP_BASE + 1, STRIP_BASE + 5, STRIP_BASE + 3]);
-        assert_eq!(snapshot.labels[2], "Live TV");
+        assert_eq!(snapshot.keys, vec![widgets::TAB_KEY_HOME, widgets::TAB_KEY_MOVIES, widgets::TAB_KEY_WATCHLIST,
+            widgets::TAB_KEY_LIVETV, widgets::TAB_KEY_SEARCH]);
+        assert_eq!(snapshot.faces[3], TabFace::Label("Live TV".into()));
         assert_ne!(snapshot.labels().generation, before, "the strip re-lays itself out");
-        assert_eq!(snapshot.livetv_selection(), 2);
         snapshot.refresh(&plx_ui::fixture::FixtureMeasure, directory.view(), false);
-        assert_eq!(snapshot.keys, vec![STRIP_BASE, STRIP_BASE + 1, STRIP_BASE + 3]);
+        assert_eq!(snapshot.keys, vec![widgets::TAB_KEY_HOME, widgets::TAB_KEY_MOVIES, widgets::TAB_KEY_WATCHLIST,
+            widgets::TAB_KEY_SEARCH]);
     }
 
     #[test]
     fn every_projected_pill_round_trips_by_stable_section_identity() {
         use plx_data::stores::browse::SecKind::{Movie, Show};
-        let kinds = [Movie, Show];
-        let at = |i| kinds.get(i).copied();
-        let search = kinds.len() + 1;
-        assert_eq!(pill_in(0, search, false, at), Pill::Home);
-        assert_eq!(pill_in(1, search, false, at), Pill::Section(Movie));
-        assert_eq!(pill_in(2, search, false, at), Pill::Section(Show));
-        assert_eq!(pill_in(search, search, false, at), Pill::Search);
-        assert_eq!(pill_in(search + 1, search, false, at), Pill::Home);
-        let pos = |kind| kinds.iter().position(|&candidate| candidate == kind);
-        for i in 0..=search {
-            assert_eq!(pill_index(pill_in(i, search, false, at), search, false, pos), Some(i));
+        let keys = [widgets::TAB_KEY_HOME, widgets::TAB_KEY_MOVIES, widgets::TAB_KEY_SHOWS,
+            widgets::TAB_KEY_WATCHLIST, widgets::TAB_KEY_SEARCH];
+        assert_eq!(pill_in(0, &keys), Pill::Home);
+        assert_eq!(pill_in(1, &keys), Pill::Section(Movie));
+        assert_eq!(pill_in(2, &keys), Pill::Section(Show));
+        assert_eq!(pill_in(3, &keys), Pill::Watchlist);
+        assert_eq!(pill_in(4, &keys), Pill::Search);
+        assert_eq!(pill_in(5, &keys), Pill::Home);
+        for i in 0..keys.len() {
+            assert_eq!(pill_index(pill_in(i, &keys), &keys), Some(i));
         }
-        assert_eq!(pill_index(Pill::Section(Show), search, false, |_| None), None,
+        assert_eq!(pill_index(Pill::Section(Show), &[widgets::TAB_KEY_HOME, widgets::TAB_KEY_SEARCH]), None,
             "a type the captured strip no longer contains borrows no other position");
-        assert_eq!(pill_in(1, 3, false, |_| None), Pill::Home,
-            "an unfilled section slot falls back to the one fixed destination");
+    }
+
+    #[test]
+    fn an_icon_pill_before_search_does_not_shift_the_other_destinations() {
+        use plx_data::stores::browse::SecKind::{Movie, Show};
+        // A further icon destination (a key none of the maps names) sits before Search.
+        let extra = plx_ui::dispatch::STRIP_BASE + 9;
+        let keys = [widgets::TAB_KEY_HOME, widgets::TAB_KEY_MOVIES, widgets::TAB_KEY_SHOWS, extra,
+            widgets::TAB_KEY_SEARCH];
+        assert_eq!(pill_in(3, &keys), Pill::Home, "an unknown key is not Search and not a section");
+        assert_eq!(pill_in(4, &keys), Pill::Search);
+        assert_eq!(pill_in(2, &keys), Pill::Section(Show));
+        assert_eq!(pill_index(Pill::Search, &keys), Some(4));
+        assert_eq!(pill_index(Pill::Section(Movie), &keys), Some(1));
+    }
+
+    #[test]
+    fn pill_maps_follow_the_published_strip_keys() {
+        let directory = directory(&[SecKind::Movie, SecKind::Show]);
+        let view = directory.view();
+        assert_eq!(strip_keys(view, false), vec![widgets::TAB_KEY_HOME, widgets::TAB_KEY_MOVIES,
+            widgets::TAB_KEY_SHOWS, widgets::TAB_KEY_WATCHLIST, widgets::TAB_KEY_SEARCH]);
+        assert_eq!(pill_of(view, false, Pill::Watchlist), Some(3));
+        assert_eq!(pill_of(view, false, Pill::Search), Some(4));
+        assert_eq!(pill_at(view, false, 3), Pill::Watchlist);
+        assert_eq!(pill_at(view, false, 4), Pill::Search);
         // With Live TV configured its pill sits just before Search, and every pill still round trips.
-        let search = kinds.len() + 2;
-        assert_eq!(pill_in(search - 1, search, true, at), Pill::LiveTv);
-        assert_eq!(pill_in(search, search, true, at), Pill::Search);
-        for i in 0..=search {
-            assert_eq!(pill_index(pill_in(i, search, true, at), search, true, pos), Some(i));
-        }
-        assert_eq!(pill_index(Pill::LiveTv, kinds.len() + 1, false, pos), None, "no pill while Live TV has nothing to show");
+        assert_eq!(pill_of(view, true, Pill::LiveTv), Some(4));
+        assert_eq!(pill_of(view, true, Pill::Search), Some(5));
+        assert_eq!(pill_at(view, true, 4), Pill::LiveTv);
+        assert_eq!(pill_of(view, false, Pill::LiveTv), None, "no pill while Live TV has nothing to show");
     }
 
     #[test]

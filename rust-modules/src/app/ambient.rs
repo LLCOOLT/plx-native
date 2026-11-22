@@ -169,7 +169,7 @@ fn wake(app: &mut App) {
     app.ambient.since = None;
     app.ambient.slides.clear();
     app.last_input = super::clock::now();
-    plx_machine::idle::invalidate();
+    app.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
     plx_base::eventlog::log("ambient: woke");
 }
 
@@ -186,11 +186,11 @@ pub(crate) fn pump(app: &mut App, now: u32, player: bool) {
     match app.ambient.since {
         None => {
             if covers && idle_ms.is_some_and(|ms| idle_due(now, app.last_input, ms)) {
-                app.ambient.slides = collect(app.bridge.hubs_snapshot().view());
+                app.ambient.slides = collect(app.runtime.bridge(&mut app.bridge).hubs_snapshot().view());
                 app.ambient.since = Some(now);
                 app.ambient.input_at = app.last_input;
                 app.ambient.last_frame = 0;
-                plx_machine::idle::invalidate();
+                app.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
                 plx_base::eventlog::log(&format!("ambient: on slides={}", app.ambient.slides.len()));
             }
         }
@@ -201,7 +201,7 @@ pub(crate) fn pump(app: &mut App, now: u32, player: bool) {
             }
             if now.wrapping_sub(app.ambient.last_frame) >= FRAME_MS {
                 app.ambient.last_frame = now;
-                plx_machine::idle::invalidate();
+                app.note_presentation_damage(plx_machine::present::Provenance::Lifecycle);
             }
         }
     }
@@ -215,13 +215,13 @@ pub(crate) fn pump(app: &mut App, now: u32, player: bool) {
 }
 
 /// Draw ambient over everything on a browsing page. Nothing while it is down.
-pub(crate) fn draw(app: &App, now: u32) {
-    let Some(since) = app.ambient.since else { return };
+pub(crate) fn draw(ambient: &Ambient, now: u32) {
+    let Some(since) = ambient.since else { return };
     let elapsed = now.wrapping_sub(since);
     let enter = (elapsed as f32 / ENTER_MS as f32).clamp(0.0, 1.0);
     let p = Painter::root().alpha(enter * enter * (3.0 - 2.0 * enter));
     p.rrect(Rect::FULL, 0.0, 0.0, theme::scrim_black(1.0));
-    let slides = &app.ambient.slides;
+    let slides = &ambient.slides;
     let (cur, next, fade) = slide_at(elapsed, slides.len());
     let step = (elapsed / SLIDE_MS) as usize;
     let t_in = (elapsed % SLIDE_MS) as f32 / (SLIDE_MS + FADE_MS) as f32;

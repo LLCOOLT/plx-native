@@ -5,7 +5,7 @@
 //!
 //! Everything else does, which is why this is a branch of the one store rather than a second
 //! loader: the same slots and LRU, the same two workers, the same disk tier (under
-//! [`plx_platform::imgcache::classify_url`]) and the same render cache. The one job the transcoder
+//! [`plx_os::imgcache::classify_url`]) and the same render cache. The one job the transcoder
 //! did that is now ours is the SCALING — the decode is scaled down to cover the box the draw asked
 //! for ([`plx_gfx::img::img_decode_cover`]), so a large logo costs a tile's texture, not its own.
 //!
@@ -79,21 +79,21 @@ pub(super) fn load(key: &str, cache_gen: u64) -> Loaded {
     let disk = if crate::dev::scenarios::imagecache_bypass_armed() {
         None
     } else {
-        plx_platform::imgcache::classify_url(url, bw, bh)
+        plx_os::imgcache::classify_url(url, bw, bh)
     };
     if let Some(k) = &disk {
-        if let Some(cached) = plx_platform::imgcache::read_at(cache_gen, k) {
+        if let Some(cached) = plx_os::imgcache::read_at(cache_gen, k) {
             match plx_gfx::img::img_decode_cover(&cached.bytes, bw, bh) {
                 Some(art) => {
                     out.art = Some(art);
                     out.from_disk = true;
                     return out;
                 }
-                None => plx_platform::imgcache::remove_at(cache_gen, k),
+                None => plx_os::imgcache::remove_at(cache_gen, k),
             }
         }
     }
-    if cache_gen != plx_platform::imgcache::generation() {
+    if cache_gen != plx_os::imgcache::generation() {
         return out;
     }
     let Some((origin, path)) = split_url(url) else { return out };
@@ -104,7 +104,7 @@ pub(super) fn load(key: &str, cache_gen: u64) -> Loaded {
             out.art = plx_gfx::img::img_decode_cover(&reply.body, bw, bh);
             if out.art.is_some() {
                 if let Some(k) = &disk {
-                    plx_platform::imgcache::write_at(cache_gen, k, &reply.body);
+                    plx_os::imgcache::write_at(cache_gen, k, &reply.body);
                 }
             }
         }

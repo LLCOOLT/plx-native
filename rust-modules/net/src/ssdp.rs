@@ -27,12 +27,15 @@ pub struct Reply {
     pub server: String,
 }
 
-/// The `M-SEARCH` datagram for `target`, asking for replies within `mx` seconds.
+/// The `M-SEARCH` datagram for `target`, asking for replies within `mx` seconds. It carries the
+/// app's User-Agent like every request this app builds by hand (`net::user_agent_header_line`;
+/// UPnP calls the header optional, so a set with no identity yet sends none).
 pub fn request(target: &str, mx: u8) -> String {
     format!(
-        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: {}\r\nST: {}\r\n\r\n",
+        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: {}\r\nST: {}\r\n{}\r\n",
         mx.clamp(1, 5),
-        target
+        target,
+        crate::net::user_agent_header_line()
     )
 }
 

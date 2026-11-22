@@ -81,13 +81,13 @@ import json, sys, os
 m = json.load(open(sys.argv[1]))
 sys.exit(0 if m["ipkHash"]["sha256"] == sys.argv[2] and m["ipkSize"] == os.path.getsize(sys.argv[3]) else 1)
 PY
-  gh release view "$TAG" --json body --jq .body 2>/dev/null | grep -q "$SHA" \
+  gh release view "$TAG" --json body --jq .body 2>/dev/null | grep "$SHA" >/dev/null \
     && ok "the release note quotes this hash" || bad "the note's hash is not the published artifact's"
 
   # Who built it. A person's name here means the gates did not run.
   # The repository the release was published to: Actions sets GITHUB_REPOSITORY, so a fork's own
   # release run asks its own repository rather than upstream's (where the tag does not exist).
-  UP=$(gh api "repos/${GITHUB_REPOSITORY:-GLinnik21/plx-native}/releases/tags/$TAG" --jq '[.assets[].uploader.login] | unique | join(",")' 2>/dev/null)
+  UP=$(gh api "repos/${GITHUB_REPOSITORY:-plxnative/plx-native}/releases/tags/$TAG" --jq '[.assets[].uploader.login] | unique | join(",")' 2>/dev/null)
   [ "$UP" = "github-actions[bot]" ] && ok "assets uploaded by CI" \
     || bad "assets uploaded by '$UP' — hand-published, so the build/verify gates were skipped"
 

@@ -90,7 +90,7 @@ pub fn programme_of(m: &Metadata, sid: u16, show: Option<&Show>) -> Program {
         title: m.title.clone(),
         show_title: if episode { m.grandparent_title.clone() } else { String::new() },
         show_rk: if episode { m.grandparent_rating_key.clone() } else { String::new() },
-        season: if episode { m.parent_index } else { 0 },
+        season: if episode { m.parent_index.unwrap_or(0) } else { 0 },
         index: if episode { m.index } else { 0 },
         dur_ms: m.duration,
         year: m.year,

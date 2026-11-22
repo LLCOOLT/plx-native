@@ -15,7 +15,7 @@
 //! keyed in, and the channel list ([`draw_surf`]) while the viewer surfs with UP/DOWN — the
 //! channel that is playing keeps playing under it until OK tunes the highlighted one.
 
-use crate::player_hud::{draw_scrim, sb_w, SB_H, SB_X, SB_Y};
+use crate::player_hud::classic::{draw_scrim, sb_w, SB_H, SB_X, SB_Y};
 use plx_data::livetv::guide::{Airing, Lineup};
 use plx_media::live::LiveSession;
 use plx_ui::channel_tile::ChannelTile;
@@ -45,8 +45,9 @@ pub enum Phase {
     Playing,
 }
 
-/// The banner for `live` at wall time `now`.
-pub fn draw(live: &LiveSession, phase: Phase, now: i64, measure: &dyn plx_machine::machine::Measure) {
+/// The banner for `live` at wall time `now`, the file at `position_ns` (the player's position on a
+/// virtual channel's programme; `0` when none was observed yet).
+pub fn draw(live: &LiveSession, phase: Phase, now: i64, position_ns: i64, measure: &dyn plx_machine::machine::Measure) {
     let p = Painter::root();
     draw_scrim(p);
     let Some(ch) = live.channel() else { return };
@@ -55,19 +56,19 @@ pub fn draw(live: &LiveSession, phase: Phase, now: i64, measure: &dyn plx_machin
     // Row 1: LIVE badge, channel number and name.
     let row1 = SB_Y - 190.0;
     // A virtual channel paused behind live says so, and that OK jumps back.
-    let behind = phase == Phase::Playing && live.is_behind(now, plx_media::player::playpos_ns());
-    let badge_text = if behind { plx_platform::i18n::msg::livetv_behind() } else { plx_platform::i18n::msg::livetv_live() };
+    let behind = phase == Phase::Playing && live.is_behind(now, position_ns);
+    let badge_text = if behind { plx_os::i18n::msg::livetv_behind() } else { plx_os::i18n::msg::livetv_live() };
     let badge_w = measure.width_str(badge_text, theme::size::CAPTION, true) + 2.0 * BADGE_PAD;
     let badge = Rect::new(SB_X, row1, badge_w, BADGE_H);
     p.rect(badge, theme::space::XS, theme::LIVE_BADGE, theme::LIVE_BADGE, 0.0);
     line(p, measure, badge_text, theme::size::CAPTION, theme::LIVE_BADGE_INK, true, badge, HAlign::Center);
     let channel = if behind {
-        format!("{}  {}  \u{b7}  {}", ch.number, ch.name, plx_platform::i18n::msg::livetv_jump_to_live())
+        format!("{}  {}  \u{b7}  {}", ch.number, ch.name, plx_os::i18n::msg::livetv_jump_to_live())
     } else {
         format!("{}  {}", ch.number, ch.name)
     };
     // How to reach the settings, at the row's far edge, while there is a stream to set.
-    let hint = if phase == Phase::Playing { plx_platform::i18n::msg::livetv_settings_hint() } else { "" };
+    let hint = if phase == Phase::Playing { plx_os::i18n::msg::livetv_settings_hint() } else { "" };
     let hint_w = if hint.is_empty() { 0.0 } else { measure.width_str(hint, theme::size::CAPTION, false) + theme::space::MD };
     let text_x = badge.x + badge.w + theme::space::SM;
     line(p, measure, &channel, theme::size::BODY, theme::TEXT_SECONDARY, true,
@@ -79,8 +80,8 @@ pub fn draw(live: &LiveSession, phase: Phase, now: i64, measure: &dyn plx_machin
     let title_y = row1 + BADGE_H + theme::space::SM;
     let title_h = measure.line_h(theme::size::TITLE);
     let title: &str = match phase {
-        Phase::Tuning => plx_platform::i18n::msg::livetv_tuning(),
-        Phase::Unavailable => plx_platform::i18n::msg::livetv_unavailable(),
+        Phase::Tuning => plx_os::i18n::msg::livetv_tuning(),
+        Phase::Unavailable => plx_os::i18n::msg::livetv_unavailable(),
         Phase::Playing => on_now.map(|a| a.title.as_str()).filter(|t| !t.is_empty()).unwrap_or(ch.name.as_str()),
     };
     line(p, measure, title, theme::size::TITLE, theme::TEXT_PRIMARY, true, Rect::new(SB_X, title_y, w, title_h), HAlign::Left);
@@ -103,7 +104,7 @@ pub fn draw(live: &LiveSession, phase: Phase, now: i64, measure: &dyn plx_machin
     line(p, measure, &facts.join(" \u{b7} "), theme::size::BODY, theme::TEXT_SECONDARY, false,
         Rect::new(SB_X, facts_y, half - theme::space::MD, body_h), HAlign::Left);
     if let Some(n) = next {
-        let text = format!("{} \u{b7} {}", plx_ui::fmt::wall_time(n.start_ms), plx_platform::i18n::msg::livetv_next(&n.title));
+        let text = format!("{} \u{b7} {}", plx_ui::fmt::wall_time(n.start_ms), plx_os::i18n::msg::livetv_next(&n.title));
         line(p, measure, &text, theme::size::BODY, theme::TEXT_SECONDARY, false,
             Rect::new(SB_X + half, facts_y, half, body_h), HAlign::Right);
     }
@@ -186,7 +187,7 @@ pub fn draw_surf(lineup: &Lineup, highlight: usize, playing: usize, now: i64, me
         line(p, measure, &ch.name, theme::size::BODY, theme::TEXT_PRIMARY, true,
             Rect::new(text_x, top, text_w, body_h), HAlign::Left);
         let (on_now, _) = ch.now_next(now);
-        let airing = on_now.map(|a| a.title.as_str()).unwrap_or_else(|| plx_platform::i18n::msg::livetv_no_info());
+        let airing = on_now.map(|a| a.title.as_str()).unwrap_or_else(|| plx_os::i18n::msg::livetv_no_info());
         line(p, measure, airing, theme::size::CAPTION, theme::TEXT_SECONDARY, false,
             Rect::new(text_x, top + body_h, text_w, cap_h), HAlign::Left);
         if let Some(a) = on_now {

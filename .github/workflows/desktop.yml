@@ -191,7 +191,7 @@ jobs:
         run: |
           CARGO_INCREMENTAL=0 cargo build --manifest-path rust-modules/Cargo.toml \
             --target-dir rust-modules/target-winapp --target x86_64-pc-windows-gnu \
-            --release --no-default-features --features hostsim --bin plxnative-sim
+            --release --no-default-features --features hostsim,play-feed -p plx_platform_desktop --bin plxnative-sim
       - name: Assemble PlxNative/ and its zip
         run: |
           python ci/mkwinapp.py \

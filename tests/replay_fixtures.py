@@ -2,7 +2,9 @@
 """Replay every committed product recording through a built simulator, in both modes.
 
 The simulator owns parsing, controlled bootstrap, recorded ingress, and every frame grade.
-macOS additionally denies outbound networking with sandbox-exec. Evidence roots are retained.
+macOS additionally denies outbound networking with sandbox-exec. An evidence root is retained
+when a replay failed or `--output` named it; a root this run made for itself is removed after a
+clean run, where it would only pile up in `$TMPDIR` with nothing to inspect.
 
 The replays are independent processes and run side by side (`--jobs`, `PLX_REPLAY_JOBS`; 1 is
 serial). What makes that sound: each replay gets its own `PLXNATIVE_RUNTIME_DIR` (triggers, FIFO,
@@ -11,13 +13,20 @@ event log, evidence) from `mkdtemp`, reads its recording and the assets read-onl
 the recorded clock (`app::clock::set_replay`), never on wall time. Each replay's output is printed
 whole when it finishes, so concurrent logs never interleave, and a failing replay never stops the
 others.
+
+Each replay opens a 1920x1080 simulator window unless `--window WxH` / `PLX_REPLAY_WINDOW` says
+otherwise. The canvas, and everything graded, is 1920x1080 logical either way; a smaller window
+only means fewer pixels for a software-GL runner to fill (the macOS CI job uses 960x540).
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import functools
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,9 +38,84 @@ import time
 MAX_DEFAULT_JOBS = 4
 MODES = ('targets', 'resolve')
 JOBS_ENV = 'PLX_REPLAY_JOBS'
+WINDOW_ENV = 'PLX_REPLAY_WINDOW'
+# The window the simulator opens for a replay, `PLXNATIVE_WIN`. The authored canvas is 1920x1080
+# logical whatever the window is (`surface::scale`/`viewport` map it; layout, hit resolution and
+# the graded hash never see pixels), so this only sets how many pixels a software GL context fills.
+DEFAULT_WINDOW = '1920x1080'
+MAX_WINDOW_W = 7680
 
 DIFFS = ('diverged', 'present_diffs', 'input_diffs', 'result_diffs', 'land_diffs',
          'effect_diffs', 'focus_diffs', 'hit_diffs')
+
+
+# Reviewed historical raw artifacts, never current/unknown shape or directory-name exemptions.
+HISTORICAL_PROFILES = json.loads(Path(__file__).with_name('replay-historical-profiles.json').read_text())
+HISTORICAL_OWNER_REFUSAL = 'incompatible owner-input/presentation state; requires V13 capture'
+POLICY_MAX_BYTES = 64 * 1024 * 1024
+POLICY_MAX_LINE_BYTES = 1024 * 1024
+SIM_BANNER = ('sim: THIS IS THE DESKTOP SIMULATOR, not a television. No video pipeline; '
+              "frame rates here describe this Mac's GPU and must never be read as an fps gate.")
+
+
+def expected_refusal(fixture):
+    """Bounded structural selector; the simulator still owns full recording validation.
+
+    Invalid JSON (including duplicate fields) cannot select an expectation. A valid selector
+    alone earns nothing: only the simulator's exact early preflight refusal can satisfy it.
+    """
+    def unique(pairs):
+        fields = {}
+        for key, value in pairs:
+            if key in fields:
+                raise ValueError('duplicate recording JSON field')
+            fields[key] = value
+        return fields
+
+    used = 0
+
+    def parse(raw):
+        nonlocal used
+        used += len(raw)
+        if len(raw) > POLICY_MAX_LINE_BYTES or used > POLICY_MAX_BYTES:
+            raise ValueError('compatibility policy recording budget exceeded')
+        try:
+            value = json.loads(raw, object_pairs_hook=unique,
+                               parse_constant=lambda value: (_ for _ in ()).throw(ValueError('nonfinite JSON')))
+        except (UnicodeError, RecursionError) as error:
+            raise ValueError('invalid recording JSON') from error
+        if not isinstance(value, dict):
+            raise ValueError('recording envelope must be an object')
+        return value
+
+    with (fixture / 'manifest.json').open('rb') as stream:
+        raw = stream.read(POLICY_MAX_LINE_BYTES + 1)
+        header = parse(raw)
+    hashes = {'manifest.json': hashlib.sha256(raw).hexdigest()}
+    profile = (header.get('schema'), header.get('state_fp'))
+    for segment in sorted(fixture.glob('rec-*.jsonl')):
+        digest = hashlib.sha256()
+        with segment.open('rb') as stream:
+            while raw := stream.readline(POLICY_MAX_LINE_BYTES + 1):
+                parse(raw)
+                digest.update(raw)
+        hashes[segment.name] = digest.hexdigest()
+    known = all(type(value) is int for value in profile) and any(
+        (item['schema'], item['state_fp']) == profile and item['sha256'] == hashes
+        for item in HISTORICAL_PROFILES)
+    return HISTORICAL_OWNER_REFUSAL if known else None
+
+
+class ReplayReport(str):
+    def __new__(cls, text, outcome):
+        report = super().__new__(cls, text)
+        report.outcome = outcome
+        return report
+
+
+class GateFailures(list):
+    same = 0
+    refused_expected = 0
 
 
 def discover(fixtures):
@@ -65,8 +149,16 @@ def expected_counts(fixture):
     return len(ticks), len(grades)
 
 
-def verdict(log, returncode, counts):
-    lines = log.splitlines()
+def verdict(log, returncode, counts, refusal=None):
+    lines = [line for line in log.splitlines() if line]
+    if refusal is not None:
+        if refusal != HISTORICAL_OWNER_REFUSAL:
+            raise ValueError('unapproved expected refusal')
+        # Positive allowlist: no frame/summary/renderer/bootstrap/provider output can hide here.
+        meaningful = [line for line in lines if line != SIM_BANNER]
+        if returncode != 1 or meaningful != ['replay: REFUSED — ' + refusal]:
+            raise ValueError(f'expected exact early refusal; raw exit={returncode}, log={log!r}')
+        return 'REFUSED_EXPECTED exit=1 reason=' + refusal
     summaries = [line for line in lines if line.startswith('replay: done ')]
     if len(summaries) != 1:
         raise ValueError('simulator did not complete exactly one replay')
@@ -102,11 +194,44 @@ def resolve_jobs(flag, environ, cpus):
     return flag
 
 
-def run_fixture(binary, assets, fixture, mode, output, timeout):
+def parse_window(value):
+    """A replay window as `<w>x<h>`, or ValueError.
+
+    Strict on purpose: plain decimal digits around a lowercase `x`, no sign, space or zero, at most
+    8K wide, and exactly 16:9. The simulator would accept a looser string (and any positive size),
+    but an aspect other than the canvas's letterboxes the viewport, which switches the page-capture
+    path from render-into-texture to copy (`FrameCache::render_available`) -- a different render
+    than the one the committed recordings were graded against."""
+    match = re.fullmatch(r'([1-9][0-9]*)x([1-9][0-9]*)', value) if isinstance(value, str) else None
+    if match is None:
+        raise ValueError(f'replay window must look like 1920x1080 (digits x digits), got {value!r}')
+    width, height = int(match.group(1)), int(match.group(2))
+    if width > MAX_WINDOW_W or width * 9 != height * 16:
+        raise ValueError(f'replay window must be 16:9 and at most {MAX_WINDOW_W} wide '
+                         f'(the canvas is 1920x1080), got {value!r}')
+    return value
+
+
+def resolve_window(flag, environ):
+    """Window size: `--window` wins, then `PLX_REPLAY_WINDOW`, then the full-size default."""
+    if flag is None and environ.get(WINDOW_ENV, '') != '':
+        flag, source = environ[WINDOW_ENV], WINDOW_ENV
+    else:
+        source = '--window'
+    if flag is None:
+        return DEFAULT_WINDOW
+    try:
+        return parse_window(flag)
+    except ValueError as error:
+        raise ValueError(f'{source}: {error}') from None
+
+
+def run_fixture(binary, assets, fixture, mode, output, timeout, window=DEFAULT_WINDOW):
     runtime = Path(tempfile.mkdtemp(prefix=fixture.name + '-' + mode + '-', dir=output))
     (runtime / 'plxnative-recplay').write_text('v1\n' + mode + '\n' + str(fixture))
-    env = dict(os.environ, PLXNATIVE_RUNTIME_DIR=str(runtime), PLXNATIVE_APP_DIR=str(assets),
-               PLXNATIVE_WIN='1920x1080')
+    refusal = expected_refusal(fixture)
+    env = dict({key: value for key, value in os.environ.items() if not key.startswith('GIT_')},
+               PLXNATIVE_RUNTIME_DIR=str(runtime), PLXNATIVE_APP_DIR=str(assets), PLXNATIVE_WIN=window)
     command = [str(binary), '127.0.0.1', '9']
     if sys.platform == 'darwin':
         command = ['/usr/bin/sandbox-exec', '-p',
@@ -119,11 +244,25 @@ def run_fixture(binary, assets, fixture, mode, output, timeout):
             raise ValueError(f'{fixture.name}/{mode}: timeout; evidence {runtime}') from error
     log = runtime / 'plxnative-events.log'
     try:
-        summary = verdict(log.read_text() if log.exists() else '', process.returncode,
-                          expected_counts(fixture))
+        # Preserve raw process status even when decoding/classification fails. sim.out retains stderr.
+        (runtime / 'process.json').write_text(json.dumps({'exit': process.returncode,
+                                                        'expected_refusal': refusal}), encoding='utf-8')
+        raw_log = log.read_text(encoding='utf-8') if log.exists() else ''
+        raw_output = (runtime / 'sim.out').read_text(encoding='utf-8')
+        if any(line.startswith(('replay: REFUSED', 'rec: REFUSED'))
+               for line in raw_output.splitlines()):
+            raise ValueError(f'unexpected refusal on stderr/stdout: {raw_output!r}')
+        if refusal is not None:
+            # The native launcher may print only this addressed preflight banner, not boot output.
+            banner = (f'plxnative-sim: pms=127.0.0.1:9 runtime={runtime} '
+                      f'log={runtime / "plxnative-events.log"}')
+            if any(line and line != banner for line in raw_output.splitlines()):
+                raise ValueError(f'unexpected output before refusal: {raw_output!r}')
+        summary = verdict(raw_log, process.returncode, expected_counts(fixture), refusal)
     except ValueError as error:
         raise ValueError(f'{fixture.name}/{mode}: {error}; evidence {runtime}') from error
-    return f'{fixture.name}/{mode}: {summary}'
+    return ReplayReport(f'{fixture.name}/{mode}: {summary}',
+                        'REFUSED_EXPECTED' if refusal else 'SAME')
 
 
 def main():
@@ -138,6 +277,10 @@ def main():
     parser.add_argument('--jobs', type=int,
                         help=f'replays to run at once (default: ${JOBS_ENV}, else the CPU count '
                              f'capped at {MAX_DEFAULT_JOBS}; 1 runs them one after another)')
+    parser.add_argument('--window', metavar='WxH',
+                        help=f'simulator window for every replay (default: ${WINDOW_ENV}, else '
+                             f'{DEFAULT_WINDOW}); 16:9 only. The canvas is 1920x1080 logical '
+                             'whatever this is, so a smaller one only cuts software-GL fill cost')
     args = parser.parse_args()
     try:
         fixtures = discover(args.fixtures.resolve())
@@ -149,12 +292,27 @@ def main():
         jobs = resolve_jobs(args.jobs, os.environ, os.cpu_count())
     except ValueError as error:
         parser.error(str(error))
-    output = args.output or Path(tempfile.mkdtemp(prefix='plxnative-replay-gate-'))
+    try:
+        window = resolve_window(args.window, os.environ)
+    except ValueError as error:
+        parser.error(str(error))
+    own = args.output is None
+    output = Path(tempfile.mkdtemp(prefix='plxnative-replay-gate-')) if own else args.output
     output.mkdir(parents=True, exist_ok=True)
     failures = run_all(args.sim.resolve(), args.assets.resolve(), fixtures, output.resolve(),
-                       args.timeout, jobs)
-    print(f'{len(fixtures)} fixtures, {len(fixtures) * len(MODES)} replays, {len(failures)} failures; '
-          f'{jobs} parallel; evidence {output}', flush=True)
+                       args.timeout, jobs, functools.partial(run_fixture, window=window))
+    same = getattr(failures, 'same', 0)
+    refused = getattr(failures, 'refused_expected', 0)
+    keep = bool(failures) or bool(refused) or not own
+    if not keep:
+        try:
+            shutil.rmtree(output)
+        except OSError as error:  # a clean run stays clean; the leftover is named, not hidden
+            keep = True
+            print(f'could not remove {output}: {error}', file=sys.stderr)
+    print(f'{len(fixtures)} fixtures, {len(fixtures) * len(MODES)} replays, '
+          f'SAME={same} REFUSED_EXPECTED={refused} unexpected={len(failures)}; '
+          f'{jobs} parallel; window {window}' + (f'; evidence {output}' if keep else ''), flush=True)
     return bool(failures)
 
 
@@ -171,7 +329,7 @@ def run_all(binary, assets, fixtures, output, timeout, jobs, run=run_fixture):
 
     A replay's report is printed in one call when it finishes (stdout for a pass, stderr for a
     FAIL), so output stays readable at any width. Nothing short-circuits: all replays run."""
-    failures = []
+    failures = GateFailures()
 
     def one(replay):
         fixture, mode = replay
@@ -188,6 +346,10 @@ def run_all(binary, assets, fixtures, output, timeout, jobs, run=run_fixture):
         for done in as_completed([pool.submit(one, replay) for replay in replay_order(fixtures)]):
             report, error, seconds = done.result()
             if error is None:
+                if getattr(report, 'outcome', 'SAME') == 'REFUSED_EXPECTED':
+                    failures.refused_expected += 1
+                else:
+                    failures.same += 1
                 print(f'{report} [{seconds:.0f} s]', flush=True)
             else:
                 print(f'FAIL: {error} [{seconds:.0f} s]', file=sys.stderr, flush=True)

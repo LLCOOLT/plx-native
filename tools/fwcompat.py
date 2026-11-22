@@ -39,15 +39,15 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import urllib.request
 from pathlib import Path
 
-# Pinned so a database refresh is a visible commit rather than a silent change of verdict.
-FWSYM_TAG = "v20260731-e1bb0c0"
-FWSYM_DEB = "webosbrew-toolbox-fw-symbols_0.4.0-1_arm64.deb"
-FWSYM_URL = f"https://github.com/webosbrew/dev-toolbox-cli/releases/download/{FWSYM_TAG}/{FWSYM_DEB}"
-
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "ci"))
+import deps  # noqa: E402  (the one fetch-and-verify routine)
+
+# Pinned (release, URL, sha256) in ci/dependencies.json, entry `webosbrew-toolbox`, so a database
+# refresh is a visible commit rather than a silent change of verdict.
+FWSYM = deps.entry("webosbrew-toolbox")
 DEFAULT_BINARY = REPO / "pkg" / "plxnative"
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "plxnative" / "fwsym"
 
@@ -74,14 +74,13 @@ def ensure_db(db_arg):
     if data.is_dir() and any(data.iterdir()):
         return data
     CACHE.mkdir(parents=True, exist_ok=True)
-    deb = CACHE / FWSYM_DEB
-    if not deb.exists():
-        print(f"fetching firmware symbol databases (~25 MB) -> {deb}", file=sys.stderr)
-        try:
-            urllib.request.urlretrieve(FWSYM_URL, deb)
-        except Exception as e:  # noqa: BLE001 - any failure here is the same user-facing problem
-            die(f"could not download {FWSYM_URL}: {e}\n"
-                f"        Fetch it by hand and re-run, or pass --db <extracted data dir>.")
+    asset = deps.assets_of(FWSYM)["fw-symbols"]
+    print(f"fetching firmware symbol databases (~25 MB) -> {CACHE}", file=sys.stderr)
+    try:
+        deb = deps.fetch(FWSYM, CACHE, keys={"fw-symbols"}, label="fwcompat")["fw-symbols"]
+    except (ValueError, OSError) as e:
+        die(f"could not fetch {asset['url']}: {e}\n"
+            f"        Fetch it by hand and re-run, or pass --db <extracted data dir>.")
     print("extracting...", file=sys.stderr)
     work = CACHE / "unpack"
     shutil.rmtree(work, ignore_errors=True)
@@ -287,11 +286,11 @@ def cmd_grade(args, db):
     worst = 0
     for fw, mlibs, msyms in rows:
         ok = not mlibs and not msyms
-        # Releases below the floor are graded and PRINTED but do not set the exit status. The five
-        # oldest (webOS 1.2.0 through 3.9.2) fail permanently and for reasons nobody intends to
-        # fix — they predate the C++11 std::string ABI, so StarfishMediaAPIs::Feed has a different
-        # mangling — so counting them would make this tool useless as a gate while hiding the
-        # regression it exists to catch.
+        # Releases below the floor are graded and PRINTED but do not set the exit status. The
+        # oldest releases predate the C++11 std::string ABI, so StarfishMediaAPIs::Feed carries a
+        # different mangling there; src/starfish.c now resolves either name at runtime and
+        # 3.4.3 has run on hardware, but webOS 1.x/2.x were never tried, so counting them would
+        # make this tool useless as a gate while hiding the regression it exists to catch.
         counts = floor is None or relver(fw.release) >= floor
         if counts and not ok:
             worst = 1

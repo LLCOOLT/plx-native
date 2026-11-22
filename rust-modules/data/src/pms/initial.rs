@@ -6,7 +6,7 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
-pub const SHAPE: &str = "HubsInitialV1{version:u32,generation:u32,next_request:u32,seen:u64,seen_facts:u32,sections_generation:u32,catalog_generation:u32,sources:[{sid:u16,client:Option<u32>,token_gen:u32,handle:str,state:u32,fetching:bool,seq:u32,retry_bits:u32,retry_n:u32,last:Option<SourceBuild>}],catalog:{items:[PmsMovie],hubs:[{title:str,hub_id:str,key:str,source:str,total:u64,start:u64,len:u64}],heroes:[{idx:u64,source:str}]}}";
+pub const SHAPE: &str = "HubsInitialV1{version:u32,generation:u32,next_request:u32,seen:u64,seen_facts:u32,sections_generation:u32,catalog_generation:u32,sources:[{sid:u16,client:Option<u32>,token_gen:u32,handle:str,state:u32,fetching:bool,seq:u32,retry_bits:u32,retry_n:u32,page:Option<{id:str,key:str,start:u64,before:bool,hidden:[i64]}>,last:Option<SourceBuild>}],catalog:{items:[PmsMovie],hubs:[{title:str,hub_id:str,key:str,source:str,total:u64,start:u64,len:u64,offset:u64,more:bool}],heroes:[{idx:u64,source:str}]}}";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +40,8 @@ struct Source {
     retry_n: u32,
     #[serde(deserialize_with = "required_option")]
     last: Option<SourceBuild>,
+    #[serde(default)]
+    page: Option<PageQuery>,
 }
 
 fn required_option<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
@@ -99,15 +101,23 @@ impl Initial {
         -> Result<(super::PmsState, super::PmsAdapter), &'static str> {
         if !self.validate_boot() { return Err("Home initial state contains work or content"); }
         let state = super::PmsState {
+            ledger: Default::default(),
             published: Some(Arc::new(self.catalog.clone())),
             srcs: Vec::new(),
             seen: self.seen,
             seen_facts: self.seen_facts,
+            seen_clients: ClientKeys::default(),
+            scope_pins: Vec::new(),
             hub_gen: self.generation,
             last_sections_gen: self.sections_generation,
             catalog_gen: self.catalog_generation,
+            fanout: Default::default(),
+            deck_ask: None,
+            hold: (0, super::HOLD_ROWS - 1),
+            staged_gen: 0,
+            publish_memo: None,
+            jobs: Vec::new(),
             extras: super::HomeExtras::default(),
-            watchlist: Default::default(),
         };
         let adapter = super::PmsAdapter {
             next_request: AtomicU32::new(self.next_request),
@@ -119,10 +129,10 @@ impl Initial {
     #[cfg(any(test, feature = "test-support"))]
     pub fn capture(state: &PmsState, adapter: &PmsAdapter) -> Self {
         let sources = state.srcs.iter().map(|s| {
-            let Src { sid, client, token_gen, handle, state, fetching, seq, retry_s, retry_n, last, genres_at_ms: _ } = s;
-            Source { sid: *sid, client: client.map(|c| c.instance_gen()), token_gen: *token_gen,
+            let Src { sid, key, handle, state, fetching, seq, retry_s, retry_n, last, page, deferred: _, abandoned: _, adoptable: _, stalled: _, ledger: _, stamp: _, staged: _, quiet: _, quiet_owed: _, quiet_after: _, quiet_fails: _, copies: _, deck_read: _ } = s;
+            Source { sid: *sid, client: key.map(|k| k.instance), token_gen: key.map_or(0, |k| k.token),
                 handle: handle.clone(), state: match state { HubState::Loading => 0, HubState::Ready => 1, HubState::Failed => 2 },
-                fetching: *fetching, seq: *seq, retry_bits: retry_s.to_bits(), retry_n: *retry_n, last: last.clone() }
+                fetching: *fetching, seq: *seq, retry_bits: retry_s.to_bits(), retry_n: *retry_n, last: last.clone(), page: page.clone() }
         }).collect();
         Self { version: 1, generation: state.hub_gen,
             next_request: adapter.next_request.load(Ordering::Relaxed), seen: state.seen,
@@ -140,11 +150,14 @@ impl Initial {
         for n in [seen_facts, sections_generation, catalog_generation] { w.u32(*n); }
         w.u64(sources.len() as u64);
         for s in sources {
-            let Source { sid, client, token_gen, handle, state, fetching, seq, retry_bits, retry_n, last } = s;
+            let Source { sid, client, token_gen, handle, state, fetching, seq, retry_bits, retry_n, last, page } = s;
             w.u32(sid.raw().into()); w.boolean(client.is_some());
             if let Some(id) = client { w.u32(*id); }
             w.u32(*token_gen); w.text(handle); w.u32(*state); w.boolean(*fetching);
             for n in [seq, retry_bits, retry_n] { w.u32(*n); }
+            w.boolean(page.is_some());
+            if let Some(page) = page { w.text(&page.id); w.text(&page.key); w.u64(page.start as u64); w.boolean(page.before);
+                w.u64(page.hidden.len() as u64); for section in &page.hidden { w.u64(*section as u64); } }
             w.boolean(last.is_some());
             if let Some(last) = last { source_build(last, w); }
         }
@@ -152,9 +165,9 @@ impl Initial {
         movies(items, w);
         w.u64(hubs.len() as u64);
         for h in hubs {
-            let HubRow { title, hub_id, key, source, total, start, len } = h;
+            let HubRow { title, hub_id, key, source, total, start, len, offset, more, epoch: _ } = h;
             for text in [title, hub_id, key, source] { w.text(text); }
-            w.u64(*total as u64); w.u64(*start as u64); w.u64(*len as u64);
+            w.u64(*total as u64); w.u64(*start as u64); w.u64(*len as u64); w.u64(*offset as u64); w.boolean(*more);
         }
         w.u64(heroes.len() as u64);
         for h in heroes { let HeroSlot { idx, source } = h; w.u64(*idx as u64); w.text(source); }
@@ -162,20 +175,21 @@ impl Initial {
 }
 
 fn source_build(b: &SourceBuild, w: &mut impl Sink) {
-    let SourceBuild { cw, shelves, genres, playlists } = b;
+    let SourceBuild { cw, shelves, .. } = b;
     w.u64(cw.len() as u64);
-    for item in cw { let CwItem { last_viewed_at, m } = item; w.u64(*last_viewed_at as u64); movie(m, w); }
+    for item in cw { let CwItem { last_viewed_at, m, .. } = item; w.u64(*last_viewed_at as u64); movie(m, w); }
     w.u64(shelves.len() as u64);
     for shelf in shelves {
-        let Shelf { title, hub_id, key, items, total } = shelf;
+        // `row` is paging state a row only has after a user asked for more; a boot capture has none,
+        // so the canonical encoding (and every recorded hash) stays what it was.
+        let Shelf { title, hub_id, key, items, positions, total, offset, end, more, shown: _, row: _, epoch: _ } = shelf;
         for text in [title, hub_id, key] { w.text(text); }
         movies(items, w);
-        w.u64(*total as u64);
+        w.u64(positions.len() as u64); for position in positions { w.u64(*position as u64); }
+        w.u64(*total as u64); w.u64(*offset as u64); w.u64(*end as u64); w.boolean(*more);
     }
-    w.boolean(genres.is_some());
-    if let Some(genres) = genres { movies(genres, w); }
-    w.boolean(playlists.is_some());
-    if let Some(playlists) = playlists { movies(playlists, w); }
+    // The app's own per-source shelves (genres, playlists) are outside the canonical encoding, as
+    // the caption facts are: every recorded hash stays what it was.
 }
 
 fn movies(items: &[Arc<PmsMovie>], w: &mut impl Sink) {
@@ -186,7 +200,15 @@ fn movies(items: &[Arc<PmsMovie>], w: &mut impl Sink) {
 fn movie(m: &PmsMovie, w: &mut impl Sink) {
     let PmsMovie { sid, sec, title, year, rating, dur_ns, part, thumb, still, art, summary, rk,
         vcodec, acodec, blur, has_blur, kind, resume_ms, show_rk, season_index, show_title,
-        ep_index, unwatched, watched, aired, child_count, guid } = m;
+        ep_index, unwatched, watched, aired, child_count, guid, show_guid,
+        // CONTRACT FREEZE: the caption facts are not in the canonical encoding yet, so every
+        // recorded hash stays what it was. P2 decides whether to hash them (which re-records).
+        subtype: _, smart: _, genre: _, secondary_genre: _, video_resolution: _, hdr: _, dolby_vision: _, audience_rating: _,
+        leaf_count: _, viewed_leaf_count: _, added_at: _,
+        // a listing's versions only feed the item menu's row, which the menu captures at open
+        versions: _, edition: _, sort_info: _,
+        // The logo version is paint state. Keep the canonical hash of existing recordings.
+        logo: _ } = m;
     w.u32(sid.raw().into()); w.u64(*sec as u64); w.text(title); w.u32(*year as u32);
     w.text(rating); w.u64(*dur_ns as u64);
     for text in [part, thumb, still, art, summary, rk, vcodec, acodec] { w.text(text); }
@@ -194,7 +216,10 @@ fn movie(m: &PmsMovie, w: &mut impl Sink) {
     w.boolean(*has_blur); w.u32(*kind as u32); w.u64(*resume_ms as u64); w.text(show_rk);
     w.u32(*season_index as u32); w.text(show_title); w.u32(*ep_index as u32);
     w.boolean(*unwatched); w.boolean(*watched); w.text(aired); w.u64(*child_count as u64);
-    w.text(guid);
+    for id in [guid, show_guid] {
+        w.boolean(id.is_some());
+        for word in id.unwrap_or_default().chunks(4) { w.u32(u32::from_le_bytes([word[0], word[1], word[2], word[3]])); }
+    }
 }
 
 #[cfg(test)]

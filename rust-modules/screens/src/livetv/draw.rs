@@ -57,7 +57,7 @@ pub(super) fn strip_rects(chips: &[Filter], measure: &dyn plx_machine::machine::
 
 /// The channel studio's pill, at the right end of the genre strip.
 pub(super) fn studio_pill_rect(measure: &dyn plx_machine::machine::Measure) -> Rect {
-    let w = TabPill::width_measured(plx_platform::i18n::msg::livetv_studio_title(), CHIP_SZ, measure);
+    let w = TabPill::width_measured(plx_os::i18n::msg::livetv_studio_title(), CHIP_SZ, measure);
     Rect::new(SCR_W - MARGIN_X - w, STRIP_TOP, w, STRIP_H)
 }
 
@@ -100,7 +100,7 @@ impl LiveTvScreen {
     pub(super) fn draw_guide(&self, p: Painter, view: LiveTvView<'_>, focused: bool, measure: &dyn plx_machine::machine::Measure) {
         let lineup = view.lineup();
         if lineup.is_empty() {
-            StatusOverlay::new(guide_frame(), plx_platform::i18n::msg::livetv_empty_c(), StatusKind::Empty)
+            StatusOverlay::new(guide_frame(), plx_os::i18n::msg::livetv_empty_c(), StatusKind::Empty)
                 .draw_measured(&plx_ui::Env::inert(), p, measure);
             return;
         }
@@ -109,7 +109,7 @@ impl LiveTvScreen {
         self.draw_strip(p, focused, measure);
         let rows = Rows::some(lineup, &self.rows);
         if rows.is_empty() {
-            let text = plx_platform::i18n::msg::livetv_filter_empty(&self.filter.label());
+            let text = plx_os::i18n::msg::livetv_filter_empty(&self.filter.label());
             let caption = std::ffi::CString::new(text).unwrap_or_default();
             let frame = Rect::new(MARGIN_X, AXIS_TOP, SCR_W - 2.0 * MARGIN_X, SCR_H - MARGIN_Y - AXIS_TOP);
             StatusOverlay::new(frame, &caption, StatusKind::Empty).draw_measured(&plx_ui::Env::inert(), p, measure);
@@ -161,7 +161,7 @@ impl LiveTvScreen {
                 let cell = Rect::new(CELLS_X, y, CELLS_W, band);
                 let (fill, ink) = if on_row { (theme::ACCENT, theme::ACCENT_INK) } else { (theme::GUIDE_CELL, theme::TEXT_TERTIARY) };
                 p.rect(cell, CELL_RAD, fill, fill, 0.0);
-                line(p, measure, plx_platform::i18n::msg::livetv_no_info(), theme::size::LABEL, ink, false,
+                line(p, measure, plx_os::i18n::msg::livetv_no_info(), theme::size::LABEL, ink, false,
                     Rect::new(cell.x + theme::space::SM, y, cell.w - 2.0 * theme::space::SM, band), HAlign::Left);
             }
         }
@@ -196,7 +196,7 @@ impl LiveTvScreen {
         let text_x = cell.x + theme::space::SM + EDGE_W;
         let text_w = cell.x + cell.w - theme::space::SM - text_x;
         let half = cell.h * 0.5;
-        let title = if a.title.is_empty() { plx_platform::i18n::msg::livetv_no_info() } else { a.title.as_str() };
+        let title = if a.title.is_empty() { plx_os::i18n::msg::livetv_no_info() } else { a.title.as_str() };
         line(p, measure, title, theme::size::LABEL, ink, true,
             Rect::new(text_x, cell.y + theme::space::XS, text_w, half - theme::space::XS), HAlign::Left);
         let sub_text = match filter::Timing::of(a, now) {
@@ -249,7 +249,7 @@ impl LiveTvScreen {
                 .selected(*chip == self.filter)
                 .draw(&plx_ui::Env::inert(), p);
         }
-        let label = std::ffi::CString::new(plx_platform::i18n::msg::livetv_studio_title()).unwrap_or_default();
+        let label = std::ffi::CString::new(plx_os::i18n::msg::livetv_studio_title()).unwrap_or_default();
         TabPill::new(label.as_ptr(), CHIP_SZ, studio_pill_rect(measure))
             .focused(focused && self.on_strip && self.strip_sel == strip_fit(&self.chips, measure))
             .plated()
@@ -283,7 +283,7 @@ impl LiveTvScreen {
                 .draw(p, Rect::new(right - ART_MAX_W, TOP, ART_MAX_W, ART_H), theme::CARD_RING_RAD, measure);
         }
         if self.focus_match(view).is_some() {
-            let hint = KeyHint::translated(plx_platform::i18n::msg::livetv_plex_hint("\u{fffc}"), c"OK");
+            let hint = KeyHint::translated(plx_os::i18n::msg::livetv_plex_hint("\u{fffc}"), c"OK");
             let cy = TOP + ART_H + theme::space::XS + KeyHint::height() * 0.5;
             hint.draw(p, right - hint.width(measure), cy, measure);
         }
@@ -296,13 +296,13 @@ impl LiveTvScreen {
             Rect::new(x, y, INFO_W, cap), HAlign::Left);
         y += cap;
         let title_h = measure.line_h(theme::size::TITLE);
-        let title = airing.map(|a| a.title.as_str()).filter(|t| !t.is_empty()).unwrap_or(plx_platform::i18n::msg::livetv_no_info());
+        let title = airing.map(|a| a.title.as_str()).filter(|t| !t.is_empty()).unwrap_or(plx_os::i18n::msg::livetv_no_info());
         line(p, measure, title, theme::size::TITLE, theme::TEXT_PRIMARY, true, Rect::new(x, y, INFO_W, title_h), HAlign::Left);
         y += title_h;
         let Some(a) = airing else {
             if view.guide_error().is_some() {
                 let body_h = measure.line_h(theme::size::BODY);
-                line(p, measure, plx_platform::i18n::msg::livetv_guide_missing(), theme::size::BODY, theme::TEXT_SECONDARY, false,
+                line(p, measure, plx_os::i18n::msg::livetv_guide_missing(), theme::size::BODY, theme::TEXT_SECONDARY, false,
                     Rect::new(x, y, INFO_W, body_h), HAlign::Left);
             }
             return;
@@ -344,17 +344,17 @@ impl LiveTvScreen {
         let x = MARGIN_X;
         let mut y = TOP + theme::space::MD;
         let title_h = measure.line_h(theme::size::TITLE);
-        line(p, measure, plx_platform::i18n::msg::livetv_setup_title(), theme::size::TITLE, theme::TEXT_PRIMARY, true,
+        line(p, measure, plx_os::i18n::msg::livetv_setup_title(), theme::size::TITLE, theme::TEXT_PRIMARY, true,
             Rect::new(x, y, INFO_W, title_h), HAlign::Left);
         y += title_h + theme::space::SM;
-        let body = TextView::new(plx_platform::i18n::msg::livetv_setup_body(), theme::size::BODY, theme::TEXT_READING).with_measure(measure).max_lines(3);
+        let body = TextView::new(plx_os::i18n::msg::livetv_setup_body(), theme::size::BODY, theme::TEXT_READING).with_measure(measure).max_lines(3);
         let body_h = body.measure_h(1_100.0);
         body.draw(p, Rect::new(x, y, 1_100.0, body_h));
         y += body_h + theme::space::SM;
         let note: Option<String> = if let Status::Failed(_) = view.status() {
-            Some(plx_platform::i18n::msg::livetv_setup_failed(view.source()))
+            Some(plx_os::i18n::msg::livetv_setup_failed(view.source()))
         } else if matches!(view.discovery(), Discovery::Done(found) if found.is_empty()) {
-            Some(plx_platform::i18n::msg::livetv_setup_none_found().to_owned())
+            Some(plx_os::i18n::msg::livetv_setup_none_found().to_owned())
         } else {
             None
         };
@@ -371,15 +371,15 @@ impl LiveTvScreen {
                 Item::Address => self.draw_field(p, r, on, tick_ms, measure),
                 _ => {
                     let text: String = match item {
-                        Item::Search if matches!(view.discovery(), Discovery::Searching) => plx_platform::i18n::msg::livetv_setup_searching().to_owned(),
-                        Item::Search => plx_platform::i18n::msg::livetv_setup_search().to_owned(),
+                        Item::Search if matches!(view.discovery(), Discovery::Searching) => plx_os::i18n::msg::livetv_setup_searching().to_owned(),
+                        Item::Search => plx_os::i18n::msg::livetv_setup_search().to_owned(),
                         Item::Found(k) => match view.discovery() {
                             Discovery::Done(found) => found.get(*k).map(|f| format!("{} \u{b7} {}", f.name, f.origin)).unwrap_or_default(),
                             _ => String::new(),
                         },
-                        Item::Retry => plx_platform::i18n::msg::livetv_setup_retry().to_owned(),
-                        Item::Back => plx_platform::i18n::msg::livetv_setup_back().to_owned(),
-                        Item::TurnOff => plx_platform::i18n::msg::livetv_setup_turn_off().to_owned(),
+                        Item::Retry => plx_os::i18n::msg::livetv_setup_retry().to_owned(),
+                        Item::Back => plx_os::i18n::msg::livetv_setup_back().to_owned(),
+                        Item::TurnOff => plx_os::i18n::msg::livetv_setup_turn_off().to_owned(),
                         Item::Address => unreachable!(),
                     };
                     let fitted = measure.fit_line(&text, FIELD_W - 2.0 * FIELD_PAD, theme::size::BODY, true);
@@ -403,11 +403,11 @@ impl LiveTvScreen {
         let inner = Rect::new(r.x + FIELD_PAD, r.y, r.w - 2.0 * FIELD_PAD, r.h);
         let text = self.address.text();
         if text.is_empty() && !self.editing {
-            line(p, measure, plx_platform::i18n::msg::livetv_setup_address(), theme::size::BODY, theme::CONTROL_IDLE_INK, true, inner, HAlign::Left);
+            line(p, measure, plx_os::i18n::msg::livetv_setup_address(), theme::size::BODY, theme::CONTROL_IDLE_INK, true, inner, HAlign::Left);
             return;
         }
         if text.is_empty() {
-            line(p, measure, plx_platform::i18n::msg::livetv_setup_address_hint(), theme::size::BODY, theme::TEXT_TERTIARY, false, inner, HAlign::Left);
+            line(p, measure, plx_os::i18n::msg::livetv_setup_address_hint(), theme::size::BODY, theme::TEXT_TERTIARY, false, inner, HAlign::Left);
         } else {
             line(p, measure, text, theme::size::BODY, theme::FIELD_EDITING_INK, false, inner, HAlign::Left);
         }

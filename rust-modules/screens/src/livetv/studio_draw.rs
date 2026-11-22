@@ -63,7 +63,7 @@ fn acts_y(yours: bool) -> f32 {
 
 /// A label of the focused card's action row.
 fn act_label(st: &Studio, act: Act, card: &Card<'_>) -> String {
-    use plx_platform::i18n::msg;
+    use plx_os::i18n::msg;
     match act {
         Act::Keep if st.keeping.is_some() => msg::livetv_studio_keeping().to_owned(),
         Act::Keep => msg::livetv_studio_keep().to_owned(),
@@ -157,9 +157,9 @@ impl LiveTvScreen {
         if card.is_none() {
             let v = view.virtuals();
             let (text, kind) = if v.busy() || v.catalog().is_none() {
-                (plx_platform::i18n::msg::livetv_studio_loading(), StatusKind::Working)
+                (plx_os::i18n::msg::livetv_studio_loading(), StatusKind::Working)
             } else {
-                (plx_platform::i18n::msg::livetv_studio_empty(), StatusKind::Empty)
+                (plx_os::i18n::msg::livetv_studio_empty(), StatusKind::Empty)
             };
             let caption = std::ffi::CString::new(text).unwrap_or_default();
             // placeholder-exempt: builds the value only; counted where drawn (StatusOverlay)
@@ -173,7 +173,8 @@ impl LiveTvScreen {
         if t != 0 && th > 0.0 {
             p.tex_uv(t, Rect::FULL.cover_uv(tw, th, Crop::Centre), Rect::FULL, 0.0, [1.0, 1.0, 1.0, ART_A]);
         }
-        plx_ui::widgets::hero_scrim(p, 1.0, false);
+        // The copy's side of the picture, darkened from the left edge (the billboard's own wedge).
+        p.grad4(Rect::new(0.0, 0.0, SCR_W * 0.62, SCR_H), [theme::scrim(0.82), theme::scrim(0.0), theme::scrim(0.0), theme::scrim(0.82)]);
         let ramp_top = acts_y(yours) - theme::space::LG;
         let clear = theme::scrim(0.0);
         let deep = theme::scrim(0.88);
@@ -195,9 +196,9 @@ impl LiveTvScreen {
             }
             let y = cards_y(row, yours);
             let heading = if row == ROW_SUGGESTED {
-                plx_platform::i18n::msg::livetv_studio_suggested()
+                plx_os::i18n::msg::livetv_studio_suggested()
             } else {
-                plx_platform::i18n::msg::livetv_studio_yours()
+                plx_os::i18n::msg::livetv_studio_yours()
             };
             line(p, measure, heading, theme::size::HEADLINE, theme::TEXT_PRIMARY, true,
                 Rect::new(MARGIN_X, y - ROW_LABEL_H - theme::space::XS, COPY_W, ROW_LABEL_H), HAlign::Left);
@@ -218,7 +219,7 @@ impl LiveTvScreen {
 
     /// The billboard's copy: what the card is, its name, why, what it holds, and its preview.
     fn draw_copy(&self, p: Painter, view: LiveTvView<'_>, card: &Card<'_>, schedule: Option<&Schedule>, now: i64, measure: &dyn plx_machine::machine::Measure) {
-        use plx_platform::i18n::msg;
+        use plx_os::i18n::msg;
         let x = MARGIN_X;
         let mut y = COPY_TOP;
         let (over, name, why, facts): (String, &str, &str, String) = match card {
@@ -317,9 +318,9 @@ impl LiveTvScreen {
         let name: &str = match card {
             Card::Idea(s) => &s.name,
             Card::Surprise(Some(s)) => &s.name,
-            Card::Surprise(None) => plx_platform::i18n::msg::livetv_studio_surprise(),
+            Card::Surprise(None) => plx_os::i18n::msg::livetv_studio_surprise(),
             Card::Channel(c) => &c.recipe.name,
-            Card::Create => plx_platform::i18n::msg::livetv_studio_new_channel(),
+            Card::Create => plx_os::i18n::msg::livetv_studio_new_channel(),
         };
         let pad = theme::space::SM;
         let lh = measure.line_h(theme::size::LABEL);

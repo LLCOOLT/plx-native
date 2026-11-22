@@ -93,10 +93,10 @@ fn timing_says_minutes_left_now_and_starts_in_within_the_hour() {
     assert_eq!(Timing::of(&a, T0 - 25 * MIN), Timing::StartsIn(25 * MIN));
     assert_eq!(Timing::of(&a, T0 - 61 * MIN), Timing::Quiet, "beyond the hour the start time says it");
     assert_eq!(Timing::of(&a, T0 + 30 * MIN), Timing::Quiet, "over");
-    let _en = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
-    assert_eq!(Timing::Left(12 * MIN - 1).text().as_deref(), Some("12 min left"), "rounded up");
-    assert_eq!(Timing::StartsIn(30_000).text().as_deref(), Some("Starts in 1 min"), "never in 0 min");
-    assert_eq!(Timing::StartsIn(25 * MIN).text().as_deref(), Some("Starts in 25 min"));
+    let _en = plx_os::i18n::language_on_this_thread_for_test(plx_os::i18n::Preference::En);
+    assert_eq!(Timing::Left(12 * MIN - 1).text().as_deref(), Some("12m left"), "rounded up");
+    assert_eq!(Timing::StartsIn(30_000).text().as_deref(), Some("Starts in 1m"), "never in 0 min");
+    assert_eq!(Timing::StartsIn(25 * MIN).text().as_deref(), Some("Starts in 25m"));
     assert_eq!(Timing::Quiet.text(), None);
 }
 

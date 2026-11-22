@@ -1,5 +1,6 @@
-//! Home's own shelves ([`HomeExtras`] and each source's genre rows): where the merge places them,
-//! what it keeps off them, and that they never disturb the server shelves' accounting.
+//! Home's own shelves ([`HomeExtras`] and each source's genre and playlist rows): where the merge
+//! places them, what it keeps off them, and that the ring and the deck never mistake them for a
+//! server's.
 
 use super::*;
 #[allow(unused_imports)]
@@ -19,6 +20,7 @@ fn keys(items: &[Arc<PmsMovie>], hub: &HubRow) -> Vec<String> {
 
 fn with_genres(mut b: SourceBuild, slot: u16, rks: &[&str]) -> SourceBuild {
     b.genres = Some(rks.iter().map(|r| row(slot, r)).collect());
+    b.genres_at_ms = Some(5);
     b
 }
 
@@ -26,9 +28,9 @@ fn with_genres(mut b: SourceBuild, slot: u16, rks: &[&str]) -> SourceBuild {
 fn the_app_shelves_follow_the_deck_in_a_fixed_order() {
     let srcs = [src(0, "", HubState::Ready, Some(with_genres(
         built(0, &[(9, "cw")], vec![shelf(0, "Recent", "home.movies.recent", &["r1"])]), 0, &["g1"])))];
-    let extras = HomeExtras { on_now: vec![channel("12")], watchlist: vec![row(0, "w1")], ..Default::default() };
+    let extras = HomeExtras { on_now: vec![channel("12")], ..Default::default() };
     let (_, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone(), &extras);
-    assert_eq!(ids(&hubs), ["home.continue", WATCHLIST_HUB, ON_NOW_HUB, GENRES_HUB, "home.movies.recent"]);
+    assert_eq!(ids(&hubs), ["home.continue", ON_NOW_HUB, GENRES_HUB, "home.movies.recent"]);
     assert!(hubs.iter().all(|h| h.source.is_empty()), "an app shelf credits nobody");
 }
 
@@ -36,7 +38,7 @@ fn the_app_shelves_follow_the_deck_in_a_fixed_order() {
 fn suggested_channels_follow_on_now_and_are_never_dropped_as_unpinned() {
     let srcs = [src(0, "", HubState::Ready, Some(built(0, &[], vec![shelf(0, "Recent", "home.movies.recent", &["r1"])])))];
     let idea = Arc::new(PmsMovie { sid: ServerId::UNSET, kind: KIND_CHANNEL_IDEA, rk: "genre:comedy".into(), title: "Comedy".into(), ..Default::default() });
-    let extras = HomeExtras { on_now: vec![channel("12")], channels: vec![idea], ..Default::default() };
+    let extras = HomeExtras { on_now: vec![channel("12")], channels: vec![idea] };
     let (cat, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone(), &extras);
     assert_eq!(ids(&hubs), [ON_NOW_HUB, CHANNELS_HUB, "home.movies.recent"]);
     assert_eq!(keys(&cat, &hubs[1]), ["genre:comedy"]);
@@ -54,11 +56,10 @@ fn an_empty_app_shelf_draws_no_heading() {
 fn the_genre_shelf_shows_only_what_no_other_shelf_does() {
     let srcs = [src(0, "", HubState::Ready, Some(with_genres(
         built(0, &[(9, "cw")], vec![shelf(0, "Recent", "home.movies.recent", &["r1"])]),
-        0, &["cw", "r1", "w1", "fresh"])))];
-    let extras = HomeExtras { on_now: Vec::new(), watchlist: vec![row(0, "w1")], ..Default::default() };
-    let (items, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone(), &extras);
+        0, &["cw", "r1", "fresh"])))];
+    let (items, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone(), &HomeExtras::default());
     let genres = hubs.iter().find(|h| h.hub_id == GENRES_HUB).expect("the genre shelf");
-    assert_eq!(keys(&items, genres), ["fresh"], "the deck, the watchlist and the server shelves already show the rest");
+    assert_eq!(keys(&items, genres), ["fresh"], "the deck and the server shelves already show the rest");
 }
 
 #[test]
@@ -73,11 +74,14 @@ fn the_genre_shelf_takes_turns_between_sources() {
 
 #[test]
 fn an_unpinned_librarys_titles_stay_off_the_app_shelves_but_channels_do_not() {
-    let srcs: [Src; 0] = [];
-    let mut w = (*row(0, "w1")).clone();
-    w.sec = 3;
-    let extras = HomeExtras { on_now: vec![channel("5")], watchlist: vec![Arc::new(w)], ..Default::default() };
-    let scope = BrowseScope { sections_gen: 0, pins: vec![(sid(0), 3, false)] };
+    let mut g = (*row(0, "g1")).clone();
+    g.sec = 3;
+    let mut b = built(0, &[], Vec::new());
+    b.genres = Some(vec![Arc::new(g)]);
+    let srcs = [src(0, "", HubState::Ready, Some(b))];
+    let extras = HomeExtras { on_now: vec![channel("5")], ..Default::default() };
+    let pins = [(sid(0), 3, false)];
+    let scope = BrowseScope { sections_gen: 0, pins: &pins, clients: std::borrow::Cow::Owned(registry_keys_for_test()) };
     let (_, hubs, _) = merge_with_scope(&srcs, &scope, &extras);
     assert_eq!(ids(&hubs), [ON_NOW_HUB], "a channel belongs to no library");
 }
@@ -86,21 +90,26 @@ fn an_unpinned_librarys_titles_stay_off_the_app_shelves_but_channels_do_not() {
 fn an_app_shelf_keeps_one_identity_whichever_server_leads_it() {
     let srcs: [Src; 0] = [];
     for lead in [0, 1] {
-        let extras = HomeExtras { on_now: Vec::new(), watchlist: vec![row(lead, "w"), row(1 - lead, "v")], ..Default::default() };
+        let card = |slot: u16, rk: &str| Arc::new(PmsMovie { sid: sid(slot), kind: KIND_CHANNEL, rk: rk.into(), ..Default::default() });
+        let extras = HomeExtras { on_now: vec![card(lead, "w"), card(1 - lead, "v")], ..Default::default() };
         let (items, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone(), &extras);
         assert_eq!(
             stable_hub_identity(&hubs[0], &items),
-            Some(HubIdentity::Identifier { sid: ServerId::UNSET, id: WATCHLIST_HUB, key: "" }),
+            Some(HubIdentity::Identifier { sid: ServerId::UNSET, id: ON_NOW_HUB, key: "" }),
         );
     }
 }
 
+/// The ring counts every row before the servers' as leading, so the app shelves sit inside it
+/// and are never given up to a descriptor.
 #[test]
-fn the_app_shelves_are_never_counted_as_left_off_by_the_card_bound() {
+fn the_ring_reads_the_app_shelves_as_leading_rows() {
     let srcs = [src(0, "", HubState::Ready, Some(built(0, &[(1, "cw")], vec![shelf(0, "Recent", "home.movies.recent", &["r1"])])))];
-    let extras = HomeExtras { on_now: vec![channel("1"), channel("2")], watchlist: vec![row(0, "w1")], ..Default::default() };
-    let build = merge_with_scope(&srcs, &BrowseScope::standalone(), &extras);
-    assert_eq!(bound_overflow(&srcs, &BrowseScope::standalone(), &build), (0, 0));
+    let extras = HomeExtras { on_now: vec![channel("1"), channel("2")], ..Default::default() };
+    let (_, hubs, _) = merge_with_scope(&srcs, &BrowseScope::standalone(), &extras);
+    let order = published_order(&srcs, &[]);
+    assert_eq!(hubs.len() - order.len(), 2, "the deck and On Now lead the server shelves");
+    assert_eq!(hubs[2].hub_id, "home.movies.recent");
 }
 
 #[test]
@@ -110,80 +119,26 @@ fn an_unchanged_on_now_shelf_does_not_republish_home() {
     seed(&mut owner.state, vec![src(0, "", HubState::Ready, Some(built(0, &[], Vec::new())))]);
     let card = |title: &str| PmsMovie { kind: KIND_CHANNEL, rk: "4".into(), title: title.into(), ..Default::default() };
     let scope = BrowseScope::standalone();
-    assert!(set_on_now(&mut owner.state, vec![card("news")], &scope), "a new shelf publishes");
+    fn on_now(e: &mut HomeExtras) -> &mut Vec<Arc<PmsMovie>> { &mut e.on_now }
+    assert!(set_extra(&mut owner.state, &scope, vec![card("news")], on_now), "a new shelf publishes");
     let gen = owner.state.catalog_gen;
-    assert!(!set_on_now(&mut owner.state, vec![card("news")], &scope), "the same cards again: nothing to publish");
+    assert!(!set_extra(&mut owner.state, &scope, vec![card("news")], on_now), "the same cards again: nothing to publish");
     assert_eq!(owner.state.catalog_gen, gen);
-    assert!(set_on_now(&mut owner.state, vec![card("film")], &scope), "the programme changed");
-    assert_eq!(hub_title(&owner.state, 0), plx_platform::i18n::msg::browse_home_on_now());
-    assert!(set_on_now(&mut owner.state, Vec::new(), &scope));
+    assert!(set_extra(&mut owner.state, &scope, vec![card("film")], on_now), "the programme changed");
+    assert_eq!(hub_title(&owner.state, 0), plx_os::i18n::msg::browse_home_on_now());
+    assert!(set_extra(&mut owner.state, &scope, Vec::new(), on_now));
     assert_eq!(hub_count(&owner.state), 0, "Live TV turned off: the shelf goes");
-}
-
-fn copy(rk: &str, guid: &str) -> PmsMovie {
-    PmsMovie { guid: guid.into(), ..(*row(0, rk)).clone() }
-}
-
-#[test]
-fn a_watchlist_landing_publishes_the_shelf_and_the_membership() {
-    let _g = plx_base::testlock::serial();
-    let mut owner = Owner::default();
-    seed(&mut owner.state, vec![src(0, "", HubState::Ready, Some(built(0, &[], Vec::new())))]);
-    assert_eq!(hubs_snapshot(&owner.state).view().on_watchlist("plex://movie/a"), None, "unknown until read");
-    *owner.adapter.watchlist.lock().unwrap() = Some(crate::watchlist::Landing {
-        gen: owner.state.watchlist.gen,
-        build: Some(crate::watchlist::Build {
-            members: crate::watchlist::Membership::new(["plex://movie/a".to_owned(), "plex://movie/z".to_owned()]),
-            rows: vec![copy("1", "plex://movie/a")],
-        }),
-    });
-    pump(&mut owner.state, &owner.adapter, 0.0);
-    assert_eq!(hub_title(&owner.state, 0), plx_platform::i18n::msg::browse_home_watchlist());
-    let snap = hubs_snapshot(&owner.state);
-    assert_eq!(snap.view().on_watchlist("plex://movie/z"), Some(true), "a title no library holds is still on the list");
-    assert_eq!(snap.view().on_watchlist("plex://movie/q"), Some(false));
-}
-
-#[test]
-fn a_landing_from_before_a_profile_switch_is_dropped() {
-    let _g = plx_base::testlock::serial();
-    let mut owner = Owner::default();
-    let stale = owner.state.watchlist.gen;
-    reset(&mut owner.state, &owner.adapter);
-    *owner.adapter.watchlist.lock().unwrap() = Some(crate::watchlist::Landing {
-        gen: stale,
-        build: Some(crate::watchlist::Build { members: Default::default(), rows: vec![copy("1", "plex://movie/a")] }),
-    });
-    assert!(!land_watchlist(&mut owner.state, &owner.adapter));
-    assert!(owner.state.extras.watchlist.is_empty());
-}
-
-#[test]
-fn an_edit_moves_the_shelf_and_the_membership_at_once() {
-    let _g = plx_base::testlock::serial();
-    let mut owner = Owner::default();
-    seed(&mut owner.state, vec![src(0, "", HubState::Ready, Some(built(0, &[], Vec::new())))]);
-    owner.state.watchlist.members = Some(Arc::new(crate::watchlist::Membership::new(["plex://movie/a".to_owned()])));
-    owner.state.extras.watchlist = vec![Arc::new(copy("1", "plex://movie/a"))];
-    let scope = BrowseScope::standalone();
-    assert!(edit_watchlist(&mut owner.state, &owner.adapter, "plex://movie/b", true, vec![copy("2", "")], &scope));
-    assert_eq!(rks(&owner.state, 0), ["2", "1"], "the added title leads the shelf");
-    assert_eq!(hubs_snapshot(&owner.state).view().on_watchlist("plex://movie/b"), Some(true));
-    assert!(edit_watchlist(&mut owner.state, &owner.adapter, "plex://movie/a", false, Vec::new(), &scope));
-    assert_eq!(rks(&owner.state, 0), ["2"]);
-    assert_eq!(hubs_snapshot(&owner.state).view().on_watchlist("plex://movie/a"), Some(false));
-    assert!(!edit_watchlist(&mut owner.state, &owner.adapter, "local://9", true, Vec::new(), &scope), "not a catalog title");
 }
 
 #[test]
 fn a_fetch_that_did_not_build_the_genre_shelf_keeps_the_last_one() {
     let mut s = src(0, "", HubState::Ready, None);
     landed_ok(&mut s, with_genres(built(0, &[], Vec::new()), 0, &["g1"]));
-    let built_at = s.genres_at_ms.expect("the shelf was built");
     landed_ok(&mut s, built(0, &[], Vec::new()));
-    let kept: Vec<_> = s.last.as_ref().unwrap().genres.as_ref().unwrap().iter().map(|m| m.rk.clone()).collect();
+    let last = s.last.as_ref().unwrap();
+    let kept: Vec<_> = last.genres.as_ref().unwrap().iter().map(|m| m.rk.clone()).collect();
     assert_eq!(kept, ["g1"], "a plain refresh keeps the genre rows");
-    assert_eq!(s.genres_at_ms, Some(built_at), "and the shelf's own clock");
+    assert_eq!(last.genres_at_ms, Some(5), "and the shelf's own clock");
     landed_ok(&mut s, with_genres(built(0, &[], Vec::new()), 0, &[]));
     assert!(s.last.as_ref().unwrap().genres.as_ref().unwrap().is_empty(), "a rebuilt empty shelf replaces it");
 }

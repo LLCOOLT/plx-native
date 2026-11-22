@@ -232,7 +232,7 @@ pub fn rating_name(rank: u8) -> &'static str {
 
 /// An option's label for `recipe`.
 pub fn edit_label(item: EditItem, recipe: &Recipe) -> String {
-    use plx_platform::i18n::msg;
+    use plx_os::i18n::msg;
     match item {
         EditItem::Kinds => match recipe.rules.kinds {
             Kinds::Both => msg::livetv_studio_kinds_both(),
@@ -253,7 +253,7 @@ pub fn edit_label(item: EditItem, recipe: &Recipe) -> String {
 /// What a channel holds, as the billboard reads it once its options changed: "12 films · 3 shows
 /// · 40 hours", the empty parts left out.
 pub fn estimate_line(e: &Estimate) -> String {
-    use plx_platform::i18n::msg;
+    use plx_os::i18n::msg;
     let mut parts = Vec::new();
     if e.films > 0 {
         parts.push(msg::browse_person_films(e.films as i64));
@@ -287,7 +287,7 @@ pub fn next_style(s: Style) -> Style {
 
 /// A style's name, as the Order button reads it.
 pub fn style_name(s: Style) -> &'static str {
-    use plx_platform::i18n::msg;
+    use plx_os::i18n::msg;
     match s {
         Style::Random => msg::livetv_studio_style_random(),
         Style::RoundRobin => msg::livetv_studio_style_rotation(),
@@ -459,7 +459,7 @@ impl Studio {
     fn start_new(&mut self, view: LiveTvView<'_>, wall_ms: i64) {
         let rules = plx_data::vchannel::recipe::Rules::default();
         let name = plx_data::vchannel::recipe::name_for(&rules);
-        let why = plx_platform::i18n::msg::livetv_studio_made_library().to_owned();
+        let why = plx_os::i18n::msg::livetv_studio_made_library().to_owned();
         let recipe = Recipe { rules, ..Recipe::made(plx_data::vchannel::recipe::Source::Library, &name, &why, wall_ms) };
         self.open_make(recipe, why, view);
         let id = self.made.as_ref().map(|m| m.id.clone()).unwrap_or_default();
@@ -613,14 +613,14 @@ impl Studio {
                         self.keeping_made = false;
                     }
                     let number = v.channel(playlist).map(|c| c.number()).unwrap_or_default();
-                    self.toast = Some((plx_platform::i18n::msg::livetv_studio_kept(&number), now_ms));
+                    self.toast = Some((plx_os::i18n::msg::livetv_studio_kept(&number), now_ms));
                     self.want = Some(format!("pl:{playlist}"));
                     self.zone = Zone::Cards;
                     changed = true;
                 }
                 WriteDone::Failed { token } if self.keeping == Some(*token) || *token == 0 => {
                     self.keeping = None;
-                    self.toast = Some((plx_platform::i18n::msg::livetv_studio_failed().to_owned(), now_ms));
+                    self.toast = Some((plx_os::i18n::msg::livetv_studio_failed().to_owned(), now_ms));
                     changed = true;
                 }
                 _ => {}

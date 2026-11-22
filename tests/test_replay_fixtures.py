@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import re
 import tempfile
 import threading
 import time
@@ -14,6 +15,150 @@ from unittest import mock
 spec = importlib.util.spec_from_file_location('replay_fixtures', Path(__file__).with_name('replay_fixtures.py'))
 replay = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(replay)
+
+
+class ExpectedRefusalTests(unittest.TestCase):
+    def test_exact_early_refusal_is_a_distinct_typed_outcome(self):
+        line = 'replay: REFUSED — ' + replay.HISTORICAL_OWNER_REFUSAL
+        self.assertEqual(replay.verdict(line, 1, (7, 5), replay.HISTORICAL_OWNER_REFUSAL),
+                         'REFUSED_EXPECTED exit=1 reason=' + replay.HISTORICAL_OWNER_REFUSAL)
+        for log, code in [('', 1), (line, 0), (line, -11), (line, 2),
+                          (line.replace('V13', 'V12'), 1),
+                          (line + '\nreplay: done verdict=SAME', 1),
+                          ('replay: frame f=0\n' + line, 1),
+                          ('video driver: offscreen\n' + line, 1),
+                          ('bootstrap: captured\n' + line, 1),
+                          ('discover: base=stand-in\n' + line, 1),
+                          ('plex.tv: boot\n' + line, 1), (line + '\n' + line, 1),
+                          ('replay: REFUSED — invalid or incompatible recording', 1)]:
+            with self.subTest(log=log, code=code), self.assertRaises(ValueError):
+                replay.verdict(log, code, (7, 5), replay.HISTORICAL_OWNER_REFUSAL)
+        for refusal in [None, 'arbitrary unsupported profile']:
+            with self.assertRaises(ValueError):
+                replay.verdict(line, 1, (7, 5), refusal)
+
+    def test_committed_census_requires_eight_historical_refusals_and_four_current_same(self):
+        root = Path(__file__).resolve().parent / 'fixtures/replay'
+        fixtures = replay.discover(root)
+        historical = [p for p in fixtures if replay.expected_refusal(p) is not None]
+        current = [p for p in fixtures if replay.expected_refusal(p) is None]
+        self.assertEqual(len(historical), 4)
+        self.assertEqual(len(current), 2)
+        self.assertCountEqual([replay.expected_counts(p) for p in historical],
+                              [(266, 266), (621, 621), (2287, 2287), (457, 457)])
+        # the v13 anchor and the by-id anchor, each re-recorded onto the `Id` resolution row's shape
+        # (docs/ui-replay-v13-anchor.md)
+        self.assertEqual({p.name: replay.expected_counts(p) for p in current},
+                         {'v13-owned-input-content': (922, 922), '13-by-id-filmography': (1209, 1209)})
+        for fixture in current:
+            counts = replay.expected_counts(fixture)
+            manifest = json.loads((fixture / 'manifest.json').read_text())
+            self.assertIs(manifest.get('anchor'), True)
+            self.assertNotIn((manifest['schema'], manifest['state_fp']),
+                             {(p['schema'], p['state_fp']) for p in replay.HISTORICAL_PROFILES})
+            self.assertEqual({mode for path, mode in replay.replay_order(fixtures) if path == fixture},
+                             {'targets', 'resolve'})
+            summary = (f'replay: done frames={counts[0]} graded={counts[1]} ' +
+                       ' '.join(field + '=0' for field in replay.DIFFS) + ' verdict=SAME')
+            self.assertEqual(replay.verdict(summary, 0, counts), summary)
+            with self.assertRaises(ValueError):
+                replay.verdict('replay: REFUSED — ' + replay.HISTORICAL_OWNER_REFUSAL, 1, counts)
+
+    def test_policy_authenticates_raw_bytes_not_directory_names_or_only_fingerprints(self):
+        root = Path(__file__).resolve().parent / 'fixtures/replay/1-boot-home-chip-grid'
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = Path(temp)
+            manifest = fixture / 'manifest.json'
+            segment = fixture / 'rec-0000.jsonl'
+            original_manifest = (root / manifest.name).read_bytes()
+            original_segment = (root / segment.name).read_bytes()
+            manifest.write_bytes(original_manifest)
+            segment.write_bytes(original_segment)
+            self.assertEqual(replay.expected_refusal(fixture), replay.HISTORICAL_OWNER_REFUSAL)
+            header = json.loads(original_manifest)
+            for fp in [12345, 741022075462080307, 999999999999999999]:
+                header['state_fp'] = fp
+                manifest.write_text(json.dumps(header))
+                self.assertIsNone(replay.expected_refusal(fixture))
+            header = json.loads(original_manifest)
+            header['unexpected'] = True
+            for mutated in [json.dumps(header).encode(), original_manifest + b' ']:
+                manifest.write_bytes(mutated)
+                self.assertIsNone(replay.expected_refusal(fixture))
+            manifest.write_bytes(original_manifest)
+            segment.write_bytes(original_segment + b'\n')
+            with self.assertRaises(ValueError):
+                replay.expected_refusal(fixture)
+            for malformed in [b'{bad}', original_segment[:len(original_segment)//2],
+                              b'{"t":"eff","t":"log","e":"App","payload":{}}']:
+                segment.write_bytes(malformed)
+                with self.assertRaises(ValueError):
+                    replay.expected_refusal(fixture)
+            segment.write_bytes(b'x' * (replay.POLICY_MAX_LINE_BYTES + 1))
+            with self.assertRaises(ValueError):
+                replay.expected_refusal(fixture)
+
+
+
+class ReplayCallerTests(unittest.TestCase):
+    def test_actual_driver_preserves_status_stderr_and_separately_counts_expected_refusals(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fixture = root / 'renamed-not-a-whitelist'
+            fixture.mkdir()
+            (fixture / 'manifest.json').write_text(json.dumps({'schema': 3, 'state_fp': 4239819007634745513}))
+            rows = [{'f': 0, 't': 'tick'}, {'f': 0, 't': 'st', 'hash': 1},
+                    {'f': 0, 't': 'eff', 'e': 'App', 'payload': {'content': None}}]
+            (fixture / 'rec-0000.jsonl').write_text('\n'.join(map(json.dumps, rows)))
+            output = root / 'evidence'
+            output.mkdir()
+            line = 'replay: REFUSED — ' + replay.HISTORICAL_OWNER_REFUSAL
+
+            def process(command, **kwargs):
+                self.assertFalse(any(key.startswith('GIT_') for key in kwargs['env']))
+                runtime = Path(kwargs['env']['PLXNATIVE_RUNTIME_DIR'])
+                (runtime / 'plxnative-events.log').write_text(replay.SIM_BANNER + '\n' + line, encoding='utf-8')
+                return mock.Mock(returncode=1)
+
+            with mock.patch.dict(replay.os.environ, {'GIT_DIR': 'hostile', 'GIT_CUSTOM': 'hostile'}), \
+                    mock.patch.object(replay, 'expected_refusal', return_value=replay.HISTORICAL_OWNER_REFUSAL), \
+                    mock.patch.object(replay.subprocess, 'run', side_effect=process):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    results = replay.run_all(root / 'sim', root, [fixture], output, 5, 1)
+            self.assertEqual((len(results), results.same, results.refused_expected), (0, 0, 2))
+            self.assertEqual(out.getvalue().count('REFUSED_EXPECTED exit=1'), 2)
+            for runtime in output.iterdir():
+                self.assertEqual(json.loads((runtime / 'process.json').read_text())['exit'], 1)
+                self.assertTrue((runtime / 'sim.out').exists())
+
+    def test_early_log_cannot_hide_late_boot_or_crash_on_stderr(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / 'output'
+            output.mkdir()
+            for stderr in [b'frame executed\n', b'video driver: offscreen\n', b'bootstrap: captured\n',
+                           b'discover: base=stand-in\n', b'plex.tv: boot\n', b'Segmentation fault\n']:
+                def process(command, **kwargs):
+                    runtime = Path(kwargs['env']['PLXNATIVE_RUNTIME_DIR'])
+                    (runtime / 'plxnative-events.log').write_text(
+                        'replay: REFUSED — ' + replay.HISTORICAL_OWNER_REFUSAL, encoding='utf-8')
+                    kwargs['stdout'].write(stderr)
+                    return mock.Mock(returncode=1)
+                with self.subTest(stderr=stderr), \
+                        mock.patch.object(replay, 'expected_refusal', return_value=replay.HISTORICAL_OWNER_REFUSAL), \
+                        mock.patch.object(replay.subprocess, 'run', side_effect=process), \
+                        self.assertRaisesRegex(ValueError, 'unexpected output'):
+                    replay.run_fixture(root / 'sim', root, root, 'targets', output, 5)
+
+    def test_real_ci_and_make_call_the_same_typed_gate_without_an_allow_switch(self):
+        root = Path(__file__).resolve().parents[1]
+        make = (root / 'Makefile').read_text()
+        workflow = (root / '.github/workflows/simulators.yml').read_text()
+        self.assertIn('python3 tests/replay_fixtures.py --sim', make)
+        self.assertIn('python3 tests/replay_fixtures.py', workflow)
+        self.assertIn('**/sim.out', workflow)
+        self.assertIn('**/process.json', workflow)
 
 
 class ReplayGateTests(unittest.TestCase):
@@ -174,6 +319,119 @@ class ParallelRunTests(unittest.TestCase):
             self.assertEqual(runtimes, ['solo-resolve', 'solo-targets'])
             for path in outputs.iterdir():
                 self.assertIn(path.name.split('-')[1], (path / 'plxnative-recplay').read_text())
+
+
+class OutputFolderTests(unittest.TestCase):
+    """The evidence folder `main` makes for itself: gone after a clean run, kept and named after a
+    failing one, and a folder the caller passed in is never `main`'s to remove."""
+
+    def main(self, scratch, failures, *argv):
+        """Run `main` against a fake `run_all` that writes one evidence file into the output
+        folder, with `scratch/tmp` as the temp directory; returns (exit status, stdout)."""
+        tmp = scratch / 'tmp'
+        tmp.mkdir(exist_ok=True)
+
+        def run_all(binary, assets, fixtures, output, *rest):
+            (output / 'evidence.log').write_text('one replay')
+            return failures
+
+        out = io.StringIO()
+        with mock.patch.object(replay.tempfile, 'tempdir', str(tmp)), \
+                mock.patch.object(replay, 'discover', return_value=[]), \
+                mock.patch.object(replay, 'run_all', run_all), \
+                mock.patch.object(replay.sys, 'argv', ['replay_fixtures.py', '--sim', 'sim', *argv]), \
+                contextlib.redirect_stdout(out):
+            failed = replay.main()
+        return failed, out.getvalue()
+
+    def test_a_folder_main_made_is_removed_when_every_replay_passed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            failed, out = self.main(Path(temp), [])
+            self.assertFalse(failed)
+            self.assertEqual(list((Path(temp) / 'tmp').iterdir()), [])
+            self.assertNotIn('evidence', out)
+
+    def test_a_folder_main_made_is_kept_and_named_when_a_replay_failed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            failed, out = self.main(Path(temp), [ValueError('a/targets: diverged')])
+            self.assertTrue(failed)
+            (kept,) = (Path(temp) / 'tmp').iterdir()
+            self.assertTrue(kept.name.startswith('plxnative-replay-gate-'))
+            self.assertEqual((kept / 'evidence.log').read_text(), 'one replay')
+            self.assertIn(f'evidence {kept}', out)
+
+    def test_a_folder_the_caller_named_is_never_removed(self):
+        for failures in ([], [ValueError('a/targets: diverged')]):
+            with self.subTest(failures=len(failures)), tempfile.TemporaryDirectory() as temp:
+                named = Path(temp) / 'mine'
+                failed, out = self.main(Path(temp), failures, '--output', str(named))
+                self.assertEqual(failed, bool(failures))
+                self.assertEqual((named / 'evidence.log').read_text(), 'one replay')
+                self.assertEqual(list((Path(temp) / 'tmp').iterdir()), [])
+                self.assertIn(f'evidence {named}', out)
+
+
+class WindowTests(unittest.TestCase):
+    """The replay window: full size by default, chosen by the driver, strictly validated."""
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def test_the_default_is_the_full_canvas_and_flag_beats_environment(self):
+        self.assertEqual(replay.DEFAULT_WINDOW, '1920x1080')
+        self.assertEqual(replay.resolve_window(None, {}), '1920x1080')
+        self.assertEqual(replay.resolve_window(None, {replay.WINDOW_ENV: ''}), '1920x1080')
+        self.assertEqual(replay.resolve_window(None, {replay.WINDOW_ENV: '960x540'}), '960x540')
+        self.assertEqual(replay.resolve_window('480x270', {replay.WINDOW_ENV: '960x540'}), '480x270')
+
+    def test_malformed_or_off_canvas_windows_are_refused_with_the_source_named(self):
+        for bad in ('', '960', '960x', 'x540', '960X540', '960 x 540', ' 960x540', '960x540 ',
+                    '960,540', '0x0', '960x0', '-960x-540', '+960x540', '0960x540', '9.6e2x540',
+                    '960x540x2', 'wide', '1920x1081', '960x1080', '1000x540', '15360x8640'):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    replay.parse_window(bad)
+                with self.assertRaisesRegex(ValueError, '^--window: '):
+                    replay.resolve_window(bad, {})
+                if bad:  # an empty variable means "unset", by design
+                    with self.assertRaisesRegex(ValueError, f'^{replay.WINDOW_ENV}: '):
+                        replay.resolve_window(None, {replay.WINDOW_ENV: bad})
+        for good in ('1920x1080', '960x540', '640x360', '480x270', '3840x2160'):
+            self.assertEqual(replay.parse_window(good), good)
+
+    def test_the_window_reaches_the_simulators_environment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'fixture').mkdir()
+            (root / 'sim.sh').write_text('#!/bin/sh\nprintf "%s" "$PLXNATIVE_WIN" > "$PLXNATIVE_RUNTIME_DIR/win"\n'
+                                         'exit 1\n')
+            (root / 'sim.sh').chmod(0o755)
+            fixture = root / 'fixture'
+            (fixture / 'manifest.json').write_text('{}')
+            (fixture / 'rec-0000.jsonl').write_text('\n'.join(map(json.dumps, [
+                {'f': 0, 't': 'tick'}, {'f': 0, 't': 'st', 'hash': 1}])))
+            seen = {}
+            for label, kwargs in (('default', {}), ('small', {'window': '960x540'})):
+                out = root / label
+                out.mkdir()
+                with mock.patch.object(replay.sys, 'platform', 'linux'):
+                    with self.assertRaises(ValueError):  # the fake simulator prints no summary
+                        replay.run_fixture(root / 'sim.sh', root, fixture, 'targets', out, 5, **kwargs)
+                (runtime,) = out.iterdir()
+                seen[label] = (runtime / 'win').read_text()
+            self.assertEqual(seen, {'default': '1920x1080', 'small': '960x540'})
+
+    def test_the_macos_replay_step_passes_a_window_the_driver_accepts(self):
+        text = (self.ROOT / '.github/workflows/simulators.yml').read_text()
+        job = re.search(r'(?m)^  macos:\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*$)', text, re.S).group(1)
+        step = re.search(r'(?m)^      - name: Replay all committed product recordings\n(.*?)(?=^      - name: )',
+                         job, re.S).group(1)
+        command = ' '.join(line for line in step.splitlines() if not line.lstrip().startswith('#'))
+        windows = re.findall(r'--window\s+(\S+)', command)
+        self.assertEqual(len(windows), 1, command)
+        self.assertEqual(replay.parse_window(windows[0]), windows[0])
+        # The launch step keeps its own full-size window, so CI still opens a 1080p one.
+        self.assertIn('Launch and capture 1080p frame', job)
+        self.assertNotIn('--window', job.split('Launch and capture 1080p frame')[1])
 
 
 if __name__ == '__main__':
